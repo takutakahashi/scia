@@ -13,7 +13,9 @@ import (
 
 	"github.com/takutakahashi/scia/internal/approval"
 	"github.com/takutakahashi/scia/internal/config"
+	"github.com/takutakahashi/scia/internal/oauth"
 	"github.com/takutakahashi/scia/internal/proxy"
+	"github.com/takutakahashi/scia/internal/secrets"
 )
 
 var (
@@ -50,7 +52,14 @@ func main() {
 	}
 
 	approvals := approval.NewManager(store.Get().Server.ApprovalTimeout.Duration)
-	handler, err := proxy.NewHandler(store, approvals, logger)
+	secretStore, err := secrets.NewSQLiteStore(ctx, store.Get().Server.Secrets.SQLitePath)
+	if err != nil {
+		logger.Error("failed to initialize secret store", "error", err)
+		os.Exit(1)
+	}
+	defer secretStore.Close()
+
+	handler, err := proxy.NewHandler(store, secretStore, approvals, logger)
 	if err != nil {
 		logger.Error("failed to initialize proxy", "error", err)
 		os.Exit(1)
@@ -60,11 +69,21 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	oauthServer := oauth.NewServer(store, secretStore, logger)
+	oauthHTTPServer := &http.Server{
+		Addr:              oauthServer.ListenAddr(),
+		Handler:           oauthServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		logger.Info("proxy listening", "addr", listenAddr)
 		errCh <- server.ListenAndServe()
+	}()
+	go func() {
+		logger.Info("oauth server listening", "addr", oauthHTTPServer.Addr, "url", oauth.NormalizeListenForDisplay(oauthHTTPServer.Addr))
+		errCh <- oauthHTTPServer.ListenAndServe()
 	}()
 
 	select {
@@ -80,6 +99,10 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
+		os.Exit(1)
+	}
+	if err := oauthHTTPServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("oauth graceful shutdown failed", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("stopped scia")

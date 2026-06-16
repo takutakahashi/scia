@@ -7,7 +7,7 @@ SaaS credential injector for agents.
 ## Features
 
 - Forward proxy for HTTP and HTTPS requests with credential injection.
-- Credential types: bearer token, basic auth, static header, and OAuth2 client credentials.
+- Credential types: bearer token, basic auth, static header, OAuth2 client credentials, and Google OAuth refresh tokens.
 - Policy rules by host, method, and path with `allow`, `deny`, or `approval` actions.
 - Blocking approval flow exposed through local admin endpoints.
 - Reloadable configuration through a provider interface. The first adapter is YAML from the filesystem; database and AWS Secrets Manager providers can be added behind the same `config.Provider` interface.
@@ -56,11 +56,56 @@ Admin endpoints:
 
 If `server.adminToken` is set, admin requests must include `Authorization: Bearer <token>`. Config values with the `env:` prefix are read from environment variables.
 
+The OAuth helper UI runs on a separate port, `server.oauth.listen` (`127.0.0.1:8081` by default). Configure the Google OAuth client redirect URI to match `server.oauth.redirectUrl`, for example:
+
+```yaml
+server:
+  oauth:
+    listen: "127.0.0.1:8081"
+    redirectUrl: "http://localhost:8081/oauth/google/callback"
+```
+
+Open `http://localhost:8081/` to start Google authorization for configured Google credentials.
+
+OAuth callback refresh tokens are stored in the SQLite secret store by default:
+
+```yaml
+server:
+  secrets:
+    sqlitePath: "data/scia-secrets.db"
+```
+
+The SQLite file stores values by credential ID and key. For Google credentials, callback stores `refresh_token`; request-time injection reads `params.refresh_token` first and falls back to the secret store.
+
+The SQLite store is local persistence, not encryption. Keep the database path on a protected volume and restrict filesystem access to the `scia` process.
+
 ## Configuration
 
 See [configs/example.yaml](configs/example.yaml).
 
 Rules are evaluated in order. If no rule matches, the request is allowed without credential injection.
+
+Google OAuth client credentials can be configured with a pre-issued refresh token:
+
+```yaml
+credentials:
+  - id: google-calendar
+    type: google-oauth-refresh-token
+    params:
+      client_id: "env:GOOGLE_OAUTH_CLIENT_ID"
+      client_secret: "env:GOOGLE_OAUTH_CLIENT_SECRET"
+      refresh_token: "env:GOOGLE_OAUTH_REFRESH_TOKEN"
+      scope: "https://www.googleapis.com/auth/calendar"
+
+rules:
+  - name: inject-google-calendar-token
+    hosts: ["www.googleapis.com"]
+    paths: ["/calendar/v3/*"]
+    action: allow
+    credentials: ["google-calendar"]
+```
+
+`scia` exchanges the refresh token at `https://oauth2.googleapis.com/token`, caches the returned access token until it is close to expiry, and injects it as `Authorization: Bearer <access_token>` only for matching rules.
 
 ## Build
 
