@@ -5,6 +5,8 @@ server:
   mitm:
     caCertPath: "data/scia-ca.pem"
     caKeyPath: "data/scia-ca-key.pem"
+  backendProxy:
+    url: "env:SCIA_BACKEND_PROXY_URL"
 
 credentials:
   - id: github-token
