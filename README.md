@@ -63,6 +63,11 @@ server:
   oauth:
     listen: "127.0.0.1:8081"
     redirectUrl: "http://localhost:8081/oauth/google/callback"
+    google:
+      credentialId: google-calendar
+      clientId: "env:GOOGLE_OAUTH_CLIENT_ID"
+      clientSecret: "env:GOOGLE_OAUTH_CLIENT_SECRET"
+      scope: "https://www.googleapis.com/auth/calendar"
 ```
 
 Open `http://localhost:8081/` to start Google authorization for configured Google credentials.
@@ -85,17 +90,21 @@ See [configs/example.yaml](configs/example.yaml).
 
 Rules are evaluated in order. If no rule matches, the request is allowed without credential injection.
 
-Google OAuth client credentials can be configured with a pre-issued refresh token:
+Google OAuth client credentials can be configured once under `server.oauth.google`. The OAuth helper UI stores the resulting refresh token in SQLite under `credentialId`, and rules can reference that credential ID:
 
 ```yaml
+server:
+  oauth:
+    google:
+      credentialId: google-calendar
+      clientId: "env:GOOGLE_OAUTH_CLIENT_ID"
+      clientSecret: "env:GOOGLE_OAUTH_CLIENT_SECRET"
+      scope: "https://www.googleapis.com/auth/calendar"
+
 credentials:
   - id: google-calendar
     type: google-oauth-refresh-token
-    params:
-      client_id: "env:GOOGLE_OAUTH_CLIENT_ID"
-      client_secret: "env:GOOGLE_OAUTH_CLIENT_SECRET"
-      refresh_token: "env:GOOGLE_OAUTH_REFRESH_TOKEN"
-      scope: "https://www.googleapis.com/auth/calendar"
+    params: {}
 
 rules:
   - name: inject-google-calendar-token
@@ -105,7 +114,7 @@ rules:
     credentials: ["google-calendar"]
 ```
 
-`scia` exchanges the refresh token at `https://oauth2.googleapis.com/token`, caches the returned access token until it is close to expiry, and injects it as `Authorization: Bearer <access_token>` only for matching rules.
+The `credentials` entry is optional when `server.oauth.google.credentialId` is configured; it is useful when you want to override per-credential params such as `scope`, `token_url`, or `refresh_token`. `scia` exchanges the refresh token at `https://oauth2.googleapis.com/token`, caches the returned access token until it is close to expiry, and injects it as `Authorization: Bearer <access_token>` only for matching rules.
 
 ## Build
 

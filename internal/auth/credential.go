@@ -36,14 +36,14 @@ func (i *Injector) Apply(ctx context.Context, r *http.Request, cfg *config.Confi
 		if !ok {
 			return fmt.Errorf("credential %q not found", id)
 		}
-		if err := i.applyOne(ctx, r, cred); err != nil {
+		if err := i.applyOne(ctx, r, cfg, cred); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (i *Injector) applyOne(ctx context.Context, r *http.Request, cred config.CredentialConfig) error {
+func (i *Injector) applyOne(ctx context.Context, r *http.Request, cfg *config.Config, cred config.CredentialConfig) error {
 	switch cred.Type {
 	case "bearer":
 		token := config.HeaderValueFromEnv(cred.Value)
@@ -64,7 +64,7 @@ func (i *Injector) applyOne(ctx context.Context, r *http.Request, cred config.Cr
 		}
 		r.Header.Set("Authorization", "Bearer "+token)
 	case "google-oauth-refresh-token":
-		token, err := i.googleRefreshToken(ctx, cred)
+		token, err := i.googleRefreshToken(ctx, cfg, cred)
 		if err != nil {
 			return err
 		}
@@ -138,7 +138,7 @@ func (i *Injector) clientCredentialsToken(ctx context.Context, cred config.Crede
 	return body.AccessToken, nil
 }
 
-func (i *Injector) googleRefreshToken(ctx context.Context, cred config.CredentialConfig) (string, error) {
+func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
 	if value, ok := i.cache.Load(cred.ID); ok {
 		token := value.(cachedToken)
 		if time.Until(token.expiresAt) > 30*time.Second {
@@ -148,10 +148,19 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cred config.Credentia
 
 	tokenURL := cred.Params["token_url"]
 	if tokenURL == "" {
+		tokenURL = cfg.Server.OAuth.Google.TokenURL
+	}
+	if tokenURL == "" {
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
 	clientID := config.HeaderValueFromEnv(cred.Params["client_id"])
+	if clientID == "" {
+		clientID = config.HeaderValueFromEnv(cfg.Server.OAuth.Google.ClientID)
+	}
 	clientSecret := config.HeaderValueFromEnv(cred.Params["client_secret"])
+	if clientSecret == "" {
+		clientSecret = config.HeaderValueFromEnv(cfg.Server.OAuth.Google.ClientSecret)
+	}
 	refreshToken, err := i.secretValue(ctx, cred, "refresh_token")
 	if err != nil {
 		return "", err
