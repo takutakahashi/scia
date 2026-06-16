@@ -21,6 +21,18 @@ func TestEvaluateFirstMatchingRule(t *testing.T) {
 	}
 }
 
+func TestEvaluateTrailingWildcardMatchesNestedPath(t *testing.T) {
+	cfg := &config.Config{Rules: []config.RuleConfig{
+		{Name: "inject-calendar", Hosts: []string{"www.googleapis.com"}, Methods: []string{"GET"}, Paths: []string{"/calendar/v3/*"}, Action: "allow", Credentials: []string{"google-calendar"}},
+	}}
+	req := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/calendar/v3/users/me/calendarList"}}
+
+	decision := Evaluate(cfg, req, "www.googleapis.com")
+	if len(decision.Credentials) != 1 || decision.Credentials[0] != "google-calendar" {
+		t.Fatalf("unexpected decision: %#v", decision)
+	}
+}
+
 func TestEvaluateDefaultsToAllow(t *testing.T) {
 	req := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/v1/items"}}
 

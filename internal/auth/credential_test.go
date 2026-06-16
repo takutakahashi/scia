@@ -113,6 +113,64 @@ func TestGoogleRefreshTokenUsesSecretStore(t *testing.T) {
 	}
 }
 
+func TestGoogleRefreshTokenUsesConfigGoogleClient(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "client_id", "config-client-id")
+		assertFormValue(t, r, "client_secret", "config-client-secret")
+		assertFormValue(t, r, "refresh_token", "stored-refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "config-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "google-calendar", "refresh_token", "stored-refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "config-client-id",
+					ClientSecret: "config-client-secret",
+					TokenURL:     tokenEndpoint.URL,
+				},
+			},
+		},
+		Rules: []config.RuleConfig{
+			{
+				Name:        "google-calendar",
+				Hosts:       []string{"www.googleapis.com"},
+				Paths:       []string{"/calendar/v3/*"},
+				Action:      "allow",
+				Credentials: []string{"google-calendar"},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://www.googleapis.com/calendar/v3/users/me/calendarList", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewInjector(secretStore).Apply(context.Background(), req, cfg, []string{"google-calendar"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer config-access-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+}
+
 func assertFormValue(t *testing.T, r *http.Request, key, want string) {
 	t.Helper()
 	if got := r.Form.Get(key); got != want {

@@ -90,8 +90,17 @@ type BackendProxyConfig struct {
 }
 
 type OAuthConfig struct {
-	Listen      string `yaml:"listen"`
-	RedirectURL string `yaml:"redirectUrl"`
+	Listen      string            `yaml:"listen"`
+	RedirectURL string            `yaml:"redirectUrl"`
+	Google      GoogleOAuthConfig `yaml:"google"`
+}
+
+type GoogleOAuthConfig struct {
+	CredentialID string `yaml:"credentialId"`
+	ClientID     string `yaml:"clientId"`
+	ClientSecret string `yaml:"clientSecret"`
+	Scope        string `yaml:"scope"`
+	TokenURL     string `yaml:"tokenUrl"`
 }
 
 type SecretsConfig struct {
@@ -176,6 +185,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("credential %q requires header", cred.ID)
 		}
 	}
+	if c.Server.OAuth.Google.ClientID != "" && c.Server.OAuth.Google.ClientSecret != "" {
+		seenCreds[c.GoogleOAuthCredentialID()] = struct{}{}
+	}
 	for i, rule := range c.Rules {
 		if rule.Name == "" {
 			return fmt.Errorf("rules[%d].name is required", i)
@@ -200,7 +212,17 @@ func CredentialByID(cfg *Config, id string) (CredentialConfig, bool) {
 			return cred, true
 		}
 	}
+	if cfg.Server.OAuth.Google.ClientID != "" && cfg.Server.OAuth.Google.ClientSecret != "" && id == cfg.GoogleOAuthCredentialID() {
+		return CredentialConfig{ID: id, Type: "google-oauth-refresh-token", Params: map[string]string{}}, true
+	}
 	return CredentialConfig{}, false
+}
+
+func (c *Config) GoogleOAuthCredentialID() string {
+	if c.Server.OAuth.Google.CredentialID != "" {
+		return c.Server.OAuth.Google.CredentialID
+	}
+	return "google"
 }
 
 func CloneRequestWithoutProxyHeaders(r *http.Request) *http.Request {

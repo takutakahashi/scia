@@ -34,6 +34,12 @@ type stateInfo struct {
 	CreatedAt    time.Time
 }
 
+type googleOption struct {
+	CredentialID string
+	Scope        string
+	Source       string
+}
+
 func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logger) *Server {
 	if secretStore == nil {
 		secretStore = secrets.NoopStore{}
@@ -66,27 +72,28 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	creds := googleCredentials(s.store.Get())
+	options := s.googleOptions(s.store.Get())
 	data := struct {
-		Credentials []config.CredentialConfig
-	}{Credentials: creds}
+		Options []googleOption
+	}{Options: options}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = indexTemplate.Execute(w, data)
 }
 
 func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 	credentialID := r.URL.Query().Get("credential")
-	cred, ok := config.CredentialByID(s.store.Get(), credentialID)
-	if !ok || cred.Type != "google-oauth-refresh-token" {
+	cfg := s.store.Get()
+	cred, ok := s.googleCredential(cfg, credentialID)
+	if !ok {
 		http.Error(w, "unknown google credential", http.StatusBadRequest)
 		return
 	}
-	clientID := config.HeaderValueFromEnv(cred.Params["client_id"])
+	clientID := googleClientID(cfg, cred)
 	if clientID == "" {
 		http.Error(w, "credential is missing client_id", http.StatusBadRequest)
 		return
 	}
-	scope := cred.Params["scope"]
+	scope := googleScope(cfg, cred)
 	if scope == "" {
 		scope = "openid email profile"
 	}
@@ -128,7 +135,8 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
-	cred, ok := config.CredentialByID(s.store.Get(), info.CredentialID)
+	cfg := s.store.Get()
+	cred, ok := s.googleCredential(cfg, info.CredentialID)
 	if !ok {
 		http.Error(w, "credential disappeared", http.StatusBadRequest)
 		return
@@ -171,15 +179,19 @@ type tokenResponse struct {
 }
 
 func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.CredentialConfig, code string) (tokenResponse, error) {
+	cfg := s.store.Get()
 	tokenURL := cred.Params["token_url"]
+	if tokenURL == "" {
+		tokenURL = cfg.Server.OAuth.Google.TokenURL
+	}
 	if tokenURL == "" {
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("client_id", config.HeaderValueFromEnv(cred.Params["client_id"]))
-	form.Set("client_secret", config.HeaderValueFromEnv(cred.Params["client_secret"]))
+	form.Set("client_id", googleClientID(cfg, cred))
+	form.Set("client_secret", googleClientSecret(cfg, cred))
 	form.Set("redirect_uri", s.redirectURL(r))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -221,14 +233,63 @@ func (s *Server) redirectURL(r *http.Request) string {
 	return "http://" + host + "/oauth/google/callback"
 }
 
-func googleCredentials(cfg *config.Config) []config.CredentialConfig {
-	var creds []config.CredentialConfig
+func (s *Server) googleOptions(cfg *config.Config) []googleOption {
+	var options []googleOption
+	configID := cfg.GoogleOAuthCredentialID()
+	hasConfigClient := googleClientID(cfg, config.CredentialConfig{}) != "" && googleClientSecret(cfg, config.CredentialConfig{}) != ""
+	hasExplicitConfigCredential := false
 	for _, cred := range cfg.Credentials {
-		if cred.Type == "google-oauth-refresh-token" {
-			creds = append(creds, cred)
+		if cred.Type == "google-oauth-refresh-token" && cred.ID == configID {
+			hasExplicitConfigCredential = true
+			break
 		}
 	}
-	return creds
+	if hasConfigClient && !hasExplicitConfigCredential {
+		options = append(options, googleOption{
+			CredentialID: configID,
+			Scope:        googleScope(cfg, config.CredentialConfig{}),
+			Source:       "server.oauth.google",
+		})
+	}
+	for _, cred := range cfg.Credentials {
+		if cred.Type == "google-oauth-refresh-token" {
+			options = append(options, googleOption{
+				CredentialID: cred.ID,
+				Scope:        googleScope(cfg, cred),
+				Source:       "credentials",
+			})
+		}
+	}
+	return options
+}
+
+func (s *Server) googleCredential(cfg *config.Config, credentialID string) (config.CredentialConfig, bool) {
+	cred, ok := config.CredentialByID(cfg, credentialID)
+	if !ok || cred.Type != "google-oauth-refresh-token" {
+		return config.CredentialConfig{}, false
+	}
+	return cred, true
+}
+
+func googleClientID(cfg *config.Config, cred config.CredentialConfig) string {
+	if value := config.HeaderValueFromEnv(cred.Params["client_id"]); value != "" {
+		return value
+	}
+	return config.HeaderValueFromEnv(cfg.Server.OAuth.Google.ClientID)
+}
+
+func googleClientSecret(cfg *config.Config, cred config.CredentialConfig) string {
+	if value := config.HeaderValueFromEnv(cred.Params["client_secret"]); value != "" {
+		return value
+	}
+	return config.HeaderValueFromEnv(cfg.Server.OAuth.Google.ClientSecret)
+}
+
+func googleScope(cfg *config.Config, cred config.CredentialConfig) string {
+	if cred.Params["scope"] != "" {
+		return cred.Params["scope"]
+	}
+	return cfg.Server.OAuth.Google.Scope
 }
 
 func randomState() (string, error) {
@@ -270,16 +331,17 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
 </head>
 <body>
   <h1>scia OAuth</h1>
-  {{if .Credentials}}
-    {{range .Credentials}}
+  {{if .Options}}
+    {{range .Options}}
       <div class="item">
-        <div><strong>{{.ID}}</strong></div>
-        <p class="muted"><code>{{.Params.scope}}</code></p>
-        <a class="button" href="/oauth/google/start?credential={{.ID}}">Authorize with Google</a>
+        <div><strong>{{.CredentialID}}</strong></div>
+        <p class="muted"><code>{{.Scope}}</code></p>
+        <p class="muted">{{.Source}}</p>
+        <a class="button" href="/oauth/google/start?credential={{.CredentialID}}">Authorize with Google</a>
       </div>
     {{end}}
   {{else}}
-    <p class="muted">No <code>google-oauth-refresh-token</code> credentials are configured.</p>
+    <p class="muted">No Google OAuth client is configured.</p>
   {{end}}
 </body>
 </html>`))

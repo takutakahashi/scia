@@ -75,5 +75,8 @@ func matchOne(pattern, value string) bool {
 	if err == nil && matched {
 		return true
 	}
+	if strings.HasSuffix(pattern, "/*") && strings.HasPrefix(value, strings.TrimSuffix(pattern, "*")) {
+		return true
+	}
 	return pattern == value
 }
