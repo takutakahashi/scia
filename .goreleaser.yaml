@@ -1,0 +1,65 @@
+version: 2
+
+project_name: scia
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: scia
+    main: ./cmd/scia
+    binary: scia
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .Commit }} -X main.date={{ .Date }}
+
+dockers:
+  - image_templates:
+      - ghcr.io/takutakahashi/scia:{{ .Version }}-amd64
+    use: buildx
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - --platform=linux/amd64
+      - --build-arg=VERSION={{ .Version }}
+      - --build-arg=COMMIT={{ .Commit }}
+      - --build-arg=DATE={{ .Date }}
+  - image_templates:
+      - ghcr.io/takutakahashi/scia:{{ .Version }}-arm64
+    use: buildx
+    goos: linux
+    goarch: arm64
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - --platform=linux/arm64
+      - --build-arg=VERSION={{ .Version }}
+      - --build-arg=COMMIT={{ .Commit }}
+      - --build-arg=DATE={{ .Date }}
+
+docker_manifests:
+  - name_template: ghcr.io/takutakahashi/scia:{{ .Version }}
+    image_templates:
+      - ghcr.io/takutakahashi/scia:{{ .Version }}-amd64
+      - ghcr.io/takutakahashi/scia:{{ .Version }}-arm64
+  - name_template: ghcr.io/takutakahashi/scia:latest
+    image_templates:
+      - ghcr.io/takutakahashi/scia:{{ .Version }}-amd64
+      - ghcr.io/takutakahashi/scia:{{ .Version }}-arm64
+
+archives:
+  - formats: [tar.gz]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

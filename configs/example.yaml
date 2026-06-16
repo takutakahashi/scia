@@ -1,0 +1,43 @@
+server:
+  listen: ":8080"
+  adminToken: "env:SCIA_ADMIN_TOKEN"
+  approvalTimeout: "5m"
+  mitm:
+    caCertPath: "data/scia-ca.pem"
+    caKeyPath: "data/scia-ca-key.pem"
+
+credentials:
+  - id: github-token
+    type: bearer
+    value: "env:GITHUB_TOKEN"
+  - id: api-key
+    type: static-header
+    header: X-API-Key
+    value: "env:UPSTREAM_API_KEY"
+  - id: shared-oauth-client
+    type: oauth2-client-credentials
+    params:
+      token_url: "https://issuer.example.com/oauth/token"
+      client_id: "env:OAUTH_CLIENT_ID"
+      client_secret: "env:OAUTH_CLIENT_SECRET"
+      scope: "read:items write:items"
+
+rules:
+  - name: deny-dangerous-admin-api
+    hosts: ["api.example.com"]
+    methods: ["DELETE"]
+    paths: ["/admin/*"]
+    action: deny
+  - name: approve-writes
+    hosts: ["api.example.com"]
+    methods: ["POST", "PUT", "PATCH"]
+    paths: ["/v1/*"]
+    action: approval
+    credentials: ["shared-oauth-client"]
+    approvalNote: "Write access to api.example.com requires operator approval."
+  - name: inject-read-token
+    hosts: ["api.example.com"]
+    methods: ["GET"]
+    paths: ["/v1/*"]
+    action: allow
+    credentials: ["github-token"]
