@@ -2,6 +2,9 @@ server:
   listen: ":8080"
   adminToken: "env:SCIA_ADMIN_TOKEN"
   approvalTimeout: "5m"
+  mitm:
+    caCertPath: "data/scia-ca.pem"
+    caKeyPath: "data/scia-ca-key.pem"
 
 credentials:
   - id: github-token

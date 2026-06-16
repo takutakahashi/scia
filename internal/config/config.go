@@ -71,9 +71,15 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen          string   `yaml:"listen"`
-	AdminToken      string   `yaml:"adminToken"`
-	ApprovalTimeout Duration `yaml:"approvalTimeout"`
+	Listen          string     `yaml:"listen"`
+	AdminToken      string     `yaml:"adminToken"`
+	ApprovalTimeout Duration   `yaml:"approvalTimeout"`
+	MITM            MITMConfig `yaml:"mitm"`
+}
+
+type MITMConfig struct {
+	CACertPath string `yaml:"caCertPath"`
+	CAKeyPath  string `yaml:"caKeyPath"`
 }
 
 type CredentialConfig struct {
@@ -114,6 +120,12 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 func (c *Config) Validate() error {
 	if c.Server.ApprovalTimeout.Duration == 0 {
 		c.Server.ApprovalTimeout.Duration = 5 * time.Minute
+	}
+	if c.Server.MITM.CACertPath == "" {
+		c.Server.MITM.CACertPath = "data/scia-ca.pem"
+	}
+	if c.Server.MITM.CAKeyPath == "" {
+		c.Server.MITM.CAKeyPath = "data/scia-ca-key.pem"
 	}
 	seenCreds := map[string]struct{}{}
 	for i, cred := range c.Credentials {

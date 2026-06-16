@@ -6,16 +6,24 @@ SaaS credential injector for agents.
 
 ## Features
 
-- Forward proxy for HTTP requests with credential injection.
+- Forward proxy for HTTP and HTTPS requests with credential injection.
 - Credential types: bearer token, basic auth, static header, and OAuth2 client credentials.
 - Policy rules by host, method, and path with `allow`, `deny`, or `approval` actions.
 - Blocking approval flow exposed through local admin endpoints.
 - Reloadable configuration through a provider interface. The first adapter is YAML from the filesystem; database and AWS Secrets Manager providers can be added behind the same `config.Provider` interface.
 - Container image and GitHub Actions release flow managed by semantic version tags.
 
-## HTTPS limitation
+## HTTPS interception
 
-For standard HTTPS forward proxy traffic, clients use `CONNECT`, and the proxy only sees the destination host. `scia` can allow, deny, or require approval for `CONNECT` by host, but it cannot inspect paths or inject headers inside the encrypted tunnel without becoming a TLS-intercepting proxy. Header injection applies to HTTP absolute-form requests handled by the proxy.
+For HTTPS forward proxy traffic, clients use `CONNECT`. `scia` handles `CONNECT` by default with local TLS interception: it creates or loads a local CA, dynamically signs a leaf certificate for the requested host, terminates TLS from the agent, applies path/method/header policy and credential injection, then opens a new HTTPS request to the upstream.
+
+Agents must trust the scia CA certificate. The current CA is available at:
+
+- `GET /_scia/ca.pem`
+
+By default the CA files are stored at `data/scia-ca.pem` and `data/scia-ca-key.pem`. Override these with `server.mitm.caCertPath` and `server.mitm.caKeyPath`.
+
+Clients that pin upstream certificates may reject intercepted HTTPS connections. Prefer trusting the scia CA only inside the agent runtime, not system-wide on an operator machine.
 
 ## Run locally
 
@@ -28,6 +36,7 @@ Configure an HTTP client to use `http://127.0.0.1:8080` as its proxy.
 Admin endpoints:
 
 - `GET /_scia/healthz`
+- `GET /_scia/ca.pem`
 - `GET /_scia/approvals`
 - `POST /_scia/approvals/{id}/approve`
 - `POST /_scia/approvals/{id}/deny`

@@ -50,7 +50,11 @@ func main() {
 	}
 
 	approvals := approval.NewManager(store.Get().Server.ApprovalTimeout.Duration)
-	handler := proxy.NewHandler(store, approvals, logger)
+	handler, err := proxy.NewHandler(store, approvals, logger)
+	if err != nil {
+		logger.Error("failed to initialize proxy", "error", err)
+		os.Exit(1)
+	}
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           handler,
