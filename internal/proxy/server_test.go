@@ -146,6 +146,58 @@ rules:
 	}
 }
 
+func TestForwardProxyUsesConfiguredBackendProxy(t *testing.T) {
+	var called atomic.Bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		if !r.URL.IsAbs() {
+			t.Fatalf("backend proxy expected absolute-form URL, got %q", r.URL.String())
+		}
+		if got := r.URL.Host; got != "api.example.test" {
+			t.Fatalf("unexpected target host: %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer backend-token" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+server:
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  backendProxy:
+    url: "%s"
+credentials:
+  - id: backend-token
+    type: bearer
+    value: backend-token
+rules:
+  - name: inject-through-backend
+    hosts: ["api.example.test"]
+    methods: ["GET"]
+    paths: ["/v1/items"]
+    action: allow
+    credentials: ["backend-token"]
+`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem"), backend.URL))
+	defer proxyServer.Close()
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get("http://api.example.test/v1/items")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if !called.Load() {
+		t.Fatal("backend proxy was not called")
+	}
+}
+
 func newTestProxy(t *testing.T, cfg string) *httptest.Server {
 	server, _ := newTestProxyWithPath(t, cfg)
 	return server

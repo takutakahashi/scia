@@ -11,6 +11,7 @@ SaaS credential injector for agents.
 - Policy rules by host, method, and path with `allow`, `deny`, or `approval` actions.
 - Blocking approval flow exposed through local admin endpoints.
 - Reloadable configuration through a provider interface. The first adapter is YAML from the filesystem; database and AWS Secrets Manager providers can be added behind the same `config.Provider` interface.
+- Optional backend proxy chaining for outbound traffic from `scia` to upstream services.
 - Container image and GitHub Actions release flow managed by semantic version tags.
 
 ## HTTPS interception
@@ -24,6 +25,18 @@ Agents must trust the scia CA certificate. The current CA is available at:
 By default the CA files are stored at `data/scia-ca.pem` and `data/scia-ca-key.pem`. Override these with `server.mitm.caCertPath` and `server.mitm.caKeyPath`.
 
 Clients that pin upstream certificates may reject intercepted HTTPS connections. Prefer trusting the scia CA only inside the agent runtime, not system-wide on an operator machine.
+
+## Backend proxy chaining
+
+Set `server.backendProxy.url` to route outbound requests from `scia` through another proxy:
+
+```yaml
+server:
+  backendProxy:
+    url: "http://proxy.internal:3128"
+```
+
+Values with the `env:` prefix are expanded, so `env:SCIA_BACKEND_PROXY_URL` can be used for deployment-specific proxy URLs. The backend proxy is applied after policy evaluation and credential injection, including HTTPS requests that `scia` intercepts from client `CONNECT` traffic.
 
 ## Run locally
 

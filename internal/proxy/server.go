@@ -39,7 +39,7 @@ func NewHandler(store *config.Store, approvals *approval.Manager, logger *slog.L
 	if err != nil {
 		return nil, err
 	}
-	return &Handler{
+	handler := &Handler{
 		store:    store,
 		approval: approvals,
 		injector: auth.NewInjector(),
@@ -52,7 +52,9 @@ func NewHandler(store *config.Store, approvals *approval.Manager, logger *slog.L
 		ca:         ca,
 		caCertPath: cfg.Server.MITM.CACertPath,
 		caKeyPath:  cfg.Server.MITM.CAKeyPath,
-	}, nil
+	}
+	handler.transport.Proxy = handler.backendProxy
+	return handler, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -302,6 +304,14 @@ func (h *Handler) currentCA(cfg *config.Config) (*certificateAuthority, error) {
 	h.caCertPath = cfg.Server.MITM.CACertPath
 	h.caKeyPath = cfg.Server.MITM.CAKeyPath
 	return ca, nil
+}
+
+func (h *Handler) backendProxy(r *http.Request) (*url.URL, error) {
+	raw := config.HeaderValueFromEnv(h.store.Get().Server.BackendProxy.URL)
+	if raw == "" {
+		return nil, nil
+	}
+	return url.Parse(raw)
 }
 
 func stripPort(host string) string {

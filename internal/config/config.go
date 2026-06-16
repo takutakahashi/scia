@@ -71,15 +71,20 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen          string     `yaml:"listen"`
-	AdminToken      string     `yaml:"adminToken"`
-	ApprovalTimeout Duration   `yaml:"approvalTimeout"`
-	MITM            MITMConfig `yaml:"mitm"`
+	Listen          string             `yaml:"listen"`
+	AdminToken      string             `yaml:"adminToken"`
+	ApprovalTimeout Duration           `yaml:"approvalTimeout"`
+	MITM            MITMConfig         `yaml:"mitm"`
+	BackendProxy    BackendProxyConfig `yaml:"backendProxy"`
 }
 
 type MITMConfig struct {
 	CACertPath string `yaml:"caCertPath"`
 	CAKeyPath  string `yaml:"caKeyPath"`
+}
+
+type BackendProxyConfig struct {
+	URL string `yaml:"url"`
 }
 
 type CredentialConfig struct {
@@ -126,6 +131,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.MITM.CAKeyPath == "" {
 		c.Server.MITM.CAKeyPath = "data/scia-ca-key.pem"
+	}
+	if rawBackendProxyURL := HeaderValueFromEnv(c.Server.BackendProxy.URL); rawBackendProxyURL != "" {
+		parsed, err := url.Parse(rawBackendProxyURL)
+		if err != nil {
+			return fmt.Errorf("server.backendProxy.url is invalid: %w", err)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return fmt.Errorf("server.backendProxy.url must use http or https scheme")
+		}
+		if parsed.Host == "" {
+			return fmt.Errorf("server.backendProxy.url must include a host")
+		}
 	}
 	seenCreds := map[string]struct{}{}
 	for i, cred := range c.Credentials {
