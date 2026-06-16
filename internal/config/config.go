@@ -76,6 +76,7 @@ type ServerConfig struct {
 	ApprovalTimeout Duration           `yaml:"approvalTimeout"`
 	MITM            MITMConfig         `yaml:"mitm"`
 	BackendProxy    BackendProxyConfig `yaml:"backendProxy"`
+	OAuth           OAuthConfig        `yaml:"oauth"`
 }
 
 type MITMConfig struct {
@@ -85,6 +86,11 @@ type MITMConfig struct {
 
 type BackendProxyConfig struct {
 	URL string `yaml:"url"`
+}
+
+type OAuthConfig struct {
+	Listen      string `yaml:"listen"`
+	RedirectURL string `yaml:"redirectUrl"`
 }
 
 type CredentialConfig struct {
@@ -154,7 +160,7 @@ func (c *Config) Validate() error {
 		}
 		seenCreds[cred.ID] = struct{}{}
 		switch cred.Type {
-		case "bearer", "basic", "static-header", "oauth2-client-credentials":
+		case "bearer", "basic", "static-header", "oauth2-client-credentials", "google-oauth-refresh-token":
 		default:
 			return fmt.Errorf("credential %q has unsupported type %q", cred.ID, cred.Type)
 		}

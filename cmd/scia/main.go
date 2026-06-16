@@ -13,6 +13,7 @@ import (
 
 	"github.com/takutakahashi/scia/internal/approval"
 	"github.com/takutakahashi/scia/internal/config"
+	"github.com/takutakahashi/scia/internal/oauth"
 	"github.com/takutakahashi/scia/internal/proxy"
 )
 
@@ -60,11 +61,21 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	oauthServer := oauth.NewServer(store, logger)
+	oauthHTTPServer := &http.Server{
+		Addr:              oauthServer.ListenAddr(),
+		Handler:           oauthServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		logger.Info("proxy listening", "addr", listenAddr)
 		errCh <- server.ListenAndServe()
+	}()
+	go func() {
+		logger.Info("oauth server listening", "addr", oauthHTTPServer.Addr, "url", oauth.NormalizeListenForDisplay(oauthHTTPServer.Addr))
+		errCh <- oauthHTTPServer.ListenAndServe()
 	}()
 
 	select {
@@ -80,6 +91,10 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
+		os.Exit(1)
+	}
+	if err := oauthHTTPServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("oauth graceful shutdown failed", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("stopped scia")
