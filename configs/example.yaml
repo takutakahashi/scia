@@ -10,6 +10,8 @@ server:
   oauth:
     listen: "127.0.0.1:8081"
     redirectUrl: "http://localhost:8081/oauth/google/callback"
+  secrets:
+    sqlitePath: "data/scia-secrets.db"
 
 credentials:
   - id: github-token

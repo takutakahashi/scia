@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/takutakahashi/scia/internal/config"
+	"github.com/takutakahashi/scia/internal/secrets"
 )
 
 type staticProvider struct {
@@ -43,7 +44,7 @@ func TestGoogleOAuthStartRedirectsToGoogle(t *testing.T) {
 			},
 		},
 	})
-	srv := NewServer(store, slog.Default())
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
 	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google", nil)
 	rec := httptest.NewRecorder()
 
@@ -106,7 +107,8 @@ func TestGoogleOAuthCallbackShowsRefreshToken(t *testing.T) {
 			},
 		},
 	})
-	srv := NewServer(store, slog.Default())
+	secretStore := newMemorySecretStore()
+	srv := NewServer(store, secretStore, slog.Default())
 	state := "test-state"
 	srv.states.Store(state, stateInfo{CredentialID: "google", CreatedAt: time.Now()})
 	req := httptest.NewRequest(http.MethodGet, "/oauth/google/callback?state="+state+"&code=auth-code", nil)
@@ -120,6 +122,9 @@ func TestGoogleOAuthCallbackShowsRefreshToken(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `refresh_token: "refresh-token"`) {
 		t.Fatalf("refresh token not rendered: %s", rec.Body.String())
 	}
+	if got, ok, err := secretStore.Get(context.Background(), "google", "refresh_token"); err != nil || !ok || got != "refresh-token" {
+		t.Fatalf("refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
 }
 
 func newOAuthTestStore(t *testing.T, cfg *config.Config) *config.Store {
@@ -129,6 +134,28 @@ func newOAuthTestStore(t *testing.T, cfg *config.Config) *config.Store {
 		t.Fatal(err)
 	}
 	return store
+}
+
+type memorySecretStore struct {
+	values map[string]string
+}
+
+func newMemorySecretStore() *memorySecretStore {
+	return &memorySecretStore{values: map[string]string{}}
+}
+
+func (s *memorySecretStore) Get(_ context.Context, credentialID, key string) (string, bool, error) {
+	value, ok := s.values[credentialID+":"+key]
+	return value, ok, nil
+}
+
+func (s *memorySecretStore) Put(_ context.Context, credentialID, key, value string) error {
+	s.values[credentialID+":"+key] = value
+	return nil
+}
+
+func (s *memorySecretStore) Close() error {
+	return nil
 }
 
 func assertQueryValue(t *testing.T, values url.Values, key, want string) {

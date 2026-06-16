@@ -18,6 +18,7 @@ import (
 
 	"github.com/takutakahashi/scia/internal/approval"
 	"github.com/takutakahashi/scia/internal/config"
+	"github.com/takutakahashi/scia/internal/secrets"
 )
 
 func TestForwardProxyInjectsCredential(t *testing.T) {
@@ -224,7 +225,7 @@ server:
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHandler(store, approval.NewManager(store.Get().Server.ApprovalTimeout.Duration), logger)
+	handler, err := NewHandler(store, secrets.NoopStore{}, approval.NewManager(store.Get().Server.ApprovalTimeout.Duration), logger)
 	if err != nil {
 		t.Fatal(err)
 	}

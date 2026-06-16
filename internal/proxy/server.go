@@ -19,6 +19,7 @@ import (
 	"github.com/takutakahashi/scia/internal/auth"
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/policy"
+	"github.com/takutakahashi/scia/internal/secrets"
 )
 
 type Handler struct {
@@ -33,7 +34,7 @@ type Handler struct {
 	caKeyPath  string
 }
 
-func NewHandler(store *config.Store, approvals *approval.Manager, logger *slog.Logger) (*Handler, error) {
+func NewHandler(store *config.Store, secretStore secrets.Store, approvals *approval.Manager, logger *slog.Logger) (*Handler, error) {
 	cfg := store.Get()
 	ca, err := loadOrCreateCA(cfg.Server.MITM.CACertPath, cfg.Server.MITM.CAKeyPath)
 	if err != nil {
@@ -42,7 +43,7 @@ func NewHandler(store *config.Store, approvals *approval.Manager, logger *slog.L
 	handler := &Handler{
 		store:    store,
 		approval: approvals,
-		injector: auth.NewInjector(),
+		injector: auth.NewInjector(secretStore),
 		transport: &http.Transport{
 			Proxy:                 nil,
 			ResponseHeaderTimeout: 60 * time.Second,

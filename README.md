@@ -67,6 +67,18 @@ server:
 
 Open `http://localhost:8081/` to start Google authorization for configured Google credentials.
 
+OAuth callback refresh tokens are stored in the SQLite secret store by default:
+
+```yaml
+server:
+  secrets:
+    sqlitePath: "data/scia-secrets.db"
+```
+
+The SQLite file stores values by credential ID and key. For Google credentials, callback stores `refresh_token`; request-time injection reads `params.refresh_token` first and falls back to the secret store.
+
+The SQLite store is local persistence, not encryption. Keep the database path on a protected volume and restrict filesystem access to the `scia` process.
+
 ## Configuration
 
 See [configs/example.yaml](configs/example.yaml).

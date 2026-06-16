@@ -77,6 +77,7 @@ type ServerConfig struct {
 	MITM            MITMConfig         `yaml:"mitm"`
 	BackendProxy    BackendProxyConfig `yaml:"backendProxy"`
 	OAuth           OAuthConfig        `yaml:"oauth"`
+	Secrets         SecretsConfig      `yaml:"secrets"`
 }
 
 type MITMConfig struct {
@@ -91,6 +92,10 @@ type BackendProxyConfig struct {
 type OAuthConfig struct {
 	Listen      string `yaml:"listen"`
 	RedirectURL string `yaml:"redirectUrl"`
+}
+
+type SecretsConfig struct {
+	SQLitePath string `yaml:"sqlitePath"`
 }
 
 type CredentialConfig struct {
@@ -137,6 +142,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.MITM.CAKeyPath == "" {
 		c.Server.MITM.CAKeyPath = "data/scia-ca-key.pem"
+	}
+	if c.Server.Secrets.SQLitePath == "" {
+		c.Server.Secrets.SQLitePath = "data/scia-secrets.db"
 	}
 	if rawBackendProxyURL := HeaderValueFromEnv(c.Server.BackendProxy.URL); rawBackendProxyURL != "" {
 		parsed, err := url.Parse(rawBackendProxyURL)

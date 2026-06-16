@@ -15,6 +15,7 @@ import (
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/oauth"
 	"github.com/takutakahashi/scia/internal/proxy"
+	"github.com/takutakahashi/scia/internal/secrets"
 )
 
 var (
@@ -51,7 +52,14 @@ func main() {
 	}
 
 	approvals := approval.NewManager(store.Get().Server.ApprovalTimeout.Duration)
-	handler, err := proxy.NewHandler(store, approvals, logger)
+	secretStore, err := secrets.NewSQLiteStore(ctx, store.Get().Server.Secrets.SQLitePath)
+	if err != nil {
+		logger.Error("failed to initialize secret store", "error", err)
+		os.Exit(1)
+	}
+	defer secretStore.Close()
+
+	handler, err := proxy.NewHandler(store, secretStore, approvals, logger)
 	if err != nil {
 		logger.Error("failed to initialize proxy", "error", err)
 		os.Exit(1)
@@ -61,7 +69,7 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	oauthServer := oauth.NewServer(store, logger)
+	oauthServer := oauth.NewServer(store, secretStore, logger)
 	oauthHTTPServer := &http.Server{
 		Addr:              oauthServer.ListenAddr(),
 		Handler:           oauthServer.Handler(),

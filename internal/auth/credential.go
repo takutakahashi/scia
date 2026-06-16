@@ -14,15 +14,20 @@ import (
 	"time"
 
 	"github.com/takutakahashi/scia/internal/config"
+	"github.com/takutakahashi/scia/internal/secrets"
 )
 
 type Injector struct {
-	client *http.Client
-	cache  sync.Map
+	client  *http.Client
+	secrets secrets.Store
+	cache   sync.Map
 }
 
-func NewInjector() *Injector {
-	return &Injector{client: &http.Client{Timeout: 10 * time.Second}}
+func NewInjector(secretStore secrets.Store) *Injector {
+	if secretStore == nil {
+		secretStore = secrets.NoopStore{}
+	}
+	return &Injector{client: &http.Client{Timeout: 10 * time.Second}, secrets: secretStore}
 }
 
 func (i *Injector) Apply(ctx context.Context, r *http.Request, cfg *config.Config, ids []string) error {
@@ -147,7 +152,10 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cred config.Credentia
 	}
 	clientID := config.HeaderValueFromEnv(cred.Params["client_id"])
 	clientSecret := config.HeaderValueFromEnv(cred.Params["client_secret"])
-	refreshToken := config.HeaderValueFromEnv(cred.Params["refresh_token"])
+	refreshToken, err := i.secretValue(ctx, cred, "refresh_token")
+	if err != nil {
+		return "", err
+	}
 	if clientID == "" || clientSecret == "" || refreshToken == "" {
 		return "", fmt.Errorf("credential %q requires client_id, client_secret, and refresh_token", cred.ID)
 	}
@@ -158,6 +166,20 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cred config.Credentia
 	form.Set("client_secret", clientSecret)
 	form.Set("refresh_token", refreshToken)
 	return i.formToken(ctx, cred.ID, tokenURL, form)
+}
+
+func (i *Injector) secretValue(ctx context.Context, cred config.CredentialConfig, key string) (string, error) {
+	if value := config.HeaderValueFromEnv(cred.Params[key]); value != "" {
+		return value, nil
+	}
+	value, ok, err := i.secrets.Get(ctx, cred.ID, key)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return value, nil
+	}
+	return "", nil
 }
 
 func (i *Injector) formToken(ctx context.Context, credentialID, tokenURL string, form url.Values) (string, error) {

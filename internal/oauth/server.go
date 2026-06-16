@@ -16,15 +16,17 @@ import (
 	"time"
 
 	"github.com/takutakahashi/scia/internal/config"
+	"github.com/takutakahashi/scia/internal/secrets"
 )
 
 const googleAuthURL = "https://accounts.google.com/o/oauth2/v2/auth"
 
 type Server struct {
-	store  *config.Store
-	client *http.Client
-	logger *slog.Logger
-	states sync.Map
+	store   *config.Store
+	secrets secrets.Store
+	client  *http.Client
+	logger  *slog.Logger
+	states  sync.Map
 }
 
 type stateInfo struct {
@@ -32,11 +34,15 @@ type stateInfo struct {
 	CreatedAt    time.Time
 }
 
-func NewServer(store *config.Store, logger *slog.Logger) *Server {
+func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logger) *Server {
+	if secretStore == nil {
+		secretStore = secrets.NoopStore{}
+	}
 	return &Server{
-		store:  store,
-		client: &http.Client{Timeout: 10 * time.Second},
-		logger: logger,
+		store:   store,
+		secrets: secretStore,
+		client:  &http.Client{Timeout: 10 * time.Second},
+		logger:  logger,
 	}
 }
 
@@ -133,16 +139,23 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
+	if err := s.secrets.Put(r.Context(), info.CredentialID, "refresh_token", token.RefreshToken); err != nil {
+		s.logger.Error("failed to store google refresh token", "error", err, "credential", info.CredentialID)
+		http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
+		return
+	}
 	data := struct {
 		CredentialID string
 		RefreshToken string
 		AccessToken  string
 		ExpiresIn    int64
+		Stored       bool
 	}{
 		CredentialID: info.CredentialID,
 		RefreshToken: token.RefreshToken,
 		AccessToken:  token.AccessToken,
 		ExpiresIn:    token.ExpiresIn,
+		Stored:       true,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = callbackTemplate.Execute(w, data)
@@ -287,6 +300,7 @@ var callbackTemplate = template.Must(template.New("callback").Parse(`<!doctype h
   <h1>Google OAuth Complete</h1>
   <p>Credential: <code>{{.CredentialID}}</code></p>
   <textarea readonly>refresh_token: "{{.RefreshToken}}"</textarea>
-  <p>Add this value to <code>params.refresh_token</code> for the credential. Access token expires in {{.ExpiresIn}} seconds.</p>
+  {{if .Stored}}<p>The refresh token was stored in the configured scia secret store.</p>{{end}}
+  <p>You can also copy this value into <code>params.refresh_token</code>. Access token expires in {{.ExpiresIn}} seconds.</p>
 </body>
 </html>`))
