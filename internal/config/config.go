@@ -71,9 +71,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen           string        `yaml:"listen"`
-	AdminToken       string        `yaml:"adminToken"`
-	ApprovalTimeout Duration      `yaml:"approvalTimeout"`
+	Listen          string   `yaml:"listen"`
+	AdminToken      string   `yaml:"adminToken"`
+	ApprovalTimeout Duration `yaml:"approvalTimeout"`
 }
 
 type CredentialConfig struct {

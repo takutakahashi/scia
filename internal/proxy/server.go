@@ -18,7 +18,7 @@ import (
 
 type Handler struct {
 	store     *config.Store
-	approval *approval.Manager
+	approval  *approval.Manager
 	injector  *auth.Injector
 	transport *http.Transport
 	logger    *slog.Logger
@@ -26,9 +26,9 @@ type Handler struct {
 
 func NewHandler(store *config.Store, approvals *approval.Manager, logger *slog.Logger) *Handler {
 	return &Handler{
-		store:     store,
+		store:    store,
 		approval: approvals,
-		injector:  auth.NewInjector(),
+		injector: auth.NewInjector(),
 		transport: &http.Transport{
 			Proxy:                 nil,
 			ResponseHeaderTimeout: 60 * time.Second,
