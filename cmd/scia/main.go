@@ -44,7 +44,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	secretStore, err := secrets.NewSQLiteStore(ctx, store.Get().Server.Secrets.SQLitePath)
+	secretStore, err := secrets.NewFromConfig(ctx, store.Get())
 	if err != nil {
 		logger.Error("failed to initialize secret store", "error", err)
 		os.Exit(1)

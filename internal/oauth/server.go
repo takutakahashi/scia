@@ -34,11 +34,13 @@ type Server struct {
 }
 
 type stateInfo struct {
+	User         string
 	CredentialID string
 	CreatedAt    time.Time
 }
 
 type googleOption struct {
+	User         string
 	CredentialID string
 	Scope        string
 	Source       string
@@ -96,7 +98,18 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 	credentialID := r.URL.Query().Get("credential")
+	userID := r.URL.Query().Get("user")
 	cfg := s.store.Get()
+	if cfg.Server.Secrets.Mode == "kubernetes" {
+		if userID == "" {
+			http.Error(w, "user is required in kubernetes mode", http.StatusBadRequest)
+			return
+		}
+		if !cfg.HasUser(userID) {
+			http.Error(w, "unknown user", http.StatusBadRequest)
+			return
+		}
+	}
 	cred, ok := s.googleCredential(cfg, credentialID)
 	if !ok {
 		http.Error(w, "unknown google credential", http.StatusBadRequest)
@@ -120,7 +133,7 @@ func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create state", http.StatusInternalServerError)
 		return
 	}
-	s.states.Store(state, stateInfo{CredentialID: credentialID, CreatedAt: time.Now()})
+	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, CreatedAt: time.Now()})
 	q := url.Values{}
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", s.redirectURL(r))
@@ -165,18 +178,20 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
-	if err := s.secrets.Put(r.Context(), info.CredentialID, "refresh_token", token.RefreshToken); err != nil {
-		s.logger.Error("failed to store google refresh token", "error", err, "credential", info.CredentialID)
+	if err := s.secrets.Put(r.Context(), s.storageUserID(cfg, info), "refresh_token", token.RefreshToken); err != nil {
+		s.logger.Error("failed to store google refresh token", "error", err, "credential", info.CredentialID, "user", info.User)
 		http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
 		return
 	}
 	data := struct {
+		User         string
 		CredentialID string
 		RefreshToken string
 		AccessToken  string
 		ExpiresIn    int64
 		Stored       bool
 	}{
+		User:         info.User,
 		CredentialID: info.CredentialID,
 		RefreshToken: token.RefreshToken,
 		AccessToken:  token.AccessToken,
@@ -454,6 +469,14 @@ func (s *Server) forwardForm(w http.ResponseWriter, r *http.Request, endpoint st
 
 func (s *Server) googleOptions(cfg *config.Config) []googleOption {
 	var options []googleOption
+	appendOption := func(userID, credentialID, scope, source string) {
+		options = append(options, googleOption{
+			User:         userID,
+			CredentialID: credentialID,
+			Scope:        scope,
+			Source:       source,
+		})
+	}
 	configID := cfg.GoogleOAuthCredentialID()
 	hasConfigClient := cfg.Server.OAuth.Google.HasClientConfig()
 	hasExplicitConfigCredential := false
@@ -464,31 +487,48 @@ func (s *Server) googleOptions(cfg *config.Config) []googleOption {
 		}
 	}
 	if hasConfigClient && !hasExplicitConfigCredential {
-		options = append(options, googleOption{
-			CredentialID: configID,
-			Scope:        googleScope(cfg, config.CredentialConfig{}),
-			Source:       "server.oauth.google",
-		})
+		if cfg.Server.Secrets.Mode == "kubernetes" {
+			for userID := range cfg.Server.Users {
+				appendOption(userID, configID, googleScope(cfg, config.CredentialConfig{}), "server.oauth.google")
+			}
+		} else {
+			appendOption("", configID, googleScope(cfg, config.CredentialConfig{}), "server.oauth.google")
+		}
 	}
 	for _, cred := range cfg.Credentials {
 		if cred.Type == "google-oauth-refresh-token" {
-			options = append(options, googleOption{
-				CredentialID: cred.ID,
-				Scope:        googleScope(cfg, cred),
-				Source:       "credentials",
-			})
+			userID := config.CredentialUserID(cfg, cred)
+			if cfg.Server.Secrets.Mode == "kubernetes" && userID == cred.ID {
+				for configuredUserID := range cfg.Server.Users {
+					appendOption(configuredUserID, cred.ID, googleScope(cfg, cred), "credentials")
+				}
+				continue
+			}
+			appendOption(userID, cred.ID, googleScope(cfg, cred), "credentials")
 		}
 	}
 	for namespace, ns := range cfg.Server.OAuth.Namespaces {
 		if ns.Google.HasClientConfig() {
-			options = append(options, googleOption{
-				CredentialID: config.NamespaceGoogleCredentialID(namespace),
-				Scope:        ns.Google.Scope,
-				Source:       "server.oauth.namespaces." + namespace + ".google",
-			})
+			credentialID := config.NamespaceGoogleCredentialID(namespace)
+			if cfg.Server.Secrets.Mode == "kubernetes" && cfg.HasUser(namespace) {
+				appendOption(namespace, credentialID, ns.Google.Scope, "server.oauth.namespaces."+namespace+".google")
+			} else if cfg.Server.Secrets.Mode != "kubernetes" {
+				appendOption("", credentialID, ns.Google.Scope, "server.oauth.namespaces."+namespace+".google")
+			}
 		}
 	}
 	return options
+}
+
+func (s *Server) storageUserID(cfg *config.Config, info stateInfo) string {
+	if cfg.Server.Secrets.Mode == "kubernetes" {
+		return info.User
+	}
+	cred, ok := config.CredentialByID(cfg, info.CredentialID)
+	if ok {
+		return config.CredentialUserID(cfg, cred)
+	}
+	return info.CredentialID
 }
 
 func (s *Server) googleCredential(cfg *config.Config, credentialID string) (config.CredentialConfig, bool) {
@@ -631,10 +671,10 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
   {{if .Options}}
     {{range .Options}}
       <div class="item">
-        <div><strong>{{.CredentialID}}</strong></div>
+        <div><strong>{{.CredentialID}}</strong>{{if .User}} for user <code>{{.User}}</code>{{end}}</div>
         <p class="muted"><code>{{.Scope}}</code></p>
         <p class="muted">{{.Source}}</p>
-        <a class="button" href="/oauth/google/start?credential={{.CredentialID}}">Authorize with Google</a>
+        <a class="button" href="/oauth/google/start?credential={{.CredentialID}}{{if .User}}&amp;user={{.User}}{{end}}">Authorize with Google</a>
       </div>
     {{end}}
   {{else}}
@@ -657,6 +697,7 @@ var callbackTemplate = template.Must(template.New("callback").Parse(`<!doctype h
 </head>
 <body>
   <h1>Google OAuth Complete</h1>
+  {{if .User}}<p>User: <code>{{.User}}</code></p>{{end}}
   <p>Credential: <code>{{.CredentialID}}</code></p>
   <textarea readonly>refresh_token: "{{.RefreshToken}}"</textarea>
   {{if .Stored}}<p>The refresh token was stored in the configured scia secret store.</p>{{end}}

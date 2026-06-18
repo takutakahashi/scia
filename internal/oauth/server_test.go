@@ -325,6 +325,78 @@ func TestNamespaceGoogleTokenInjectsClientSecret(t *testing.T) {
 	}
 }
 
+func TestGoogleOAuthCallbackStoresRefreshTokenForKubernetesUser(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "access-token",
+			"refresh_token": "k8s-refresh-token",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Secrets: config.SecretsConfig{Mode: "kubernetes"},
+			Users: map[string]config.UserConfig{
+				"alice": {SecretName: "scia-oauth-alice"},
+			},
+			OAuth: config.OAuthConfig{
+				RedirectURL: "http://localhost:8081/oauth/google/callback",
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "client-id",
+					ClientSecret: "client-secret",
+					TokenURL:     tokenEndpoint.URL,
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	srv := NewServer(store, secretStore, slog.Default())
+	state := "test-state"
+	srv.states.Store(state, stateInfo{User: "alice", CredentialID: "google-calendar", CreatedAt: time.Now()})
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/callback?state="+state+"&code=auth-code", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "alice", "refresh_token"); err != nil || !ok || got != "k8s-refresh-token" {
+		t.Fatalf("refresh token not stored for user: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestGoogleOAuthStartRequiresUserInKubernetesMode(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Secrets: config.SecretsConfig{Mode: "kubernetes"},
+			Users: map[string]config.UserConfig{
+				"alice": {SecretName: "scia-oauth-alice"},
+			},
+			OAuth: config.OAuthConfig{
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "client-id",
+					ClientSecret: "client-secret",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
 func newOAuthTestStore(t *testing.T, cfg *config.Config) *config.Store {
 	t.Helper()
 	store, err := config.NewStore(context.Background(), staticProvider{cfg: cfg}, slog.Default())

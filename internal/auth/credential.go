@@ -170,7 +170,7 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 			return "", err
 		}
 	}
-	refreshToken, err := i.secretValue(ctx, cred, "refresh_token")
+	refreshToken, err := i.secretValue(ctx, cfg, cred, "refresh_token")
 	if err != nil {
 		return "", err
 	}
@@ -196,11 +196,12 @@ func (i *Injector) googleClientValue(ctx context.Context, literal, secretRef str
 	return secrets.ResolveRef(ctx, i.secrets, secretRef)
 }
 
-func (i *Injector) secretValue(ctx context.Context, cred config.CredentialConfig, key string) (string, error) {
+func (i *Injector) secretValue(ctx context.Context, cfg *config.Config, cred config.CredentialConfig, key string) (string, error) {
 	if value := config.HeaderValueFromEnv(cred.Params[key]); value != "" {
 		return value, nil
 	}
-	value, ok, err := i.secrets.Get(ctx, cred.ID, key)
+	userID := config.CredentialUserID(cfg, cred)
+	value, ok, err := i.secrets.Get(ctx, userID, key)
 	if err != nil {
 		return "", err
 	}
