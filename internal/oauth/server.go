@@ -59,6 +59,7 @@ func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logg
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.index)
+	mux.HandleFunc("/_scia/healthz", s.healthz)
 	mux.HandleFunc("/oauth/google/start", s.startGoogle)
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
 	mux.HandleFunc("/oauth/", s.namespaceOAuth)
@@ -83,6 +84,14 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	}{Options: options}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = indexTemplate.Execute(w, data)
+}
+
+func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {

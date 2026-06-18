@@ -28,6 +28,19 @@ func (p staticProvider) Watch(ctx context.Context, out chan<- *config.Config) er
 	return ctx.Err()
 }
 
+func TestHealthz(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/_scia/healthz", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
 func TestGoogleOAuthStartRedirectsToGoogle(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{
