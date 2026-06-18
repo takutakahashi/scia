@@ -238,6 +238,69 @@ func TestGoogleRefreshTokenUsesNamespacedGoogleClientSecretRefs(t *testing.T) {
 	}
 }
 
+func TestGoogleRefreshTokenUsesNamespacedGoogleClientEnvRefs(t *testing.T) {
+	t.Setenv("SERVICE_A_GOOGLE_CLIENT_ID", "env-client-id")
+	t.Setenv("SERVICE_A_GOOGLE_CLIENT_SECRET", "env-client-secret")
+
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "client_id", "env-client-id")
+		assertFormValue(t, r, "client_secret", "env-client-secret")
+		assertFormValue(t, r, "refresh_token", "stored-refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "env-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "service-a.google", "refresh_token", "stored-refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Google: config.GoogleOAuthConfig{
+							ClientIDSecretRef: "env:SERVICE_A_GOOGLE_CLIENT_ID",
+							ClientSecretRef:   "env:SERVICE_A_GOOGLE_CLIENT_SECRET",
+							TokenURL:          tokenEndpoint.URL,
+						},
+					},
+				},
+			},
+		},
+		Rules: []config.RuleConfig{
+			{
+				Name:        "service-a-google",
+				Hosts:       []string{"www.googleapis.com"},
+				Paths:       []string{"/calendar/v3/*"},
+				Action:      "allow",
+				Credentials: []string{"service-a.google"},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://www.googleapis.com/calendar/v3/users/me/calendarList", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewInjector(secretStore).Apply(context.Background(), req, cfg, []string{"service-a.google"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer env-access-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+}
+
 func assertFormValue(t *testing.T, r *http.Request, key, want string) {
 	t.Helper()
 	if got := r.Form.Get(key); got != want {

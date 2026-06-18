@@ -96,8 +96,8 @@ server:
     namespaces:
       service-a:
         google:
-          clientIdSecretRef: "service-a.google.client-id"
-          clientSecretRef: "service-a.google.client-secret"
+          clientIdSecretRef: "secret:service-a.google.client-id"
+          clientSecretRef: "secret:service-a.google.client-secret"
           scope: "https://www.googleapis.com/auth/calendar"
           redirectUrl: "https://service-a.example.com/oauth/callback"
 ```
@@ -109,7 +109,18 @@ server:
 
 The two servers are not started in the same process.
 
-Secret refs use `namespace.provider.key` and are resolved from the configured secret store as credential ID `namespace.provider` and key `key`. For the example above, store `client-id` and `client-secret` under credential ID `service-a.google`.
+Secret refs support these forms:
+
+- `secret:namespace.provider.key` resolves from the configured secret store as credential ID `namespace.provider` and key `key`.
+- `namespace.provider.key` is accepted as a shorthand for `secret:namespace.provider.key`.
+- `env:NAME` resolves from the process environment, which is useful for local experiments.
+
+For the example above, store `client-id` and `client-secret` under credential ID `service-a.google`. For env-backed experiments, use:
+
+```yaml
+clientIdSecretRef: "env:SERVICE_A_GOOGLE_CLIENT_ID"
+clientSecretRef: "env:SERVICE_A_GOOGLE_CLIENT_SECRET"
+```
 
 Google broker endpoints:
 

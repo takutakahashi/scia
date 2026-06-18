@@ -534,18 +534,7 @@ func (s *Server) googleClientValue(ctx context.Context, literal, secretRef strin
 	if secretRef == "" {
 		return "", nil
 	}
-	credentialID, key, err := config.SecretRefParts(secretRef)
-	if err != nil {
-		return "", err
-	}
-	value, ok, err := s.secrets.Get(ctx, credentialID, key)
-	if err != nil {
-		return "", err
-	}
-	if ok {
-		return value, nil
-	}
-	return "", nil
+	return secrets.ResolveRef(ctx, s.secrets, secretRef)
 }
 
 func googleScope(cfg *config.Config, cred config.CredentialConfig) string {

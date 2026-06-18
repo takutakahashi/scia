@@ -19,14 +19,14 @@ server:
     namespaces:
       service-a:
         google:
-          clientIdSecretRef: "service-a.google.client-id"
-          clientSecretRef: "service-a.google.client-secret"
+          clientIdSecretRef: "secret:service-a.google.client-id"
+          clientSecretRef: "secret:service-a.google.client-secret"
           scope: "https://www.googleapis.com/auth/calendar"
           redirectUrl: "http://localhost:8081/oauth/google/callback"
       service-b:
         google:
-          clientId: "env:SERVICE_B_GOOGLE_CLIENT_ID"
-          clientSecretRef: "service-b.google.client-secret"
+          clientIdSecretRef: "env:SERVICE_B_GOOGLE_CLIENT_ID"
+          clientSecretRef: "env:SERVICE_B_GOOGLE_CLIENT_SECRET"
           scope: "openid email profile"
   secrets:
     sqlitePath: "data/scia-secrets.db"

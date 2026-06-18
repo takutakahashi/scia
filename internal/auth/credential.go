@@ -193,18 +193,7 @@ func (i *Injector) googleClientValue(ctx context.Context, literal, secretRef str
 	if secretRef == "" {
 		return "", nil
 	}
-	credentialID, key, err := config.SecretRefParts(secretRef)
-	if err != nil {
-		return "", err
-	}
-	value, ok, err := i.secrets.Get(ctx, credentialID, key)
-	if err != nil {
-		return "", err
-	}
-	if ok {
-		return value, nil
-	}
-	return "", nil
+	return secrets.ResolveRef(ctx, i.secrets, secretRef)
 }
 
 func (i *Injector) secretValue(ctx context.Context, cred config.CredentialConfig, key string) (string, error) {
