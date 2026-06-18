@@ -26,6 +26,26 @@ func TestHeaderValueFromEnv(t *testing.T) {
 	}
 }
 
+func TestValidateDefaultsServerModeToProxy(t *testing.T) {
+	cfg := &Config{}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Mode != "proxy" {
+		t.Fatalf("unexpected server mode: %q", cfg.Server.Mode)
+	}
+}
+
+func TestValidateRejectsUnknownServerMode(t *testing.T) {
+	cfg := &Config{Server: ServerConfig{Mode: "all"}}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
 func TestValidateAllowsNamespacedGoogleCredentialReference(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{

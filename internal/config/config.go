@@ -71,6 +71,7 @@ type Config struct {
 }
 
 type ServerConfig struct {
+	Mode            string             `yaml:"mode"`
 	Listen          string             `yaml:"listen"`
 	AdminToken      string             `yaml:"adminToken"`
 	ApprovalTimeout Duration           `yaml:"approvalTimeout"`
@@ -153,6 +154,14 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 }
 
 func (c *Config) Validate() error {
+	if c.Server.Mode == "" {
+		c.Server.Mode = "proxy"
+	}
+	switch c.Server.Mode {
+	case "proxy", "oauth":
+	default:
+		return fmt.Errorf("server.mode must be proxy or oauth")
+	}
 	if c.Server.ApprovalTimeout.Duration == 0 {
 		c.Server.ApprovalTimeout.Duration = 5 * time.Minute
 	}

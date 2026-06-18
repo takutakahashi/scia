@@ -44,14 +44,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if listenAddr == "" {
-		listenAddr = store.Get().Server.Listen
-	}
-	if listenAddr == "" {
-		listenAddr = ":8080"
-	}
-
-	approvals := approval.NewManager(store.Get().Server.ApprovalTimeout.Duration)
 	secretStore, err := secrets.NewSQLiteStore(ctx, store.Get().Server.Secrets.SQLitePath)
 	if err != nil {
 		logger.Error("failed to initialize secret store", "error", err)
@@ -59,6 +51,27 @@ func main() {
 	}
 	defer secretStore.Close()
 
+	cfg := store.Get()
+	switch cfg.Server.Mode {
+	case "proxy":
+		runProxy(ctx, store, secretStore, listenAddr, logger)
+	case "oauth":
+		runOAuth(ctx, store, secretStore, listenAddr, logger)
+	default:
+		logger.Error("unsupported server mode", "mode", cfg.Server.Mode)
+		os.Exit(1)
+	}
+	logger.Info("stopped scia")
+}
+
+func runProxy(ctx context.Context, store *config.Store, secretStore secrets.Store, listenAddr string, logger *slog.Logger) {
+	if listenAddr == "" {
+		listenAddr = store.Get().Server.Listen
+	}
+	if listenAddr == "" {
+		listenAddr = ":8080"
+	}
+	approvals := approval.NewManager(store.Get().Server.ApprovalTimeout.Duration)
 	handler, err := proxy.NewHandler(store, secretStore, approvals, logger)
 	if err != nil {
 		logger.Error("failed to initialize proxy", "error", err)
@@ -69,28 +82,42 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	oauthServer := oauth.NewServer(store, secretStore, logger)
-	oauthHTTPServer := &http.Server{
-		Addr:              oauthServer.ListenAddr(),
-		Handler:           oauthServer.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("proxy listening", "addr", listenAddr)
 		errCh <- server.ListenAndServe()
 	}()
+
+	waitAndShutdown(ctx, server, errCh, "proxy", logger)
+}
+
+func runOAuth(ctx context.Context, store *config.Store, secretStore secrets.Store, listenAddr string, logger *slog.Logger) {
+	oauthServer := oauth.NewServer(store, secretStore, logger)
+	if listenAddr == "" {
+		listenAddr = oauthServer.ListenAddr()
+	}
+	oauthHTTPServer := &http.Server{
+		Addr:              listenAddr,
+		Handler:           oauthServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("oauth server listening", "addr", oauthHTTPServer.Addr, "url", oauth.NormalizeListenForDisplay(oauthHTTPServer.Addr))
 		errCh <- oauthHTTPServer.ListenAndServe()
 	}()
 
+	waitAndShutdown(ctx, oauthHTTPServer, errCh, "oauth", logger)
+}
+
+func waitAndShutdown(ctx context.Context, server *http.Server, errCh <-chan error, name string, logger *slog.Logger) {
 	select {
 	case <-ctx.Done():
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server failed", "error", err)
+			logger.Error("server failed", "name", name, "error", err)
 			os.Exit(1)
 		}
 	}
@@ -98,12 +125,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("graceful shutdown failed", "error", err)
+		logger.Error("graceful shutdown failed", "name", name, "error", err)
 		os.Exit(1)
 	}
-	if err := oauthHTTPServer.Shutdown(shutdownCtx); err != nil {
-		logger.Error("oauth graceful shutdown failed", "error", err)
-		os.Exit(1)
-	}
-	logger.Info("stopped scia")
 }

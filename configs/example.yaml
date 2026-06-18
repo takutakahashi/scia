@@ -1,4 +1,5 @@
 server:
+  mode: "proxy"
   listen: ":8080"
   adminToken: "env:SCIA_ADMIN_TOKEN"
   approvalTimeout: "5m"

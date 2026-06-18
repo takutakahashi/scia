@@ -90,7 +90,9 @@ The SQLite store is local persistence, not encryption. Keep the database path on
 
 ```yaml
 server:
+  mode: "oauth"
   oauth:
+    listen: "127.0.0.1:8081"
     namespaces:
       service-a:
         google:
@@ -99,6 +101,13 @@ server:
           scope: "https://www.googleapis.com/auth/calendar"
           redirectUrl: "https://service-a.example.com/oauth/callback"
 ```
+
+`server.mode` is exclusive:
+
+- `proxy` starts only the forward proxy.
+- `oauth` starts only the OAuth broker server.
+
+The two servers are not started in the same process.
 
 Secret refs use `namespace.provider.key` and are resolved from the configured secret store as credential ID `namespace.provider` and key `key`. For the example above, store `client-id` and `client-secret` under credential ID `service-a.google`.
 
