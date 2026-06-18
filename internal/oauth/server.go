@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/takutakahashi/scia/internal/authsync"
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/secrets"
 )
@@ -32,11 +31,9 @@ type Server struct {
 	client  *http.Client
 	logger  *slog.Logger
 	states  sync.Map
-	syncHub *authsync.Hub
 }
 
 type stateInfo struct {
-	ProxyID      string
 	CredentialID string
 	CreatedAt    time.Time
 }
@@ -56,7 +53,6 @@ func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logg
 		secrets: secretStore,
 		client:  &http.Client{Timeout: 10 * time.Second},
 		logger:  logger,
-		syncHub: authsync.NewHub(store, logger),
 	}
 }
 
@@ -66,8 +62,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/oauth/google/start", s.startGoogle)
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
 	mux.HandleFunc("/oauth/", s.namespaceOAuth)
-	mux.Handle("/_scia/auth-sync/events", s.syncHub)
-	mux.HandleFunc("/_scia/auth-sync/proxies", s.syncHub.ServeRegister)
 	return mux
 }
 
@@ -117,12 +111,7 @@ func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create state", http.StatusInternalServerError)
 		return
 	}
-	proxyID := r.URL.Query().Get("proxy_id")
-	if s.syncHub.Enabled() && proxyID == "" {
-		http.Error(w, "proxy_id is required", http.StatusBadRequest)
-		return
-	}
-	s.states.Store(state, stateInfo{ProxyID: proxyID, CredentialID: credentialID, CreatedAt: time.Now()})
+	s.states.Store(state, stateInfo{CredentialID: credentialID, CreatedAt: time.Now()})
 	q := url.Values{}
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", s.redirectURL(r))
@@ -167,23 +156,7 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
-	stored := true
-	if s.syncHub.Enabled() {
-		deliveryID, err := randomState()
-		if err != nil {
-			http.Error(w, "failed to create token delivery", http.StatusInternalServerError)
-			return
-		}
-		stored = false
-		s.syncHub.Publish(authsync.Delivery{
-			Type:         "token.deliver",
-			DeliveryID:   deliveryID,
-			ProxyID:      info.ProxyID,
-			CredentialID: info.CredentialID,
-			Key:          "refresh_token",
-			Value:        token.RefreshToken,
-		})
-	} else if err := s.secrets.Put(r.Context(), info.CredentialID, "refresh_token", token.RefreshToken); err != nil {
+	if err := s.secrets.Put(r.Context(), info.CredentialID, "refresh_token", token.RefreshToken); err != nil {
 		s.logger.Error("failed to store google refresh token", "error", err, "credential", info.CredentialID)
 		http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
 		return
@@ -199,7 +172,7 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		RefreshToken: token.RefreshToken,
 		AccessToken:  token.AccessToken,
 		ExpiresIn:    token.ExpiresIn,
-		Stored:       stored,
+		Stored:       true,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = callbackTemplate.Execute(w, data)
@@ -350,13 +323,8 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 	if scope == "" {
 		scope = "openid email profile"
 	}
-	proxyID := r.URL.Query().Get("proxy_id")
-	if s.syncHub.Enabled() && proxyID == "" {
-		http.Error(w, "proxy_id is required", http.StatusBadRequest)
-		return
-	}
 	state := r.URL.Query().Get("state")
-	if state == "" && (redirect || proxyID != "") {
+	if state == "" && redirect {
 		generated, err := randomState()
 		if err != nil {
 			http.Error(w, "failed to create state", http.StatusInternalServerError)
@@ -375,10 +343,8 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 		q.Set("state", state)
 	}
 	location := authURL + "?" + q.Encode()
-	if proxyID != "" {
-		s.states.Store(state, stateInfo{ProxyID: proxyID, CredentialID: credentialID, CreatedAt: time.Now()})
-	}
 	if redirect {
+		s.states.Store(state, stateInfo{CredentialID: credentialID, CreatedAt: time.Now()})
 		http.Redirect(w, r, location, http.StatusFound)
 		return
 	}
@@ -388,7 +354,6 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 		"auth_url":          authURL,
 		"redirect_uri":      redirectURI,
 		"scope":             scope,
-		"state":             state,
 	})
 }
 

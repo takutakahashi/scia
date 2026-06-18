@@ -78,7 +78,6 @@ type ServerConfig struct {
 	MITM            MITMConfig         `yaml:"mitm"`
 	BackendProxy    BackendProxyConfig `yaml:"backendProxy"`
 	OAuth           OAuthConfig        `yaml:"oauth"`
-	AuthSync        AuthSyncConfig     `yaml:"authSync"`
 	Secrets         SecretsConfig      `yaml:"secrets"`
 }
 
@@ -113,13 +112,6 @@ type GoogleOAuthConfig struct {
 
 type OAuthNamespaceConfig struct {
 	Google GoogleOAuthConfig `yaml:"google"`
-}
-
-type AuthSyncConfig struct {
-	Mode    string `yaml:"mode"`
-	URL     string `yaml:"url"`
-	ProxyID string `yaml:"proxyId"`
-	Token   string `yaml:"token"`
 }
 
 type SecretsConfig struct {
@@ -181,32 +173,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.Secrets.SQLitePath == "" {
 		c.Server.Secrets.SQLitePath = "data/scia-secrets.db"
-	}
-	switch c.Server.AuthSync.Mode {
-	case "", "memory":
-	default:
-		return fmt.Errorf("server.authSync.mode must be memory")
-	}
-	if c.Server.AuthSync.Mode == "memory" && HeaderValueFromEnv(c.Server.AdminToken) == "" {
-		return fmt.Errorf("server.adminToken is required when server.authSync.mode is memory")
-	}
-	if rawAuthSyncURL := HeaderValueFromEnv(c.Server.AuthSync.URL); rawAuthSyncURL != "" {
-		parsed, err := url.Parse(rawAuthSyncURL)
-		if err != nil {
-			return fmt.Errorf("server.authSync.url is invalid: %w", err)
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			return fmt.Errorf("server.authSync.url must use http or https scheme")
-		}
-		if parsed.Host == "" {
-			return fmt.Errorf("server.authSync.url must include a host")
-		}
-		if c.Server.AuthSync.ProxyID == "" {
-			return fmt.Errorf("server.authSync.proxyId is required when server.authSync.url is set")
-		}
-		if HeaderValueFromEnv(c.Server.AuthSync.Token) == "" {
-			return fmt.Errorf("server.authSync.token is required when server.authSync.url is set")
-		}
 	}
 	if rawBackendProxyURL := HeaderValueFromEnv(c.Server.BackendProxy.URL); rawBackendProxyURL != "" {
 		parsed, err := url.Parse(rawBackendProxyURL)

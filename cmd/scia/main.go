@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/takutakahashi/scia/internal/approval"
-	"github.com/takutakahashi/scia/internal/authsync"
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/oauth"
 	"github.com/takutakahashi/scia/internal/proxy"
@@ -89,9 +88,6 @@ func runProxy(ctx context.Context, store *config.Store, secretStore secrets.Stor
 		logger.Info("proxy listening", "addr", listenAddr)
 		errCh <- server.ListenAndServe()
 	}()
-	if config.HeaderValueFromEnv(store.Get().Server.AuthSync.URL) != "" {
-		go authsync.NewClient(store, secretStore, logger).Run(ctx)
-	}
 
 	waitAndShutdown(ctx, server, errCh, "proxy", logger)
 }
