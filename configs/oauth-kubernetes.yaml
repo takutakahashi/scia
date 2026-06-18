@@ -1,0 +1,24 @@
+server:
+  mode: "oauth"
+  listen: "0.0.0.0:8081"
+  secrets:
+    mode: kubernetes
+    kubernetes:
+      namespace: scia
+  users:
+    alice:
+      secretName: scia-oauth-alice
+  oauth:
+    redirectUrl: "http://localhost:18081/oauth/google/callback"
+    google:
+      credentialId: google-calendar
+      clientId: "env:GOOGLE_OAUTH_CLIENT_ID"
+      clientSecret: "env:GOOGLE_OAUTH_CLIENT_SECRET"
+      scope: "https://www.googleapis.com/auth/calendar.readonly"
+
+credentials:
+  - id: google-calendar
+    type: google-oauth-refresh-token
+    params: {}
+
+rules: []

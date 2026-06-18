@@ -1,0 +1,33 @@
+server:
+  mode: "proxy"
+  listen: "0.0.0.0:8080"
+  secrets:
+    mode: kubernetes
+    kubernetes:
+      namespace: scia
+  users:
+    alice:
+      secretName: scia-oauth-alice
+  mitm:
+    caCertPath: "data/scia-ca.pem"
+    caKeyPath: "data/scia-ca-key.pem"
+  oauth:
+    google:
+      credentialId: google-calendar
+      clientId: "env:GOOGLE_OAUTH_CLIENT_ID"
+      clientSecret: "env:GOOGLE_OAUTH_CLIENT_SECRET"
+      scope: "https://www.googleapis.com/auth/calendar.readonly"
+
+credentials:
+  - id: google-calendar
+    type: google-oauth-refresh-token
+    params:
+      user: alice
+
+rules:
+  - name: inject-alice-google-calendar-token
+    hosts: ["www.googleapis.com"]
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+    paths: ["/calendar/v3/*"]
+    action: allow
+    credentials: ["google-calendar"]

@@ -70,6 +70,49 @@ func TestValidateAllowsNamespacedGoogleCredentialReference(t *testing.T) {
 	}
 }
 
+func TestValidateRequiresUsersForKubernetesMode(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Secrets: SecretsConfig{Mode: "kubernetes"},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestCredentialUserID(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Users: map[string]UserConfig{
+				"alice": {SecretName: "scia-oauth-alice"},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	cred := CredentialConfig{
+		ID:   "alice.google-calendar",
+		Type: "google-oauth-refresh-token",
+	}
+	if got := CredentialUserID(cfg, cred); got != "alice" {
+		t.Fatalf("unexpected user id: %q", got)
+	}
+
+	credWithParam := CredentialConfig{
+		ID:     "google-calendar",
+		Type:   "google-oauth-refresh-token",
+		Params: map[string]string{"user": "alice"},
+	}
+	if got := CredentialUserID(cfg, credWithParam); got != "alice" {
+		t.Fatalf("unexpected user id from params: %q", got)
+	}
+}
+
 func TestSecretRefParts(t *testing.T) {
 	credentialID, key, err := SecretRefParts("service-a.google.client-secret")
 	if err != nil {

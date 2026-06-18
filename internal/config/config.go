@@ -79,6 +79,11 @@ type ServerConfig struct {
 	BackendProxy    BackendProxyConfig `yaml:"backendProxy"`
 	OAuth           OAuthConfig        `yaml:"oauth"`
 	Secrets         SecretsConfig      `yaml:"secrets"`
+	Users           map[string]UserConfig `yaml:"users"`
+}
+
+type UserConfig struct {
+	SecretName string `yaml:"secretName"`
 }
 
 type MITMConfig struct {
@@ -115,7 +120,13 @@ type OAuthNamespaceConfig struct {
 }
 
 type SecretsConfig struct {
-	SQLitePath string `yaml:"sqlitePath"`
+	Mode       string                  `yaml:"mode"`
+	SQLitePath string                  `yaml:"sqlitePath"`
+	Kubernetes KubernetesSecretsConfig `yaml:"kubernetes"`
+}
+
+type KubernetesSecretsConfig struct {
+	Namespace string `yaml:"namespace"`
 }
 
 type CredentialConfig struct {
@@ -171,8 +182,32 @@ func (c *Config) Validate() error {
 	if c.Server.MITM.CAKeyPath == "" {
 		c.Server.MITM.CAKeyPath = "data/scia-ca-key.pem"
 	}
+	if c.Server.Secrets.Mode == "" {
+		c.Server.Secrets.Mode = "sqlite"
+	}
+	switch c.Server.Secrets.Mode {
+	case "sqlite", "kubernetes":
+	default:
+		return fmt.Errorf("server.secrets.mode must be sqlite or kubernetes")
+	}
 	if c.Server.Secrets.SQLitePath == "" {
 		c.Server.Secrets.SQLitePath = "data/scia-secrets.db"
+	}
+	if c.Server.Secrets.Mode == "kubernetes" {
+		if c.Server.Secrets.Kubernetes.Namespace == "" {
+			c.Server.Secrets.Kubernetes.Namespace = "default"
+		}
+		if len(c.Server.Users) == 0 {
+			return fmt.Errorf("server.users is required when server.secrets.mode is kubernetes")
+		}
+		for userID, user := range c.Server.Users {
+			if userID == "" {
+				return fmt.Errorf("server.users cannot include an empty user id")
+			}
+			if user.SecretName == "" {
+				return fmt.Errorf("server.users[%q].secretName is required", userID)
+			}
+		}
 	}
 	if rawBackendProxyURL := HeaderValueFromEnv(c.Server.BackendProxy.URL); rawBackendProxyURL != "" {
 		parsed, err := url.Parse(rawBackendProxyURL)
@@ -333,4 +368,27 @@ func HeaderValueFromEnv(value string) string {
 		return os.Getenv(strings.TrimPrefix(value, "env:"))
 	}
 	return value
+}
+
+func (c *Config) UserSecretNames() map[string]string {
+	names := make(map[string]string, len(c.Server.Users))
+	for userID, user := range c.Server.Users {
+		names[userID] = user.SecretName
+	}
+	return names
+}
+
+func (c *Config) HasUser(userID string) bool {
+	_, ok := c.Server.Users[userID]
+	return ok
+}
+
+func CredentialUserID(cfg *Config, cred CredentialConfig) string {
+	if user := cred.Params["user"]; user != "" {
+		return user
+	}
+	if user, _, ok := strings.Cut(cred.ID, "."); ok && cfg.HasUser(user) {
+		return user
+	}
+	return cred.ID
 }
