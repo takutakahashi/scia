@@ -187,6 +187,9 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("server.authSync.mode must be memory")
 	}
+	if c.Server.AuthSync.Mode == "memory" && HeaderValueFromEnv(c.Server.AdminToken) == "" {
+		return fmt.Errorf("server.adminToken is required when server.authSync.mode is memory")
+	}
 	if rawAuthSyncURL := HeaderValueFromEnv(c.Server.AuthSync.URL); rawAuthSyncURL != "" {
 		parsed, err := url.Parse(rawAuthSyncURL)
 		if err != nil {
@@ -197,6 +200,12 @@ func (c *Config) Validate() error {
 		}
 		if parsed.Host == "" {
 			return fmt.Errorf("server.authSync.url must include a host")
+		}
+		if c.Server.AuthSync.ProxyID == "" {
+			return fmt.Errorf("server.authSync.proxyId is required when server.authSync.url is set")
+		}
+		if HeaderValueFromEnv(c.Server.AuthSync.Token) == "" {
+			return fmt.Errorf("server.authSync.token is required when server.authSync.url is set")
 		}
 	}
 	if rawBackendProxyURL := HeaderValueFromEnv(c.Server.BackendProxy.URL); rawBackendProxyURL != "" {

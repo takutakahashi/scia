@@ -135,9 +135,9 @@ For local development with one proxy, set `server.authSync.mode` to `memory` on 
 # auth server
 server:
   mode: "oauth"
+  adminToken: "env:SCIA_ADMIN_TOKEN"
   authSync:
     mode: "memory"
-    token: "env:SCIA_AUTH_SYNC_TOKEN"
 
 # proxy server
 server:
@@ -148,7 +148,23 @@ server:
     token: "env:SCIA_AUTH_SYNC_TOKEN"
 ```
 
-In this mode the broker does not need Redis. If the proxy is disconnected, token deliveries are kept in memory and sent when the single proxy reconnects. The proxy stores received values in its configured `secrets.Store`.
+Register each proxy with the auth server before it connects. Omit `proxy_id` to have the auth server generate one; place the returned proxy ID and the separately generated token on the proxy:
+
+```sh
+curl -X POST http://localhost:8081/_scia/auth-sync/proxies \
+  -H "Authorization: Bearer $SCIA_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"proxy_id":"proxy-dev","token":"dev-sync-token","namespaces":["service-a"]}'
+```
+
+When requesting an authorization URL in auth sync mode, include `proxy_id`. The callback delivery is routed only to the connection authenticated as that proxy:
+
+```text
+GET /oauth/service-a/google/authorization-url?proxy_id=proxy-dev
+GET /oauth/service-a/google/start?proxy_id=proxy-dev
+```
+
+In memory mode the broker does not need Redis. If the target proxy is disconnected, token deliveries are kept in memory under that proxy ID and sent when the same proxy reconnects. The proxy stores received values in its configured `secrets.Store`.
 
 The proxy can also reference the namespaced Google credential ID directly:
 

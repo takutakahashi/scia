@@ -1,8 +1,11 @@
 package authsync
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -29,20 +32,21 @@ func TestClientStoresDeliveryFromHub(t *testing.T) {
 		Server: config.ServerConfig{
 			AuthSync: config.AuthSyncConfig{
 				Mode:    "memory",
-				Token:   "sync-token",
 				ProxyID: "proxy-a",
 			},
+			AdminToken: "admin-token",
 		},
 	})
 	hub := NewHub(store, slog.Default())
-	server := httptest.NewServer(hub)
+	server := newAuthSyncTestServer(hub)
 	defer server.Close()
+	registerProxy(t, server, "proxy-a", "sync-token", []string{"service-a"})
 
 	secretStore := newMemoryStore()
 	proxyStore := newTestConfigStore(t, &config.Config{
 		Server: config.ServerConfig{
 			AuthSync: config.AuthSyncConfig{
-				URL:     server.URL,
+				URL:     server.URL + "/_scia/auth-sync/events",
 				Token:   "sync-token",
 				ProxyID: "proxy-a",
 			},
@@ -58,11 +62,13 @@ func TestClientStoresDeliveryFromHub(t *testing.T) {
 	waitUntil(t, func() bool {
 		hub.mu.Lock()
 		defer hub.mu.Unlock()
-		return hub.client != nil
+		_, ok := hub.connections["proxy-a"]
+		return ok
 	})
 	hub.Publish(Delivery{
 		Type:         "token.deliver",
 		DeliveryID:   "delivery-1",
+		ProxyID:      "proxy-a",
 		CredentialID: "service-a.google",
 		Key:          "refresh_token",
 		Value:        "refresh-token",
@@ -84,15 +90,17 @@ func TestHubRequiresBearerToken(t *testing.T) {
 	store := newTestConfigStore(t, &config.Config{
 		Server: config.ServerConfig{
 			AuthSync: config.AuthSyncConfig{
-				Mode:  "memory",
-				Token: "sync-token",
+				Mode: "memory",
 			},
+			AdminToken: "admin-token",
 		},
 	})
-	server := httptest.NewServer(NewHub(store, slog.Default()))
+	hub := NewHub(store, slog.Default())
+	server := newAuthSyncTestServer(hub)
 	defer server.Close()
+	registerProxy(t, server, "proxy-a", "sync-token", nil)
 
-	resp, err := server.Client().Get(server.URL)
+	resp, err := server.Client().Get(server.URL + "/_scia/auth-sync/events")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,6 +108,75 @@ func TestHubRequiresBearerToken(t *testing.T) {
 	if resp.StatusCode != 401 {
 		t.Fatalf("unexpected status: %d", resp.StatusCode)
 	}
+}
+
+func TestHubRoutesDeliveryByProxyID(t *testing.T) {
+	store := newTestConfigStore(t, &config.Config{
+		Server: config.ServerConfig{
+			AuthSync:   config.AuthSyncConfig{Mode: "memory"},
+			AdminToken: "admin-token",
+		},
+	})
+	hub := NewHub(store, slog.Default())
+	server := newAuthSyncTestServer(hub)
+	defer server.Close()
+	registerProxy(t, server, "proxy-a", "token-a", []string{"service-a"})
+	registerProxy(t, server, "proxy-b", "token-b", []string{"service-a"})
+
+	secretA := newMemoryStore()
+	secretB := newMemoryStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = NewClient(newTestConfigStore(t, &config.Config{Server: config.ServerConfig{AuthSync: config.AuthSyncConfig{URL: server.URL + "/_scia/auth-sync/events", ProxyID: "proxy-a", Token: "token-a"}}}), secretA, slog.Default()).connect(ctx)
+	}()
+	go func() {
+		_ = NewClient(newTestConfigStore(t, &config.Config{Server: config.ServerConfig{AuthSync: config.AuthSyncConfig{URL: server.URL + "/_scia/auth-sync/events", ProxyID: "proxy-b", Token: "token-b"}}}), secretB, slog.Default()).connect(ctx)
+	}()
+	waitUntil(t, func() bool {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		return len(hub.connections) == 2
+	})
+
+	hub.Publish(Delivery{Type: "token.deliver", DeliveryID: "delivery-1", ProxyID: "proxy-b", CredentialID: "service-a.google", Key: "refresh_token", Value: "token-b"})
+
+	waitUntil(t, func() bool {
+		value, ok, err := secretB.Get(context.Background(), "service-a.google", "refresh_token")
+		return err == nil && ok && value == "token-b"
+	})
+	if value, ok, err := secretA.Get(context.Background(), "service-a.google", "refresh_token"); err != nil || ok || value != "" {
+		t.Fatalf("delivery leaked to proxy-a: value=%q ok=%v err=%v", value, ok, err)
+	}
+}
+
+func registerProxy(t *testing.T, server *httptest.Server, proxyID, token string, namespaces []string) {
+	t.Helper()
+	body, err := json.Marshal(ProxyRegistration{ProxyID: proxyID, Token: token, Namespaces: namespaces})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/_scia/auth-sync/proxies", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer admin-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected register status: %d", resp.StatusCode)
+	}
+}
+
+func newAuthSyncTestServer(hub *Hub) *httptest.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/_scia/auth-sync/events", hub)
+	mux.HandleFunc("/_scia/auth-sync/proxies", hub.ServeRegister)
+	return httptest.NewServer(mux)
 }
 
 func newTestConfigStore(t *testing.T, cfg *config.Config) *config.Store {
