@@ -71,6 +71,7 @@ type Config struct {
 }
 
 type ServerConfig struct {
+	Mode            string             `yaml:"mode"`
 	Listen          string             `yaml:"listen"`
 	AdminToken      string             `yaml:"adminToken"`
 	ApprovalTimeout Duration           `yaml:"approvalTimeout"`
@@ -90,17 +91,27 @@ type BackendProxyConfig struct {
 }
 
 type OAuthConfig struct {
-	Listen      string            `yaml:"listen"`
-	RedirectURL string            `yaml:"redirectUrl"`
-	Google      GoogleOAuthConfig `yaml:"google"`
+	Listen      string                          `yaml:"listen"`
+	RedirectURL string                          `yaml:"redirectUrl"`
+	Google      GoogleOAuthConfig               `yaml:"google"`
+	Namespaces  map[string]OAuthNamespaceConfig `yaml:"namespaces"`
 }
 
 type GoogleOAuthConfig struct {
-	CredentialID string `yaml:"credentialId"`
-	ClientID     string `yaml:"clientId"`
-	ClientSecret string `yaml:"clientSecret"`
-	Scope        string `yaml:"scope"`
-	TokenURL     string `yaml:"tokenUrl"`
+	CredentialID      string `yaml:"credentialId"`
+	ClientID          string `yaml:"clientId"`
+	ClientIDSecretRef string `yaml:"clientIdSecretRef"`
+	ClientSecret      string `yaml:"clientSecret"`
+	ClientSecretRef   string `yaml:"clientSecretRef"`
+	Scope             string `yaml:"scope"`
+	AuthURL           string `yaml:"authUrl"`
+	TokenURL          string `yaml:"tokenUrl"`
+	RevokeURL         string `yaml:"revokeUrl"`
+	RedirectURL       string `yaml:"redirectUrl"`
+}
+
+type OAuthNamespaceConfig struct {
+	Google GoogleOAuthConfig `yaml:"google"`
 }
 
 type SecretsConfig struct {
@@ -143,6 +154,14 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 }
 
 func (c *Config) Validate() error {
+	if c.Server.Mode == "" {
+		c.Server.Mode = "proxy"
+	}
+	switch c.Server.Mode {
+	case "proxy", "oauth":
+	default:
+		return fmt.Errorf("server.mode must be proxy or oauth")
+	}
 	if c.Server.ApprovalTimeout.Duration == 0 {
 		c.Server.ApprovalTimeout.Duration = 5 * time.Minute
 	}
@@ -185,8 +204,19 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("credential %q requires header", cred.ID)
 		}
 	}
-	if c.Server.OAuth.Google.ClientID != "" && c.Server.OAuth.Google.ClientSecret != "" {
+	if c.Server.OAuth.Google.HasClientConfig() {
 		seenCreds[c.GoogleOAuthCredentialID()] = struct{}{}
+	}
+	for namespace, ns := range c.Server.OAuth.Namespaces {
+		if namespace == "" {
+			return fmt.Errorf("server.oauth.namespaces cannot include an empty namespace")
+		}
+		if strings.Contains(namespace, ".") {
+			return fmt.Errorf("server.oauth.namespaces[%q] cannot contain dots", namespace)
+		}
+		if ns.Google.HasClientConfig() {
+			seenCreds[NamespaceGoogleCredentialID(namespace)] = struct{}{}
+		}
 	}
 	for i, rule := range c.Rules {
 		if rule.Name == "" {
@@ -212,8 +242,13 @@ func CredentialByID(cfg *Config, id string) (CredentialConfig, bool) {
 			return cred, true
 		}
 	}
-	if cfg.Server.OAuth.Google.ClientID != "" && cfg.Server.OAuth.Google.ClientSecret != "" && id == cfg.GoogleOAuthCredentialID() {
+	if cfg.Server.OAuth.Google.HasClientConfig() && id == cfg.GoogleOAuthCredentialID() {
 		return CredentialConfig{ID: id, Type: "google-oauth-refresh-token", Params: map[string]string{}}, true
+	}
+	if namespace, ok := GoogleCredentialNamespace(id); ok {
+		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Google.HasClientConfig() {
+			return CredentialConfig{ID: id, Type: "google-oauth-refresh-token", Params: map[string]string{}}, true
+		}
 	}
 	return CredentialConfig{}, false
 }
@@ -223,6 +258,50 @@ func (c *Config) GoogleOAuthCredentialID() string {
 		return c.Server.OAuth.Google.CredentialID
 	}
 	return "google"
+}
+
+func (g GoogleOAuthConfig) HasClientConfig() bool {
+	return (g.ClientID != "" || g.ClientIDSecretRef != "") && (g.ClientSecret != "" || g.ClientSecretRef != "")
+}
+
+func GoogleCredentialNamespace(id string) (string, bool) {
+	namespace, provider, ok := strings.Cut(id, ".")
+	if !ok || namespace == "" || provider != "google" {
+		return "", false
+	}
+	return namespace, true
+}
+
+func NamespaceGoogleCredentialID(namespace string) string {
+	return namespace + ".google"
+}
+
+func GoogleOAuthConfigForCredential(cfg *Config, credentialID string) (GoogleOAuthConfig, bool) {
+	if credentialID == "" || credentialID == cfg.GoogleOAuthCredentialID() {
+		if cfg.Server.OAuth.Google.HasClientConfig() {
+			return cfg.Server.OAuth.Google, true
+		}
+		return GoogleOAuthConfig{}, false
+	}
+	if namespace, ok := GoogleCredentialNamespace(credentialID); ok {
+		ns, exists := cfg.Server.OAuth.Namespaces[namespace]
+		if exists && ns.Google.HasClientConfig() {
+			return ns.Google, true
+		}
+	}
+	return GoogleOAuthConfig{}, false
+}
+
+func SecretRefParts(ref string) (string, string, error) {
+	namespace, rest, ok := strings.Cut(ref, ".")
+	if !ok || namespace == "" {
+		return "", "", fmt.Errorf("secret ref %q must be formatted as namespace.provider.key", ref)
+	}
+	provider, key, ok := strings.Cut(rest, ".")
+	if !ok || provider == "" || key == "" {
+		return "", "", fmt.Errorf("secret ref %q must be formatted as namespace.provider.key", ref)
+	}
+	return namespace + "." + provider, key, nil
 }
 
 func CloneRequestWithoutProxyHeaders(r *http.Request) *http.Request {

@@ -147,19 +147,28 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 	}
 
 	tokenURL := cred.Params["token_url"]
-	if tokenURL == "" {
-		tokenURL = cfg.Server.OAuth.Google.TokenURL
+	googleCfg, hasGoogleCfg := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
+	if tokenURL == "" && hasGoogleCfg {
+		tokenURL = googleCfg.TokenURL
 	}
 	if tokenURL == "" {
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
 	clientID := config.HeaderValueFromEnv(cred.Params["client_id"])
-	if clientID == "" {
-		clientID = config.HeaderValueFromEnv(cfg.Server.OAuth.Google.ClientID)
+	if clientID == "" && hasGoogleCfg {
+		var err error
+		clientID, err = i.googleClientValue(ctx, googleCfg.ClientID, googleCfg.ClientIDSecretRef)
+		if err != nil {
+			return "", err
+		}
 	}
 	clientSecret := config.HeaderValueFromEnv(cred.Params["client_secret"])
-	if clientSecret == "" {
-		clientSecret = config.HeaderValueFromEnv(cfg.Server.OAuth.Google.ClientSecret)
+	if clientSecret == "" && hasGoogleCfg {
+		var err error
+		clientSecret, err = i.googleClientValue(ctx, googleCfg.ClientSecret, googleCfg.ClientSecretRef)
+		if err != nil {
+			return "", err
+		}
 	}
 	refreshToken, err := i.secretValue(ctx, cred, "refresh_token")
 	if err != nil {
@@ -175,6 +184,16 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 	form.Set("client_secret", clientSecret)
 	form.Set("refresh_token", refreshToken)
 	return i.formToken(ctx, cred.ID, tokenURL, form)
+}
+
+func (i *Injector) googleClientValue(ctx context.Context, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, i.secrets, secretRef)
 }
 
 func (i *Injector) secretValue(ctx context.Context, cred config.CredentialConfig, key string) (string, error) {

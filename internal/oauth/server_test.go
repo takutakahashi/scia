@@ -28,6 +28,19 @@ func (p staticProvider) Watch(ctx context.Context, out chan<- *config.Config) er
 	return ctx.Err()
 }
 
+func TestHealthz(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/_scia/healthz", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
 func TestGoogleOAuthStartRedirectsToGoogle(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{
@@ -207,6 +220,108 @@ func TestGoogleOAuthCallbackStoresConfigGoogleRefreshToken(t *testing.T) {
 	}
 	if got, ok, err := secretStore.Get(context.Background(), "google-calendar", "refresh_token"); err != nil || !ok || got != "config-refresh-token" {
 		t.Fatalf("refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestNamespaceGoogleAuthorizationURLUsesSecretRefClientID(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Google: config.GoogleOAuthConfig{
+							ClientIDSecretRef: "service-a.google.client-id",
+							ClientSecretRef:   "service-a.google.client-secret",
+							Scope:             "https://www.googleapis.com/auth/calendar",
+							RedirectURL:       "https://service-a.example.com/oauth/callback",
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "service-a.google", "client-id", "secret-client-id"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/service-a/google/authorization-url?state=state-1", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(body["authorization_url"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	assertQueryValue(t, query, "client_id", "secret-client-id")
+	assertQueryValue(t, query, "redirect_uri", "https://service-a.example.com/oauth/callback")
+	assertQueryValue(t, query, "scope", "https://www.googleapis.com/auth/calendar")
+	assertQueryValue(t, query, "state", "state-1")
+	if strings.Contains(body["authorization_url"], "client-secret") {
+		t.Fatalf("authorization URL leaked client secret: %s", body["authorization_url"])
+	}
+}
+
+func TestNamespaceGoogleTokenInjectsClientSecret(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "refresh_token", "refresh-token")
+		assertFormValue(t, r, "client_id", "secret-client-id")
+		assertFormValue(t, r, "client_secret", "secret-client-secret")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Google: config.GoogleOAuthConfig{
+							ClientIDSecretRef: "service-a.google.client-id",
+							ClientSecretRef:   "service-a.google.client-secret",
+							TokenURL:          tokenEndpoint.URL,
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "service-a.google", "client-id", "secret-client-id"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "service-a.google", "client-secret", "secret-client-secret"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/google/token", strings.NewReader("refresh_token=refresh-token"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "access-token") {
+		t.Fatalf("token response was not proxied: %s", rec.Body.String())
 	}
 }
 

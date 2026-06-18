@@ -1,4 +1,5 @@
 server:
+  mode: "proxy"
   listen: ":8080"
   adminToken: "env:SCIA_ADMIN_TOKEN"
   approvalTimeout: "5m"
@@ -15,6 +16,18 @@ server:
       clientId: "env:GOOGLE_OAUTH_CLIENT_ID"
       clientSecret: "env:GOOGLE_OAUTH_CLIENT_SECRET"
       scope: "https://www.googleapis.com/auth/calendar"
+    namespaces:
+      service-a:
+        google:
+          clientIdSecretRef: "secret:service-a.google.client-id"
+          clientSecretRef: "secret:service-a.google.client-secret"
+          scope: "https://www.googleapis.com/auth/calendar"
+          redirectUrl: "http://localhost:8081/oauth/google/callback"
+      service-b:
+        google:
+          clientIdSecretRef: "env:SERVICE_B_GOOGLE_CLIENT_ID"
+          clientSecretRef: "env:SERVICE_B_GOOGLE_CLIENT_SECRET"
+          scope: "openid email profile"
   secrets:
     sqlitePath: "data/scia-secrets.db"
 
@@ -62,3 +75,9 @@ rules:
     paths: ["/calendar/v3/*"]
     action: allow
     credentials: ["google-calendar"]
+  - name: inject-service-a-google-token
+    hosts: ["www.googleapis.com"]
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+    paths: ["/calendar/v3/*"]
+    action: allow
+    credentials: ["service-a.google"]

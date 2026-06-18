@@ -1,12 +1,14 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,6 +22,8 @@ import (
 )
 
 const googleAuthURL = "https://accounts.google.com/o/oauth2/v2/auth"
+const googleTokenURL = "https://oauth2.googleapis.com/token"
+const googleRevokeURL = "https://oauth2.googleapis.com/revoke"
 
 type Server struct {
 	store   *config.Store
@@ -55,8 +59,10 @@ func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logg
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.index)
+	mux.HandleFunc("/_scia/healthz", s.healthz)
 	mux.HandleFunc("/oauth/google/start", s.startGoogle)
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
+	mux.HandleFunc("/oauth/", s.namespaceOAuth)
 	return mux
 }
 
@@ -80,6 +86,14 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	_ = indexTemplate.Execute(w, data)
 }
 
+func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 	credentialID := r.URL.Query().Get("credential")
 	cfg := s.store.Get()
@@ -88,7 +102,11 @@ func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown google credential", http.StatusBadRequest)
 		return
 	}
-	clientID := googleClientID(cfg, cred)
+	clientID, err := s.googleClientID(r.Context(), cfg, cred)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if clientID == "" {
 		http.Error(w, "credential is missing client_id", http.StatusBadRequest)
 		return
@@ -181,17 +199,26 @@ type tokenResponse struct {
 func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.CredentialConfig, code string) (tokenResponse, error) {
 	cfg := s.store.Get()
 	tokenURL := cred.Params["token_url"]
-	if tokenURL == "" {
-		tokenURL = cfg.Server.OAuth.Google.TokenURL
+	googleCfg, hasGoogleCfg := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
+	if tokenURL == "" && hasGoogleCfg {
+		tokenURL = googleCfg.TokenURL
 	}
 	if tokenURL == "" {
-		tokenURL = "https://oauth2.googleapis.com/token"
+		tokenURL = googleTokenURL
+	}
+	clientID, err := s.googleClientID(ctx, cfg, cred)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	clientSecret, err := s.googleClientSecret(ctx, cfg, cred)
+	if err != nil {
+		return tokenResponse{}, err
 	}
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("client_id", googleClientID(cfg, cred))
-	form.Set("client_secret", googleClientSecret(cfg, cred))
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
 	form.Set("redirect_uri", s.redirectURL(r))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -233,10 +260,202 @@ func (s *Server) redirectURL(r *http.Request) string {
 	return "http://" + host + "/oauth/google/callback"
 }
 
+func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/oauth/"), "/")
+	if len(parts) != 3 || parts[1] != "google" {
+		http.NotFound(w, r)
+		return
+	}
+	namespace, action := parts[0], parts[2]
+	credentialID := config.NamespaceGoogleCredentialID(namespace)
+	cfg := s.store.Get()
+	googleCfg, ok := config.GoogleOAuthConfigForCredential(cfg, credentialID)
+	if !ok {
+		http.Error(w, "unknown google namespace", http.StatusNotFound)
+		return
+	}
+	switch action {
+	case "authorization-url":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceGoogleAuthorizationURL(w, r, credentialID, googleCfg, false)
+	case "start":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceGoogleAuthorizationURL(w, r, credentialID, googleCfg, true)
+	case "token":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceGoogleToken(w, r, googleCfg)
+	case "revoke":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceGoogleRevoke(w, r, googleCfg)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.Request, credentialID string, googleCfg config.GoogleOAuthConfig, redirect bool) {
+	clientID, err := s.googleClientValue(r.Context(), googleCfg.ClientID, googleCfg.ClientIDSecretRef)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if clientID == "" {
+		http.Error(w, "google namespace is missing client id", http.StatusBadRequest)
+		return
+	}
+	authURL := googleCfg.AuthURL
+	if authURL == "" {
+		authURL = googleAuthURL
+	}
+	redirectURI := r.URL.Query().Get("redirect_uri")
+	if redirectURI == "" {
+		redirectURI = googleCfg.RedirectURL
+	}
+	if redirectURI == "" {
+		redirectURI = s.redirectURL(r)
+	}
+	scope := r.URL.Query().Get("scope")
+	if scope == "" {
+		scope = googleCfg.Scope
+	}
+	if scope == "" {
+		scope = "openid email profile"
+	}
+	state := r.URL.Query().Get("state")
+	if state == "" && redirect {
+		generated, err := randomState()
+		if err != nil {
+			http.Error(w, "failed to create state", http.StatusInternalServerError)
+			return
+		}
+		state = generated
+	}
+	q := url.Values{}
+	q.Set("client_id", clientID)
+	q.Set("redirect_uri", redirectURI)
+	q.Set("response_type", "code")
+	q.Set("scope", scope)
+	q.Set("access_type", queryDefault(r, "access_type", "offline"))
+	q.Set("prompt", queryDefault(r, "prompt", "consent"))
+	if state != "" {
+		q.Set("state", state)
+	}
+	location := authURL + "?" + q.Encode()
+	if redirect {
+		s.states.Store(state, stateInfo{CredentialID: credentialID, CreatedAt: time.Now()})
+		http.Redirect(w, r, location, http.StatusFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"credential_id":     credentialID,
+		"authorization_url": location,
+		"auth_url":          authURL,
+		"redirect_uri":      redirectURI,
+		"scope":             scope,
+	})
+}
+
+func (s *Server) namespaceGoogleToken(w http.ResponseWriter, r *http.Request, googleCfg config.GoogleOAuthConfig) {
+	form, err := parseFormOrJSON(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	grantType := form.Get("grant_type")
+	if grantType == "" {
+		grantType = "refresh_token"
+	}
+	if grantType != "refresh_token" && grantType != "authorization_code" {
+		http.Error(w, "unsupported grant_type", http.StatusBadRequest)
+		return
+	}
+	clientID, clientSecret, err := s.googleClientPair(r.Context(), googleCfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	upstream := url.Values{}
+	upstream.Set("grant_type", grantType)
+	upstream.Set("client_id", clientID)
+	upstream.Set("client_secret", clientSecret)
+	if grantType == "refresh_token" {
+		if form.Get("refresh_token") == "" {
+			http.Error(w, "refresh_token is required", http.StatusBadRequest)
+			return
+		}
+		upstream.Set("refresh_token", form.Get("refresh_token"))
+	} else {
+		if form.Get("code") == "" || form.Get("redirect_uri") == "" {
+			http.Error(w, "code and redirect_uri are required", http.StatusBadRequest)
+			return
+		}
+		upstream.Set("code", form.Get("code"))
+		upstream.Set("redirect_uri", form.Get("redirect_uri"))
+	}
+	if scope := form.Get("scope"); scope != "" {
+		upstream.Set("scope", scope)
+	}
+	tokenURL := googleCfg.TokenURL
+	if tokenURL == "" {
+		tokenURL = googleTokenURL
+	}
+	s.forwardForm(w, r, tokenURL, upstream)
+}
+
+func (s *Server) namespaceGoogleRevoke(w http.ResponseWriter, r *http.Request, googleCfg config.GoogleOAuthConfig) {
+	form, err := parseFormOrJSON(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if form.Get("token") == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+	revokeURL := googleCfg.RevokeURL
+	if revokeURL == "" {
+		revokeURL = googleRevokeURL
+	}
+	upstream := url.Values{}
+	upstream.Set("token", form.Get("token"))
+	s.forwardForm(w, r, revokeURL, upstream)
+}
+
+func (s *Server) forwardForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewBufferString(form.Encode()))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for _, value := range resp.Header.Values("Content-Type") {
+		w.Header().Add("Content-Type", value)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
 func (s *Server) googleOptions(cfg *config.Config) []googleOption {
 	var options []googleOption
 	configID := cfg.GoogleOAuthCredentialID()
-	hasConfigClient := googleClientID(cfg, config.CredentialConfig{}) != "" && googleClientSecret(cfg, config.CredentialConfig{}) != ""
+	hasConfigClient := cfg.Server.OAuth.Google.HasClientConfig()
 	hasExplicitConfigCredential := false
 	for _, cred := range cfg.Credentials {
 		if cred.Type == "google-oauth-refresh-token" && cred.ID == configID {
@@ -260,6 +479,15 @@ func (s *Server) googleOptions(cfg *config.Config) []googleOption {
 			})
 		}
 	}
+	for namespace, ns := range cfg.Server.OAuth.Namespaces {
+		if ns.Google.HasClientConfig() {
+			options = append(options, googleOption{
+				CredentialID: config.NamespaceGoogleCredentialID(namespace),
+				Scope:        ns.Google.Scope,
+				Source:       "server.oauth.namespaces." + namespace + ".google",
+			})
+		}
+	}
 	return options
 }
 
@@ -271,25 +499,94 @@ func (s *Server) googleCredential(cfg *config.Config, credentialID string) (conf
 	return cred, true
 }
 
-func googleClientID(cfg *config.Config, cred config.CredentialConfig) string {
+func (s *Server) googleClientID(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
 	if value := config.HeaderValueFromEnv(cred.Params["client_id"]); value != "" {
-		return value
+		return value, nil
 	}
-	return config.HeaderValueFromEnv(cfg.Server.OAuth.Google.ClientID)
+	googleCfg, ok := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
+	if !ok {
+		return "", nil
+	}
+	return s.googleClientValue(ctx, googleCfg.ClientID, googleCfg.ClientIDSecretRef)
 }
 
-func googleClientSecret(cfg *config.Config, cred config.CredentialConfig) string {
+func (s *Server) googleClientSecret(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
 	if value := config.HeaderValueFromEnv(cred.Params["client_secret"]); value != "" {
-		return value
+		return value, nil
 	}
-	return config.HeaderValueFromEnv(cfg.Server.OAuth.Google.ClientSecret)
+	googleCfg, ok := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
+	if !ok {
+		return "", nil
+	}
+	return s.googleClientValue(ctx, googleCfg.ClientSecret, googleCfg.ClientSecretRef)
+}
+
+func (s *Server) googleClientPair(ctx context.Context, googleCfg config.GoogleOAuthConfig) (string, string, error) {
+	clientID, err := s.googleClientValue(ctx, googleCfg.ClientID, googleCfg.ClientIDSecretRef)
+	if err != nil {
+		return "", "", err
+	}
+	clientSecret, err := s.googleClientValue(ctx, googleCfg.ClientSecret, googleCfg.ClientSecretRef)
+	if err != nil {
+		return "", "", err
+	}
+	if clientID == "" || clientSecret == "" {
+		return "", "", fmt.Errorf("google namespace requires client id and client secret")
+	}
+	return clientID, clientSecret, nil
+}
+
+func (s *Server) googleClientValue(ctx context.Context, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, s.secrets, secretRef)
 }
 
 func googleScope(cfg *config.Config, cred config.CredentialConfig) string {
 	if cred.Params["scope"] != "" {
 		return cred.Params["scope"]
 	}
-	return cfg.Server.OAuth.Google.Scope
+	googleCfg, ok := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
+	if ok {
+		return googleCfg.Scope
+	}
+	return ""
+}
+
+func queryDefault(r *http.Request, key, fallback string) string {
+	if value := r.URL.Query().Get(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func parseFormOrJSON(r *http.Request) (url.Values, error) {
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "application/json") {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			return nil, err
+		}
+		values := url.Values{}
+		for key, value := range body {
+			values.Set(key, value)
+		}
+		return values, nil
+	}
+	if err := r.ParseForm(); err != nil {
+		return nil, err
+	}
+	return r.PostForm, nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func randomState() (string, error) {

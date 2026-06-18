@@ -84,6 +84,62 @@ The SQLite file stores values by credential ID and key. For Google credentials, 
 
 The SQLite store is local persistence, not encryption. Keep the database path on a protected volume and restrict filesystem access to the `scia` process.
 
+## Namespaced OAuth broker
+
+`server.oauth.namespaces` configures OAuth clients by namespace. This lets agents or a proxy call scia for authorization URLs, token refresh, and revocation without receiving the SaaS client ID or client secret.
+
+```yaml
+server:
+  mode: "oauth"
+  oauth:
+    listen: "127.0.0.1:8081"
+    namespaces:
+      service-a:
+        google:
+          clientIdSecretRef: "secret:service-a.google.client-id"
+          clientSecretRef: "secret:service-a.google.client-secret"
+          scope: "https://www.googleapis.com/auth/calendar"
+          redirectUrl: "https://service-a.example.com/oauth/callback"
+```
+
+`server.mode` is exclusive:
+
+- `proxy` starts only the forward proxy.
+- `oauth` starts only the OAuth broker server.
+
+The two servers are not started in the same process.
+
+Secret refs support these forms:
+
+- `secret:namespace.provider.key` resolves from the configured secret store as credential ID `namespace.provider` and key `key`.
+- `namespace.provider.key` is accepted as a shorthand for `secret:namespace.provider.key`.
+- `env:NAME` resolves from the process environment, which is useful for local experiments.
+
+For the example above, store `client-id` and `client-secret` under credential ID `service-a.google`. For env-backed experiments, use:
+
+```yaml
+clientIdSecretRef: "env:SERVICE_A_GOOGLE_CLIENT_ID"
+clientSecretRef: "env:SERVICE_A_GOOGLE_CLIENT_SECRET"
+```
+
+Google broker endpoints:
+
+- `GET /oauth/{namespace}/google/authorization-url?state=...` returns a generated Google authorization URL.
+- `GET /oauth/{namespace}/google/start` redirects to the generated Google authorization URL.
+- `POST /oauth/{namespace}/google/token` forwards a refresh-token or authorization-code request to Google with the configured client ID and client secret injected by scia.
+- `POST /oauth/{namespace}/google/revoke` forwards a revoke request to Google.
+
+The proxy can also reference the namespaced Google credential ID directly:
+
+```yaml
+rules:
+  - name: inject-service-a-google-token
+    hosts: ["www.googleapis.com"]
+    paths: ["/calendar/v3/*"]
+    action: allow
+    credentials: ["service-a.google"]
+```
+
 ## Configuration
 
 See [configs/example.yaml](configs/example.yaml).
