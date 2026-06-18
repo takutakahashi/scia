@@ -8,6 +8,10 @@ server:
     caKeyPath: "data/scia-ca-key.pem"
   backendProxy:
     url: "env:SCIA_BACKEND_PROXY_URL"
+  authSync:
+    url: "env:SCIA_AUTH_SYNC_URL"
+    proxyId: "proxy-dev"
+    token: "env:SCIA_AUTH_SYNC_TOKEN"
   oauth:
     listen: "127.0.0.1:8081"
     redirectUrl: "http://localhost:8081/oauth/google/callback"

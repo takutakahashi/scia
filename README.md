@@ -129,6 +129,27 @@ Google broker endpoints:
 - `POST /oauth/{namespace}/google/token` forwards a refresh-token or authorization-code request to Google with the configured client ID and client secret injected by scia.
 - `POST /oauth/{namespace}/google/revoke` forwards a revoke request to Google.
 
+For local development with one proxy, set `server.authSync.mode` to `memory` on the OAuth broker. The proxy keeps one long-lived SSE connection to the broker and receives refresh tokens after OAuth callback completion:
+
+```yaml
+# auth server
+server:
+  mode: "oauth"
+  authSync:
+    mode: "memory"
+    token: "env:SCIA_AUTH_SYNC_TOKEN"
+
+# proxy server
+server:
+  mode: "proxy"
+  authSync:
+    url: "http://localhost:8081/_scia/auth-sync/events"
+    proxyId: "proxy-dev"
+    token: "env:SCIA_AUTH_SYNC_TOKEN"
+```
+
+In this mode the broker does not need Redis. If the proxy is disconnected, token deliveries are kept in memory and sent when the single proxy reconnects. The proxy stores received values in its configured `secrets.Store`.
+
 The proxy can also reference the namespaced Google credential ID directly:
 
 ```yaml

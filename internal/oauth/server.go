@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/takutakahashi/scia/internal/authsync"
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/secrets"
 )
@@ -31,6 +32,7 @@ type Server struct {
 	client  *http.Client
 	logger  *slog.Logger
 	states  sync.Map
+	syncHub *authsync.Hub
 }
 
 type stateInfo struct {
@@ -53,6 +55,7 @@ func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logg
 		secrets: secretStore,
 		client:  &http.Client{Timeout: 10 * time.Second},
 		logger:  logger,
+		syncHub: authsync.NewHub(store, logger),
 	}
 }
 
@@ -62,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/oauth/google/start", s.startGoogle)
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
 	mux.HandleFunc("/oauth/", s.namespaceOAuth)
+	mux.Handle("/_scia/auth-sync/events", s.syncHub)
 	return mux
 }
 
@@ -156,7 +160,22 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
-	if err := s.secrets.Put(r.Context(), info.CredentialID, "refresh_token", token.RefreshToken); err != nil {
+	stored := true
+	if s.syncHub.Enabled() {
+		deliveryID, err := randomState()
+		if err != nil {
+			http.Error(w, "failed to create token delivery", http.StatusInternalServerError)
+			return
+		}
+		stored = false
+		s.syncHub.Publish(authsync.Delivery{
+			Type:         "token.deliver",
+			DeliveryID:   deliveryID,
+			CredentialID: info.CredentialID,
+			Key:          "refresh_token",
+			Value:        token.RefreshToken,
+		})
+	} else if err := s.secrets.Put(r.Context(), info.CredentialID, "refresh_token", token.RefreshToken); err != nil {
 		s.logger.Error("failed to store google refresh token", "error", err, "credential", info.CredentialID)
 		http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
 		return
@@ -172,7 +191,7 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		RefreshToken: token.RefreshToken,
 		AccessToken:  token.AccessToken,
 		ExpiresIn:    token.ExpiresIn,
-		Stored:       true,
+		Stored:       stored,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = callbackTemplate.Execute(w, data)
