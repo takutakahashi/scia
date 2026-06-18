@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>scia OAuth Token Flow</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18202b;
+      --muted: #5c6778;
+      --line: #cfd7e3;
+      --soft: #f5f7fa;
+      --panel: #ffffff;
+      --blue: #1d5fbf;
+      --green: #18794e;
+      --amber: #9a6700;
+      --red: #b42318;
+      --shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: #eef2f6;
+      line-height: 1.55;
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }
+
+    header {
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 32px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 20px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 0 0 10px;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+      background: #eef2f7;
+      border: 1px solid #dde4ee;
+      border-radius: 5px;
+      padding: 1px 5px;
+    }
+
+    pre {
+      margin: 0;
+      padding: 14px;
+      overflow: auto;
+      background: #101828;
+      color: #eef4ff;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .lead {
+      max-width: 880px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .band {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 20px;
+      margin: 18px 0;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid.two {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .node {
+      min-height: 118px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 14px;
+      position: relative;
+    }
+
+    .node strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .node small {
+      display: block;
+      color: var(--muted);
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 650;
+      margin-bottom: 10px;
+      border: 1px solid transparent;
+    }
+
+    .tag.ok {
+      color: var(--green);
+      background: #eaf6ef;
+      border-color: #b7dfc8;
+    }
+
+    .tag.need {
+      color: var(--amber);
+      background: #fff7df;
+      border-color: #efd280;
+    }
+
+    .tag.stop {
+      color: var(--red);
+      background: #fff0ee;
+      border-color: #f0b8b0;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: 1fr 40px 1fr 40px 1fr;
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--blue);
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    .steps {
+      counter-reset: step;
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .steps li {
+      counter-increment: step;
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .steps li::before {
+      content: counter(step);
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #e8f1ff;
+      color: var(--blue);
+      font-weight: 750;
+      font-size: 13px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .callout {
+      border-left: 4px solid var(--blue);
+      background: #f4f8ff;
+      padding: 14px 16px;
+      border-radius: 0 8px 8px 0;
+    }
+
+    .warning {
+      border-left-color: var(--amber);
+      background: #fff8e5;
+    }
+
+    .matrix {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .matrix th,
+    .matrix td {
+      padding: 11px 12px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .matrix th {
+      background: #f7f9fc;
+      font-size: 13px;
+      color: #344054;
+    }
+
+    .matrix tr:last-child td {
+      border-bottom: 0;
+    }
+
+    @media (max-width: 860px) {
+      main {
+        padding: 24px 14px 42px;
+      }
+
+      .grid.two,
+      .grid.three,
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      .arrow {
+        min-height: 24px;
+        transform: rotate(90deg);
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>scia: 外部認可サーバから proxy に token を流し込む設計</h1>
+      <p class="lead">
+        認可サーバ機能と proxy 機能を別の場所で動かす場合、OAuth の consent と token exchange は認可サーバ側で行い、
+        API 呼び出し時の token injection は proxy 側で行います。両者をつなぐには、proxy 側に refresh token を投入する経路が必要です。
+      </p>
+    </header>
+
+    <section class="band">
+      <h2>全体像</h2>
+      <div class="flow" aria-label="全体フロー">
+        <div class="node">
+          <span class="tag ok">外部</span>
+          <strong>Browser / User</strong>
+          <small>Google consent を実行する。auth code は外部認可サーバの callback に戻る。</small>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node">
+          <span class="tag ok">oauth mode</span>
+          <strong>scia 認可サーバ</strong>
+          <small><code>clientIdSecretRef</code> と <code>clientSecretRef</code> を解決し、Google token endpoint と通信する。</small>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node">
+          <span class="tag need">追加が必要</span>
+          <strong>scia proxy</strong>
+          <small>受け取った <code>refresh_token</code> を保存し、agent の Google API 呼び出し時に access token を注入する。</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="band">
+      <h2>なぜ token ingest endpoint が必要か</h2>
+      <div class="grid two">
+        <div>
+          <h3>今ある機能</h3>
+          <ol class="steps">
+            <li><div>認可サーバは Google の authorization URL を生成できる。</div></li>
+            <li><div>認可サーバは auth code / refresh token を Google token endpoint に中継できる。</div></li>
+            <li><div>proxy は自分の secret store にある refresh token を使って access token を注入できる。</div></li>
+          </ol>
+        </div>
+        <div>
+          <h3>足りない接続点</h3>
+          <ol class="steps">
+            <li><div>認可サーバが取得した refresh token を、別場所の proxy secret store に保存する API。</div></li>
+            <li><div>保存先を <code>service-a.google</code> のような credential ID で指定するルール。</div></li>
+            <li><div>この API を外部から叩けるが、強く認可されていること。</div></li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section class="band">
+      <h2>推奨フロー</h2>
+      <ol class="steps">
+        <li>
+          <div>
+            <strong>外部サービスが認可 URL を取得</strong>
+            <p class="muted"><code>GET https://auth.example.com/oauth/service-a/google/authorization-url?state=...</code></p>
+          </div>
+        </li>
+        <li>
+          <div>
+            <strong>ユーザーが Google で consent</strong>
+            <p class="muted">callback は外部認可サーバ、または外部サービスが管理する callback に戻す。</p>
+          </div>
+        </li>
+        <li>
+          <div>
+            <strong>認可サーバが token exchange</strong>
+            <p class="muted">認可サーバだけが Google client secret を解決し、Google から refresh token を受け取る。</p>
+          </div>
+        </li>
+        <li>
+          <div>
+            <strong>認可サーバが proxy に refresh token を投入</strong>
+            <p class="muted">ここに新しい proxy admin endpoint を追加する。</p>
+          </div>
+        </li>
+        <li>
+          <div>
+            <strong>agent は Google API を普通に呼ぶ</strong>
+            <p class="muted">proxy が <code>credentials: ["service-a.google"]</code> に従って access token を注入する。</p>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <section class="band">
+      <h2>追加 endpoint 案</h2>
+      <div class="grid two">
+        <div>
+          <h3>汎用 secret ingest</h3>
+          <pre><code>PUT /_scia/secrets/service-a.google/refresh_token
+Authorization: Bearer &lt;admin-token&gt;
+Content-Type: application/json
+
+{
+  "value": "&lt;refresh_token&gt;"
+}</code></pre>
+          <p class="muted">refresh token 以外の secret も投入できる。強い endpoint なので管理面は慎重にする。</p>
+        </div>
+        <div>
+          <h3>OAuth token 専用 ingest</h3>
+          <pre><code>POST /_scia/oauth/google/tokens
+Authorization: Bearer &lt;admin-token&gt;
+Content-Type: application/json
+
+{
+  "credential_id": "service-a.google",
+  "refresh_token": "&lt;refresh_token&gt;"
+}</code></pre>
+          <p class="muted">用途が明確で、最初に実装するならこちらが扱いやすい。</p>
+        </div>
+      </div>
+      <div class="callout warning">
+        この endpoint は proxy 側に token を書き込めるため、<code>server.adminToken</code>、TLS、private network、必要なら mTLS を前提にするべきです。
+      </div>
+    </section>
+
+    <section class="band">
+      <h2>保存後の proxy config</h2>
+      <pre><code>server:
+  mode: "proxy"
+  secrets:
+    sqlitePath: "data/scia-secrets.db"
+
+rules:
+  - name: inject-service-a-google-token
+    hosts: ["www.googleapis.com"]
+    paths: ["/calendar/v3/*"]
+    action: allow
+    credentials: ["service-a.google"]</code></pre>
+      <p class="muted">
+        proxy の secret store に <code>credential_id=service-a.google</code>, <code>key=refresh_token</code> が保存されていれば、
+        request 時に Google token endpoint で access token に交換して <code>Authorization: Bearer ...</code> を注入できます。
+      </p>
+    </section>
+
+    <section class="band">
+      <h2>2つの実現案の比較</h2>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>案</th>
+            <th>仕組み</th>
+            <th>向いている状況</th>
+            <th>注意点</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>共有 secret store</strong></td>
+            <td>認可サーバと proxy が同じ backend store を読む。</td>
+            <td>AWS Secrets Manager や DB など、共有可能な store がある。</td>
+            <td>store backend の追加実装が必要。SQLite 共有は避けたい。</td>
+          </tr>
+          <tr>
+            <td><strong>proxy token ingest</strong></td>
+            <td>認可サーバが proxy の admin endpoint に refresh token を push する。</td>
+            <td>認可サーバと proxy が完全に別配置で、HTTP で連携したい。</td>
+            <td>endpoint 認可を強くする必要がある。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="band">
+      <h2>結論</h2>
+      <div class="callout">
+        実現できます。最短の追加実装は、proxy mode に admin token 保護付きの OAuth token ingest endpoint を追加することです。
+        これにより、外部認可サーバが取得した <code>refresh_token</code> を proxy に流し込み、agent は OAuth の詳細を知らずに Google API を呼べます。
+      </div>
+    </section>
+  </main>
+</body>
+</html>
