@@ -141,17 +141,18 @@ rules:
     credentials: ["service-a.google"]
 ```
 
-For a proxy that should not read refresh tokens or OAuth client secrets directly,
-configure the Google credential with `params.access_token_url`. The proxy will
-POST to the OAuth broker when a matching request needs a token, cache the returned
-access token until expiry, and inject it into the upstream request:
+For a proxy that should not read OAuth client secrets directly, configure the
+Google credential with `params.token_broker_url`. The proxy reads the refresh
+token from its configured secret store, POSTs it to the OAuth broker when a
+matching request needs an access token, caches the returned access token until
+expiry, and injects it into the upstream request:
 
 ```yaml
 credentials:
   - id: service-a.google
     type: google-oauth-refresh-token
     params:
-      access_token_url: "http://scia-oauth:8081/oauth/service-a/google/access-token"
+      token_broker_url: "http://scia-oauth:8081/oauth/service-a/google/token"
 ```
 
 ## Configuration

@@ -146,11 +146,8 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 		}
 	}
 
-	if accessTokenURL := config.HeaderValueFromEnv(cred.Params["access_token_url"]); accessTokenURL != "" {
-		return i.brokerAccessToken(ctx, cred.ID, accessTokenURL)
-	}
-
 	tokenURL := cred.Params["token_url"]
+	tokenBrokerURL := config.HeaderValueFromEnv(cred.Params["token_broker_url"])
 	googleCfg, hasGoogleCfg := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
 	if tokenURL == "" && hasGoogleCfg {
 		tokenURL = googleCfg.TokenURL
@@ -178,6 +175,18 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 	if err != nil {
 		return "", err
 	}
+	if tokenBrokerURL != "" {
+		if refreshToken == "" {
+			return "", fmt.Errorf("credential %q requires refresh_token", cred.ID)
+		}
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", refreshToken)
+		if scope := cred.Params["scope"]; scope != "" {
+			form.Set("scope", scope)
+		}
+		return i.formToken(ctx, cred.ID, tokenBrokerURL, form)
+	}
 	if clientID == "" || clientSecret == "" || refreshToken == "" {
 		return "", fmt.Errorf("credential %q requires client_id, client_secret, and refresh_token", cred.ID)
 	}
@@ -188,22 +197,6 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 	form.Set("client_secret", clientSecret)
 	form.Set("refresh_token", refreshToken)
 	return i.formToken(ctx, cred.ID, tokenURL, form)
-}
-
-func (i *Injector) brokerAccessToken(ctx context.Context, credentialID, accessTokenURL string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, accessTokenURL, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := i.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return "", fmt.Errorf("access token endpoint returned %s", resp.Status)
-	}
-	return i.decodeAndCacheToken(credentialID, resp)
 }
 
 func (i *Injector) googleClientValue(ctx context.Context, literal, secretRef string) (string, error) {

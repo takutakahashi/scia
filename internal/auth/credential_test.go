@@ -113,13 +113,18 @@ func TestGoogleRefreshTokenUsesSecretStore(t *testing.T) {
 	}
 }
 
-func TestGoogleRefreshTokenUsesAccessTokenBroker(t *testing.T) {
+func TestGoogleRefreshTokenUsesTokenBroker(t *testing.T) {
 	var tokenRequests int
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenRequests++
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method: %s", r.Method)
 		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "refresh_token", "broker-refresh-token")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "broker-access-token",
 			"token_type":   "Bearer",
@@ -134,7 +139,8 @@ func TestGoogleRefreshTokenUsesAccessTokenBroker(t *testing.T) {
 				ID:   "google",
 				Type: "google-oauth-refresh-token",
 				Params: map[string]string{
-					"access_token_url": tokenEndpoint.URL,
+					"refresh_token":    "broker-refresh-token",
+					"token_broker_url": tokenEndpoint.URL,
 				},
 			},
 		},
