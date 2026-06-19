@@ -1,0 +1,69 @@
+name: Build Development Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: Git ref to build
+        required: false
+        default: ""
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-dev-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine Git reference
+        id: ref
+        run: |
+          if [ -n "${{ inputs.git_ref }}" ]; then
+            echo "ref=${{ inputs.git_ref }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        run: |
+          full_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=7 HEAD)"
+          echo "full_sha=${full_sha}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/takutakahashi/scia:dev-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.image }}
+          build-args: |
+            VERSION=dev-${{ steps.meta.outputs.short_sha }}
+            COMMIT=${{ steps.meta.outputs.full_sha }}
+            DATE=${{ github.event.repository.updated_at }}
+
+      - name: Summary
+        run: |
+          echo "Image: ${{ steps.meta.outputs.image }}"

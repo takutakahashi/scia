@@ -2,7 +2,10 @@ package proxy
 
 import (
 	"bufio"
+	"context"
+	"crypto/sha1"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +50,8 @@ func NewHandler(store *config.Store, secretStore secrets.Store, approvals *appro
 		injector: auth.NewInjector(secretStore),
 		transport: &http.Transport{
 			Proxy:                 nil,
+			ForceAttemptHTTP2:     false,
+			TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
 			ResponseHeaderTimeout: 60 * time.Second,
 			IdleConnTimeout:       90 * time.Second,
 		},
@@ -77,6 +83,10 @@ func (h *Handler) serveForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := h.store.Get()
+	if isProxySelfTarget(cfg.Server.Listen, target.Host, target.Scheme) {
+		http.Error(w, "proxy self-target denied", http.StatusLoopDetected)
+		return
+	}
 	decision := policy.Evaluate(cfg, r, target.Host)
 	if !h.authorizeDecision(w, r, decision, target.String()) {
 		return
@@ -105,11 +115,45 @@ func (h *Handler) serveForward(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) serveConnect(w http.ResponseWriter, r *http.Request) {
 	cfg := h.store.Get()
+	if isProxySelfTarget(cfg.Server.Listen, r.Host, "") {
+		http.Error(w, "proxy self-target denied", http.StatusLoopDetected)
+		return
+	}
 	decision := policy.Evaluate(cfg, r, r.Host)
 	if !h.authorizeDecision(w, r, decision, r.Host) {
 		return
 	}
+	if !mitmHostAllowed(integrationMITMHosts(cfg), r.Host) {
+		h.serveTunnelConnect(w, r)
+		return
+	}
 	h.serveMITMConnect(w, r)
+}
+
+func (h *Handler) serveTunnelConnect(w http.ResponseWriter, r *http.Request) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+	client, rw, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, "hijack failed", http.StatusInternalServerError)
+		return
+	}
+
+	upstream, err := h.dialRawTunnelUpstream(r.Context(), r.Host)
+	if err != nil {
+		_ = client.Close()
+		h.logger.Error("tunnel upstream failed", "error", err, "host", r.Host)
+		return
+	}
+	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		_ = client.Close()
+		_ = upstream.Close()
+		return
+	}
+	_ = pipeBidirectional(client, rw.Reader, upstream, bufio.NewReader(upstream))
 }
 
 func (h *Handler) serveMITMConnect(w http.ResponseWriter, r *http.Request) {
@@ -163,7 +207,14 @@ func (h *Handler) serveMITMConnect(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		ctx := context.WithValue(inner.Context(), mitmClientConnKey{}, tlsConn)
+		ctx = context.WithValue(ctx, mitmClientReaderKey{}, reader)
+		inner = inner.WithContext(ctx)
 		resp := h.roundTripMITMRequest(inner, r.Host)
+		if resp == nil {
+			_ = inner.Body.Close()
+			return
+		}
 		if err := resp.Write(tlsConn); err != nil {
 			_ = inner.Body.Close()
 			_ = resp.Body.Close()
@@ -191,6 +242,14 @@ func (h *Handler) roundTripMITMRequest(r *http.Request, connectHost string) *htt
 		return denial
 	}
 
+	if isWebSocketUpgrade(r) {
+		if err := h.handleMITMWebSocket(r, connectHost, cfg, decision); err != nil {
+			h.logger.Error("websocket upstream failed", "error", err, "url", target.String())
+			return textResponse(r, http.StatusBadGateway, "websocket upstream failed\n")
+		}
+		return nil
+	}
+
 	next := config.CloneRequestWithoutProxyHeaders(r)
 	next.URL = target
 	next.Host = connectHost
@@ -205,6 +264,291 @@ func (h *Handler) roundTripMITMRequest(r *http.Request, connectHost string) *htt
 		return textResponse(r, http.StatusBadGateway, "upstream request failed\n")
 	}
 	return resp
+}
+
+func (h *Handler) handleMITMWebSocket(r *http.Request, connectHost string, cfg *config.Config, decision policy.Decision) error {
+	clientConn, ok := r.Context().Value(mitmClientConnKey{}).(net.Conn)
+	if !ok {
+		return errors.New("missing mitm client connection")
+	}
+	clientReader, ok := r.Context().Value(mitmClientReaderKey{}).(*bufio.Reader)
+	if !ok {
+		return errors.New("missing mitm client reader")
+	}
+	next := cloneWebSocketRequest(r)
+	next.URL = &url.URL{Scheme: "https", Host: connectHost, Path: r.URL.Path, RawQuery: r.URL.RawQuery}
+	next.Host = connectHost
+	if err := h.injector.Apply(r.Context(), next, cfg, decision.Credentials); err != nil {
+		return fmt.Errorf("credential injection failed: %w", err)
+	}
+
+	upstream, err := h.dialWebSocketUpstream(r, connectHost)
+	if err != nil {
+		return err
+	}
+	defer upstream.Close()
+
+	if err := writeWebSocketRequest(upstream, next); err != nil {
+		return err
+	}
+	upstreamReader := bufio.NewReader(upstream)
+	resp, err := http.ReadResponse(upstreamReader, next)
+	if err != nil {
+		return fmt.Errorf("read upstream websocket response: %w", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		_ = resp.Write(clientConn)
+		return nil
+	}
+	normalizeWebSocketUpgradeResponse(resp, r)
+	if err := writeWebSocketResponse(clientConn, resp); err != nil {
+		return fmt.Errorf("write websocket response to client: %w", err)
+	}
+	return pipeBidirectional(clientConn, clientReader, upstream, upstreamReader)
+}
+
+type mitmClientConnKey struct{}
+type mitmClientReaderKey struct{}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
+func normalizeWebSocketUpgradeResponse(resp *http.Response, clientReq *http.Request) {
+	resp.Proto = "HTTP/1.1"
+	resp.ProtoMajor = 1
+	resp.ProtoMinor = 1
+	resp.Header.Set("Connection", "Upgrade")
+	resp.Header.Set("Upgrade", "websocket")
+	if key := strings.TrimSpace(clientReq.Header.Get("Sec-WebSocket-Key")); key != "" {
+		resp.Header.Set("Sec-WebSocket-Accept", websocketAccept(key))
+	}
+}
+
+func websocketAccept(key string) string {
+	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func cloneWebSocketRequest(r *http.Request) *http.Request {
+	next := r.Clone(r.Context())
+	next.RequestURI = ""
+	next.Header = r.Header.Clone()
+	for _, name := range []string{"Proxy-Authorization", "Proxy-Connection", "Keep-Alive"} {
+		next.Header.Del(name)
+	}
+	return next
+}
+
+func (h *Handler) dialWebSocketUpstream(r *http.Request, connectHost string) (net.Conn, error) {
+	var tcp net.Conn
+	var err error
+	tcp, err = h.dialRawTunnelUpstream(r.Context(), connectHost)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsConfig := &tls.Config{}
+	if h.transport != nil && h.transport.TLSClientConfig != nil {
+		tlsConfig = h.transport.TLSClientConfig.Clone()
+	}
+	if tlsConfig.ServerName == "" {
+		tlsConfig.ServerName = stripPort(connectHost)
+	}
+	tlsConfig.NextProtos = []string{"http/1.1"}
+
+	tlsConn := tls.Client(tcp, tlsConfig)
+	if err := tlsConn.HandshakeContext(r.Context()); err != nil {
+		_ = tcp.Close()
+		return nil, fmt.Errorf("upstream tls handshake: %w", err)
+	}
+	return tlsConn, nil
+}
+
+func (h *Handler) dialRawTunnelUpstream(ctx context.Context, connectHost string) (net.Conn, error) {
+	rawProxy := config.HeaderValueFromEnv(h.store.Get().Server.BackendProxy.URL)
+	if rawProxy == "" {
+		return (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, "tcp", connectHost)
+	}
+	return h.dialBackendProxyTunnel(ctx, rawProxy, connectHost)
+}
+
+func (h *Handler) dialBackendProxyTunnel(ctx context.Context, rawProxy, connectHost string) (net.Conn, error) {
+	proxyURL, err := url.Parse(rawProxy)
+	if err != nil {
+		return nil, fmt.Errorf("parse backend proxy url: %w", err)
+	}
+	proxyAddr := proxyURL.Host
+	if !strings.Contains(proxyAddr, ":") {
+		if proxyURL.Scheme == "https" {
+			proxyAddr += ":443"
+		} else {
+			proxyAddr += ":80"
+		}
+	}
+	tcp, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, "tcp", proxyAddr)
+	if err != nil {
+		return nil, fmt.Errorf("dial backend proxy: %w", err)
+	}
+	var conn net.Conn = tcp
+	if proxyURL.Scheme == "https" {
+		tlsConn := tls.Client(tcp, &tls.Config{ServerName: stripPort(proxyURL.Host)})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = tcp.Close()
+			return nil, fmt.Errorf("backend proxy tls handshake: %w", err)
+		}
+		conn = tlsConn
+	}
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", connectHost, connectHost); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("write backend proxy connect: %w", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("read backend proxy connect response: %w", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_ = conn.Close()
+		return nil, fmt.Errorf("backend proxy connect failed: %s", resp.Status)
+	}
+	return conn, nil
+}
+
+func mitmHostAllowed(patterns []string, host string) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	normalized := strings.ToLower(host)
+	hostOnly := normalized
+	if splitHost, _, err := net.SplitHostPort(normalized); err == nil {
+		hostOnly = splitHost
+	}
+	for _, pattern := range patterns {
+		pattern = strings.ToLower(pattern)
+		if matched, err := path.Match(pattern, normalized); err == nil && matched {
+			return true
+		}
+		if matched, err := path.Match(pattern, hostOnly); err == nil && matched {
+			return true
+		}
+		if pattern == normalized || pattern == hostOnly {
+			return true
+		}
+	}
+	return false
+}
+
+func integrationMITMHosts(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Server.Integrations.Google.Hosts
+}
+
+func isProxySelfTarget(listenAddr, targetHost, scheme string) bool {
+	listenPort := portFromHost(defaultListenAddr(listenAddr), "")
+	if listenPort == "" {
+		return false
+	}
+	targetPort := portFromHost(targetHost, scheme)
+	if targetPort != listenPort {
+		return false
+	}
+	host := strings.ToLower(stripPort(targetHost))
+	return host == "" ||
+		host == "localhost" ||
+		host == "127.0.0.1" ||
+		host == "::1" ||
+		host == "::" ||
+		host == "0.0.0.0" ||
+		host == "[::]"
+}
+
+func defaultListenAddr(listenAddr string) string {
+	if strings.TrimSpace(listenAddr) == "" {
+		return ":8080"
+	}
+	return listenAddr
+}
+
+func portFromHost(host, scheme string) string {
+	if _, port, err := net.SplitHostPort(host); err == nil {
+		return port
+	}
+	if strings.HasPrefix(host, ":") {
+		return strings.TrimPrefix(host, ":")
+	}
+	if strings.Contains(host, ":") {
+		return ""
+	}
+	switch scheme {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
+func writeWebSocketRequest(conn net.Conn, r *http.Request) error {
+	path := r.URL.RequestURI()
+	if path == "" {
+		path = "/"
+	}
+	writer := bufio.NewWriter(conn)
+	if _, err := fmt.Fprintf(writer, "%s %s HTTP/1.1\r\nHost: %s\r\n", r.Method, path, r.Host); err != nil {
+		return fmt.Errorf("write websocket request line: %w", err)
+	}
+	if err := r.Header.WriteSubset(writer, map[string]bool{"Host": true}); err != nil {
+		return fmt.Errorf("write websocket headers: %w", err)
+	}
+	if _, err := writer.WriteString("\r\n"); err != nil {
+		return fmt.Errorf("finish websocket headers: %w", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flush websocket request: %w", err)
+	}
+	return nil
+}
+
+func writeWebSocketResponse(conn net.Conn, resp *http.Response) error {
+	writer := bufio.NewWriter(conn)
+	if _, err := fmt.Fprintf(writer, "HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode)); err != nil {
+		return fmt.Errorf("write websocket response status: %w", err)
+	}
+	if err := resp.Header.Write(writer); err != nil {
+		return fmt.Errorf("write websocket response headers: %w", err)
+	}
+	if _, err := writer.WriteString("\r\n"); err != nil {
+		return fmt.Errorf("finish websocket response headers: %w", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flush websocket response: %w", err)
+	}
+	return nil
+}
+
+func pipeBidirectional(client net.Conn, clientReader *bufio.Reader, upstream net.Conn, upstreamReader *bufio.Reader) error {
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(upstream, clientReader)
+		errCh <- err
+	}()
+	go func() {
+		_, err := io.Copy(client, upstreamReader)
+		errCh <- err
+	}()
+	err := <-errCh
+	_ = client.Close()
+	_ = upstream.Close()
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }
 
 func (h *Handler) authorizeDecision(w http.ResponseWriter, r *http.Request, decision policy.Decision, target string) bool {
