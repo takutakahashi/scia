@@ -174,6 +174,56 @@ func TestGoogleOAuthCallbackShowsRefreshToken(t *testing.T) {
 	}
 }
 
+func TestGoogleOAuthCallbackRedirectsAfterStoringRefreshToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "access-token",
+			"refresh_token": "refresh-token",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				RedirectURL:         "http://localhost:8081/oauth/google/callback",
+				CompleteRedirectURL: "https://app.example.com/settings/personal?google_oauth=connected",
+			},
+		},
+		Credentials: []config.CredentialConfig{
+			{
+				ID:   "google",
+				Type: "google-oauth-refresh-token",
+				Params: map[string]string{
+					"token_url":     tokenEndpoint.URL,
+					"client_id":     "client-id",
+					"client_secret": "client-secret",
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	srv := NewServer(store, secretStore, slog.Default())
+	state := "test-state"
+	srv.states.Store(state, stateInfo{CredentialID: "google", CreatedAt: time.Now()})
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/callback?state="+state+"&code=auth-code", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "https://app.example.com/settings/personal?google_oauth=connected" {
+		t.Fatalf("unexpected redirect location: %q", got)
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "google", "refresh_token"); err != nil || !ok || got != "refresh-token" {
+		t.Fatalf("refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
 func TestGoogleOAuthCallbackStoresConfigGoogleRefreshToken(t *testing.T) {
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {

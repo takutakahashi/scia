@@ -41,6 +41,7 @@ server:
       secretName: scia-oauth-alice
   oauth:
     redirectUrl: "http://localhost:18081/oauth/google/callback"
+    completeRedirectUrl: "http://localhost:3000/settings/personal"
     google:
       credentialId: google-calendar
       clientId: "env:GOOGLE_OAUTH_CLIENT_ID"

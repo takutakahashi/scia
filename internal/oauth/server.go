@@ -183,6 +183,10 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
 		return
 	}
+	if completeRedirect := cfg.Server.OAuth.CompleteRedirectURL; completeRedirect != "" {
+		http.Redirect(w, r, completeRedirect, http.StatusFound)
+		return
+	}
 	data := struct {
 		User         string
 		CredentialID string

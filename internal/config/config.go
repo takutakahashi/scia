@@ -71,14 +71,14 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Mode            string             `yaml:"mode"`
-	Listen          string             `yaml:"listen"`
-	AdminToken      string             `yaml:"adminToken"`
-	ApprovalTimeout Duration           `yaml:"approvalTimeout"`
-	MITM            MITMConfig         `yaml:"mitm"`
-	BackendProxy    BackendProxyConfig `yaml:"backendProxy"`
-	OAuth           OAuthConfig        `yaml:"oauth"`
-	Secrets         SecretsConfig      `yaml:"secrets"`
+	Mode            string                `yaml:"mode"`
+	Listen          string                `yaml:"listen"`
+	AdminToken      string                `yaml:"adminToken"`
+	ApprovalTimeout Duration              `yaml:"approvalTimeout"`
+	MITM            MITMConfig            `yaml:"mitm"`
+	BackendProxy    BackendProxyConfig    `yaml:"backendProxy"`
+	OAuth           OAuthConfig           `yaml:"oauth"`
+	Secrets         SecretsConfig         `yaml:"secrets"`
 	Users           map[string]UserConfig `yaml:"users"`
 }
 
@@ -96,10 +96,11 @@ type BackendProxyConfig struct {
 }
 
 type OAuthConfig struct {
-	Listen      string                          `yaml:"listen"`
-	RedirectURL string                          `yaml:"redirectUrl"`
-	Google      GoogleOAuthConfig               `yaml:"google"`
-	Namespaces  map[string]OAuthNamespaceConfig `yaml:"namespaces"`
+	Listen              string                          `yaml:"listen"`
+	RedirectURL         string                          `yaml:"redirectUrl"`
+	CompleteRedirectURL string                          `yaml:"completeRedirectUrl"`
+	Google              GoogleOAuthConfig               `yaml:"google"`
+	Namespaces          map[string]OAuthNamespaceConfig `yaml:"namespaces"`
 }
 
 type GoogleOAuthConfig struct {

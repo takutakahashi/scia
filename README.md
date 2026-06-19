@@ -63,12 +63,17 @@ server:
   oauth:
     listen: "127.0.0.1:8081"
     redirectUrl: "http://localhost:8081/oauth/google/callback"
+    completeRedirectUrl: "http://localhost:3000/settings/personal"
     google:
       credentialId: google-calendar
       clientId: "env:GOOGLE_OAUTH_CLIENT_ID"
       clientSecret: "env:GOOGLE_OAUTH_CLIENT_SECRET"
       scope: "https://www.googleapis.com/auth/calendar"
 ```
+
+When `server.oauth.completeRedirectUrl` is set, the OAuth callback redirects there
+after the refresh token is stored. If it is empty, scia renders its built-in
+completion page.
 
 Open `http://localhost:8081/` to start Google authorization for configured Google credentials.
 
