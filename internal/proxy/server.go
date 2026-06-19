@@ -256,7 +256,7 @@ func (h *Handler) handleMITMWebSocket(r *http.Request, connectHost string, cfg *
 		return nil
 	}
 	normalizeWebSocketUpgradeResponse(resp, r)
-	if err := resp.Write(clientConn); err != nil {
+	if err := writeWebSocketResponse(clientConn, resp); err != nil {
 		return fmt.Errorf("write websocket response to client: %w", err)
 	}
 	return pipeBidirectional(clientConn, upstream, upstreamReader)
@@ -385,6 +385,23 @@ func writeWebSocketRequest(conn net.Conn, r *http.Request) error {
 	}
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("flush websocket request: %w", err)
+	}
+	return nil
+}
+
+func writeWebSocketResponse(conn net.Conn, resp *http.Response) error {
+	writer := bufio.NewWriter(conn)
+	if _, err := fmt.Fprintf(writer, "HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode)); err != nil {
+		return fmt.Errorf("write websocket response status: %w", err)
+	}
+	if err := resp.Header.Write(writer); err != nil {
+		return fmt.Errorf("write websocket response headers: %w", err)
+	}
+	if _, err := writer.WriteString("\r\n"); err != nil {
+		return fmt.Errorf("finish websocket response headers: %w", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flush websocket response: %w", err)
 	}
 	return nil
 }
