@@ -47,6 +47,8 @@ func NewHandler(store *config.Store, secretStore secrets.Store, approvals *appro
 		injector: auth.NewInjector(secretStore),
 		transport: &http.Transport{
 			Proxy:                 nil,
+			ForceAttemptHTTP2:     false,
+			TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
 			ResponseHeaderTimeout: 60 * time.Second,
 			IdleConnTimeout:       90 * time.Second,
 		},
