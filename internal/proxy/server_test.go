@@ -256,6 +256,117 @@ rules:
 	}
 }
 
+func TestConnectTunnelsNonIntegrationHostsThroughBackendProxy(t *testing.T) {
+	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstreamListener.Close()
+	upstreamDone := make(chan error, 1)
+	go func() {
+		conn, err := upstreamListener.Accept()
+		if err != nil {
+			upstreamDone <- err
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			upstreamDone <- err
+			return
+		}
+		if string(buf) != "ping" {
+			upstreamDone <- fmt.Errorf("unexpected tunneled payload: %q", string(buf))
+			return
+		}
+		if _, err := conn.Write([]byte("pong")); err != nil {
+			upstreamDone <- err
+			return
+		}
+		upstreamDone <- nil
+	}()
+
+	var backendCalled atomic.Bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			t.Fatalf("backend expected CONNECT, got %s", r.Method)
+		}
+		backendCalled.Store(true)
+		upstreamConn, err := net.Dial("tcp", r.Host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clientConn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			_, _ = io.Copy(upstreamConn, clientConn)
+			_ = upstreamConn.Close()
+		}()
+		go func() {
+			_, _ = io.Copy(clientConn, upstreamConn)
+			_ = clientConn.Close()
+		}()
+	}))
+	defer backend.Close()
+
+	targetHost := upstreamListener.Addr().String()
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+server:
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  integrations:
+    google:
+      hosts: ["www.googleapis.com"]
+  backendProxy:
+    url: "%s"
+rules:
+  - name: allow-target
+    hosts: ["%s"]
+    action: allow
+`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem"), backend.URL, targetHost))
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(t, proxyServer.URL)
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetHost, targetHost); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected CONNECT status: %s", resp.Status)
+	}
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(reader, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "pong" {
+		t.Fatalf("unexpected tunneled response: %q", string(buf))
+	}
+	if !backendCalled.Load() {
+		t.Fatal("backend proxy was not used")
+	}
+	if err := <-upstreamDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMITMConnectProxiesWebSocketThroughBackendProxy(t *testing.T) {
 	var backendCalled atomic.Bool
 	var upstreamSawCredential atomic.Bool

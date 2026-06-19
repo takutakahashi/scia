@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -114,7 +115,37 @@ func (h *Handler) serveConnect(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeDecision(w, r, decision, r.Host) {
 		return
 	}
+	if !mitmHostAllowed(integrationMITMHosts(cfg), r.Host) {
+		h.serveTunnelConnect(w, r)
+		return
+	}
 	h.serveMITMConnect(w, r)
+}
+
+func (h *Handler) serveTunnelConnect(w http.ResponseWriter, r *http.Request) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+	client, rw, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, "hijack failed", http.StatusInternalServerError)
+		return
+	}
+
+	upstream, err := h.dialRawTunnelUpstream(r.Context(), r.Host)
+	if err != nil {
+		_ = client.Close()
+		h.logger.Error("tunnel upstream failed", "error", err, "host", r.Host)
+		return
+	}
+	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		_ = client.Close()
+		_ = upstream.Close()
+		return
+	}
+	_ = pipeBidirectional(client, rw.Reader, upstream, bufio.NewReader(upstream))
 }
 
 func (h *Handler) serveMITMConnect(w http.ResponseWriter, r *http.Request) {
@@ -303,14 +334,9 @@ func cloneWebSocketRequest(r *http.Request) *http.Request {
 }
 
 func (h *Handler) dialWebSocketUpstream(r *http.Request, connectHost string) (net.Conn, error) {
-	rawProxy := config.HeaderValueFromEnv(h.store.Get().Server.BackendProxy.URL)
 	var tcp net.Conn
 	var err error
-	if rawProxy == "" {
-		tcp, err = (&net.Dialer{Timeout: 30 * time.Second}).DialContext(r.Context(), "tcp", connectHost)
-	} else {
-		tcp, err = h.dialBackendProxyTunnel(r.Context(), rawProxy, connectHost)
-	}
+	tcp, err = h.dialRawTunnelUpstream(r.Context(), connectHost)
 	if err != nil {
 		return nil, err
 	}
@@ -330,6 +356,14 @@ func (h *Handler) dialWebSocketUpstream(r *http.Request, connectHost string) (ne
 		return nil, fmt.Errorf("upstream tls handshake: %w", err)
 	}
 	return tlsConn, nil
+}
+
+func (h *Handler) dialRawTunnelUpstream(ctx context.Context, connectHost string) (net.Conn, error) {
+	rawProxy := config.HeaderValueFromEnv(h.store.Get().Server.BackendProxy.URL)
+	if rawProxy == "" {
+		return (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, "tcp", connectHost)
+	}
+	return h.dialBackendProxyTunnel(ctx, rawProxy, connectHost)
 }
 
 func (h *Handler) dialBackendProxyTunnel(ctx context.Context, rawProxy, connectHost string) (net.Conn, error) {
@@ -373,6 +407,37 @@ func (h *Handler) dialBackendProxyTunnel(ctx context.Context, rawProxy, connectH
 		return nil, fmt.Errorf("backend proxy connect failed: %s", resp.Status)
 	}
 	return conn, nil
+}
+
+func mitmHostAllowed(patterns []string, host string) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	normalized := strings.ToLower(host)
+	hostOnly := normalized
+	if splitHost, _, err := net.SplitHostPort(normalized); err == nil {
+		hostOnly = splitHost
+	}
+	for _, pattern := range patterns {
+		pattern = strings.ToLower(pattern)
+		if matched, err := path.Match(pattern, normalized); err == nil && matched {
+			return true
+		}
+		if matched, err := path.Match(pattern, hostOnly); err == nil && matched {
+			return true
+		}
+		if pattern == normalized || pattern == hostOnly {
+			return true
+		}
+	}
+	return false
+}
+
+func integrationMITMHosts(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Server.Integrations.Google.Hosts
 }
 
 func writeWebSocketRequest(conn net.Conn, r *http.Request) error {
