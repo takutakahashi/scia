@@ -11,6 +11,7 @@ server:
   oauth:
     listen: "127.0.0.1:8081"
     redirectUrl: "http://localhost:8081/oauth/google/callback"
+    brokerToken: "env:SCIA_OAUTH_BROKER_TOKEN"
     google:
       credentialId: google-calendar
       clientId: "env:GOOGLE_OAUTH_CLIENT_ID"
@@ -49,6 +50,11 @@ credentials:
   - id: google-calendar
     type: google-oauth-refresh-token
     params: {}
+  - id: service-a.google
+    type: google-oauth-refresh-token
+    params:
+      token_broker_url: "http://scia-oauth:8081/oauth/service-a/google/token"
+      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
 
 rules:
   - name: deny-dangerous-admin-api

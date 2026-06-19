@@ -10,6 +10,7 @@ server:
       secretName: scia-oauth-alice
   oauth:
     redirectUrl: "http://localhost:18081/oauth/google/callback"
+    brokerToken: "env:SCIA_OAUTH_BROKER_TOKEN"
     google:
       credentialId: google-calendar
       clientId: "env:GOOGLE_OAUTH_CLIENT_ID"

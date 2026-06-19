@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -289,6 +290,9 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown google namespace", http.StatusNotFound)
 		return
 	}
+	if requiresBrokerAuth(action) && !s.authorizeBrokerRequest(w, r, cfg) {
+		return
+	}
 	switch action {
 	case "authorization-url":
 		if r.Method != http.MethodGet {
@@ -323,6 +327,36 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func requiresBrokerAuth(action string) bool {
+	switch action {
+	case "authorization-url", "token", "access-token", "revoke":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) authorizeBrokerRequest(w http.ResponseWriter, r *http.Request, cfg *config.Config) bool {
+	expected := config.HeaderValueFromEnv(cfg.Server.OAuth.BrokerToken)
+	if expected == "" {
+		return true
+	}
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(auth, prefix) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="scia-oauth-broker"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	got := strings.TrimSpace(strings.TrimPrefix(auth, prefix))
+	if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="scia-oauth-broker"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
 }
 
 func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, googleCfg config.GoogleOAuthConfig, redirect bool) {
