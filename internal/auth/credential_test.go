@@ -113,6 +113,57 @@ func TestGoogleRefreshTokenUsesSecretStore(t *testing.T) {
 	}
 }
 
+func TestGoogleRefreshTokenUsesAccessTokenBroker(t *testing.T) {
+	var tokenRequests int
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenRequests++
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "broker-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	cfg := &config.Config{
+		Credentials: []config.CredentialConfig{
+			{
+				ID:   "google",
+				Type: "google-oauth-refresh-token",
+				Params: map[string]string{
+					"access_token_url": tokenEndpoint.URL,
+				},
+			},
+		},
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://www.googleapis.com/calendar/v3/users/me/calendarList", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	injector := NewInjector(secrets.NoopStore{})
+	if err := injector.Apply(context.Background(), req, cfg, []string{"google"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer broker-access-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+
+	secondReq, err := http.NewRequest(http.MethodGet, "https://www.googleapis.com/calendar/v3/users/me/calendarList", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := injector.Apply(context.Background(), secondReq, cfg, []string{"google"}); err != nil {
+		t.Fatal(err)
+	}
+	if tokenRequests != 1 {
+		t.Fatalf("expected broker response to be cached, got %d token requests", tokenRequests)
+	}
+}
+
 func TestGoogleRefreshTokenUsesConfigGoogleClient(t *testing.T) {
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
