@@ -1,12 +1,14 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -196,6 +198,148 @@ rules:
 	}
 	if !called.Load() {
 		t.Fatal("backend proxy was not called")
+	}
+}
+
+func TestMITMConnectProxiesWebSocketThroughBackendProxy(t *testing.T) {
+	var backendCalled atomic.Bool
+	var upstreamSawCredential atomic.Bool
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isWebSocketUpgrade(r) {
+			t.Fatalf("expected websocket upgrade, got headers: %#v", r.Header)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer websocket-token" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		upstreamSawCredential.Store(true)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if _, err := conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			t.Fatal(err)
+		}
+		if string(buf) != "ping" {
+			t.Fatalf("unexpected websocket payload: %q", string(buf))
+		}
+		if _, err := conn.Write([]byte("pong")); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer upstream.Close()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			t.Fatalf("backend expected CONNECT, got %s", r.Method)
+		}
+		backendCalled.Store(true)
+		upstreamConn, err := net.Dial("tcp", r.Host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clientConn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			_, _ = io.Copy(upstreamConn, clientConn)
+			_ = upstreamConn.Close()
+		}()
+		go func() {
+			_, _ = io.Copy(clientConn, upstreamConn)
+			_ = clientConn.Close()
+		}()
+	}))
+	defer backend.Close()
+
+	upstreamURL := mustParseURL(t, upstream.URL)
+	proxyServer, cfgPath := newTestProxyWithPath(t, fmt.Sprintf(`
+server:
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  backendProxy:
+    url: "%s"
+credentials:
+  - id: websocket-token
+    type: bearer
+    value: websocket-token
+rules:
+  - name: inject-websocket
+    hosts: ["%s"]
+    methods: ["GET"]
+    paths: ["/ws"]
+    action: allow
+    credentials: ["websocket-token"]
+`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem"), backend.URL, upstreamURL.Hostname()))
+	defer proxyServer.Close()
+	proxyServer.Config.Handler.(*Handler).transport = upstream.Client().Transport.(*http.Transport).Clone()
+
+	cfg := loadTestConfig(t, cfgPath)
+	certPEM, err := os.ReadFile(cfg.Server.MITM.CACertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(certPEM) {
+		t.Fatal("failed to append scia ca")
+	}
+
+	proxyURL := mustParseURL(t, proxyServer.URL)
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", upstreamURL.Host, upstreamURL.Host); err != nil {
+		t.Fatal(err)
+	}
+	connectResp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connectResp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected CONNECT status: %s", connectResp.Status)
+	}
+
+	tlsConn := tls.Client(conn, &tls.Config{RootCAs: roots, ServerName: upstreamURL.Hostname()})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	defer tlsConn.Close()
+	if _, err := fmt.Fprintf(tlsConn, "GET /ws HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", upstreamURL.Host); err != nil {
+		t.Fatal(err)
+	}
+	wsResp, err := http.ReadResponse(bufio.NewReader(tlsConn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wsResp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("unexpected websocket status: %s", wsResp.Status)
+	}
+	if _, err := tlsConn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(tlsConn, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "pong" {
+		t.Fatalf("unexpected websocket response: %q", string(buf))
+	}
+	if !backendCalled.Load() {
+		t.Fatal("backend proxy was not used")
+	}
+	if !upstreamSawCredential.Load() {
+		t.Fatal("upstream did not receive injected credential")
 	}
 }
 

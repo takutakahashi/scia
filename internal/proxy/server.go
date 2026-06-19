@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -163,7 +164,12 @@ func (h *Handler) serveMITMConnect(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		inner = inner.WithContext(context.WithValue(inner.Context(), mitmClientConnKey{}, tlsConn))
 		resp := h.roundTripMITMRequest(inner, r.Host)
+		if resp == nil {
+			_ = inner.Body.Close()
+			return
+		}
 		if err := resp.Write(tlsConn); err != nil {
 			_ = inner.Body.Close()
 			_ = resp.Body.Close()
@@ -191,6 +197,14 @@ func (h *Handler) roundTripMITMRequest(r *http.Request, connectHost string) *htt
 		return denial
 	}
 
+	if isWebSocketUpgrade(r) {
+		if err := h.handleMITMWebSocket(r, connectHost, cfg, decision); err != nil {
+			h.logger.Error("websocket upstream failed", "error", err, "url", target.String())
+			return textResponse(r, http.StatusBadGateway, "websocket upstream failed\n")
+		}
+		return nil
+	}
+
 	next := config.CloneRequestWithoutProxyHeaders(r)
 	next.URL = target
 	next.Host = connectHost
@@ -205,6 +219,172 @@ func (h *Handler) roundTripMITMRequest(r *http.Request, connectHost string) *htt
 		return textResponse(r, http.StatusBadGateway, "upstream request failed\n")
 	}
 	return resp
+}
+
+func (h *Handler) handleMITMWebSocket(r *http.Request, connectHost string, cfg *config.Config, decision policy.Decision) error {
+	clientConn, ok := r.Context().Value(mitmClientConnKey{}).(net.Conn)
+	if !ok {
+		return errors.New("missing mitm client connection")
+	}
+	next := cloneWebSocketRequest(r)
+	next.URL = &url.URL{Scheme: "https", Host: connectHost, Path: r.URL.Path, RawQuery: r.URL.RawQuery}
+	next.Host = connectHost
+	if err := h.injector.Apply(r.Context(), next, cfg, decision.Credentials); err != nil {
+		return fmt.Errorf("credential injection failed: %w", err)
+	}
+
+	upstream, err := h.dialWebSocketUpstream(r, connectHost)
+	if err != nil {
+		return err
+	}
+	defer upstream.Close()
+
+	if err := writeWebSocketRequest(upstream, next); err != nil {
+		return err
+	}
+	upstreamReader := bufio.NewReader(upstream)
+	resp, err := http.ReadResponse(upstreamReader, next)
+	if err != nil {
+		return fmt.Errorf("read upstream websocket response: %w", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		_ = resp.Write(clientConn)
+		return nil
+	}
+	if err := resp.Write(clientConn); err != nil {
+		return fmt.Errorf("write websocket response to client: %w", err)
+	}
+	return pipeBidirectional(clientConn, upstream, upstreamReader)
+}
+
+type mitmClientConnKey struct{}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
+func cloneWebSocketRequest(r *http.Request) *http.Request {
+	next := r.Clone(r.Context())
+	next.RequestURI = ""
+	next.Header = r.Header.Clone()
+	for _, name := range []string{"Proxy-Authorization", "Proxy-Connection", "Keep-Alive"} {
+		next.Header.Del(name)
+	}
+	return next
+}
+
+func (h *Handler) dialWebSocketUpstream(r *http.Request, connectHost string) (net.Conn, error) {
+	rawProxy := config.HeaderValueFromEnv(h.store.Get().Server.BackendProxy.URL)
+	var tcp net.Conn
+	var err error
+	if rawProxy == "" {
+		tcp, err = (&net.Dialer{Timeout: 30 * time.Second}).DialContext(r.Context(), "tcp", connectHost)
+	} else {
+		tcp, err = h.dialBackendProxyTunnel(r.Context(), rawProxy, connectHost)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	tlsConfig := &tls.Config{}
+	if h.transport != nil && h.transport.TLSClientConfig != nil {
+		tlsConfig = h.transport.TLSClientConfig.Clone()
+	}
+	if tlsConfig.ServerName == "" {
+		tlsConfig.ServerName = stripPort(connectHost)
+	}
+	tlsConfig.NextProtos = []string{"http/1.1"}
+
+	tlsConn := tls.Client(tcp, tlsConfig)
+	if err := tlsConn.HandshakeContext(r.Context()); err != nil {
+		_ = tcp.Close()
+		return nil, fmt.Errorf("upstream tls handshake: %w", err)
+	}
+	return tlsConn, nil
+}
+
+func (h *Handler) dialBackendProxyTunnel(ctx context.Context, rawProxy, connectHost string) (net.Conn, error) {
+	proxyURL, err := url.Parse(rawProxy)
+	if err != nil {
+		return nil, fmt.Errorf("parse backend proxy url: %w", err)
+	}
+	proxyAddr := proxyURL.Host
+	if !strings.Contains(proxyAddr, ":") {
+		if proxyURL.Scheme == "https" {
+			proxyAddr += ":443"
+		} else {
+			proxyAddr += ":80"
+		}
+	}
+	tcp, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, "tcp", proxyAddr)
+	if err != nil {
+		return nil, fmt.Errorf("dial backend proxy: %w", err)
+	}
+	var conn net.Conn = tcp
+	if proxyURL.Scheme == "https" {
+		tlsConn := tls.Client(tcp, &tls.Config{ServerName: stripPort(proxyURL.Host)})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = tcp.Close()
+			return nil, fmt.Errorf("backend proxy tls handshake: %w", err)
+		}
+		conn = tlsConn
+	}
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", connectHost, connectHost); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("write backend proxy connect: %w", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("read backend proxy connect response: %w", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_ = conn.Close()
+		return nil, fmt.Errorf("backend proxy connect failed: %s", resp.Status)
+	}
+	return conn, nil
+}
+
+func writeWebSocketRequest(conn net.Conn, r *http.Request) error {
+	path := r.URL.RequestURI()
+	if path == "" {
+		path = "/"
+	}
+	writer := bufio.NewWriter(conn)
+	if _, err := fmt.Fprintf(writer, "%s %s HTTP/1.1\r\nHost: %s\r\n", r.Method, path, r.Host); err != nil {
+		return fmt.Errorf("write websocket request line: %w", err)
+	}
+	if err := r.Header.WriteSubset(writer, map[string]bool{"Host": true}); err != nil {
+		return fmt.Errorf("write websocket headers: %w", err)
+	}
+	if _, err := writer.WriteString("\r\n"); err != nil {
+		return fmt.Errorf("finish websocket headers: %w", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flush websocket request: %w", err)
+	}
+	return nil
+}
+
+func pipeBidirectional(client net.Conn, upstream net.Conn, upstreamReader *bufio.Reader) error {
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(upstream, client)
+		errCh <- err
+	}()
+	go func() {
+		_, err := io.Copy(client, upstreamReader)
+		errCh <- err
+	}()
+	err := <-errCh
+	_ = client.Close()
+	_ = upstream.Close()
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }
 
 func (h *Handler) authorizeDecision(w http.ResponseWriter, r *http.Request, decision policy.Decision, target string) bool {
