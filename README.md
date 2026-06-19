@@ -127,6 +127,7 @@ Google broker endpoints:
 - `GET /oauth/{namespace}/google/authorization-url?state=...` returns a generated Google authorization URL.
 - `GET /oauth/{namespace}/google/start` redirects to the generated Google authorization URL.
 - `POST /oauth/{namespace}/google/token` forwards a refresh-token or authorization-code request to Google with the configured client ID and client secret injected by scia.
+- `POST /oauth/{namespace}/google/access-token` exchanges the refresh token stored by scia for a Google access token.
 - `POST /oauth/{namespace}/google/revoke` forwards a revoke request to Google.
 
 The proxy can also reference the namespaced Google credential ID directly:
@@ -138,6 +139,20 @@ rules:
     paths: ["/calendar/v3/*"]
     action: allow
     credentials: ["service-a.google"]
+```
+
+For a proxy that should not read OAuth client secrets directly, configure the
+Google credential with `params.token_broker_url`. The proxy reads the refresh
+token from its configured secret store, POSTs it to the OAuth broker when a
+matching request needs an access token, caches the returned access token until
+expiry, and injects it into the upstream request:
+
+```yaml
+credentials:
+  - id: service-a.google
+    type: google-oauth-refresh-token
+    params:
+      token_broker_url: "http://scia-oauth:8081/oauth/service-a/google/token"
 ```
 
 ## Configuration

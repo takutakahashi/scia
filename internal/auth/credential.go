@@ -147,6 +147,7 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 	}
 
 	tokenURL := cred.Params["token_url"]
+	tokenBrokerURL := config.HeaderValueFromEnv(cred.Params["token_broker_url"])
 	googleCfg, hasGoogleCfg := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
 	if tokenURL == "" && hasGoogleCfg {
 		tokenURL = googleCfg.TokenURL
@@ -173,6 +174,18 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 	refreshToken, err := i.secretValue(ctx, cfg, cred, "refresh_token")
 	if err != nil {
 		return "", err
+	}
+	if tokenBrokerURL != "" {
+		if refreshToken == "" {
+			return "", fmt.Errorf("credential %q requires refresh_token", cred.ID)
+		}
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", refreshToken)
+		if scope := cred.Params["scope"]; scope != "" {
+			form.Set("scope", scope)
+		}
+		return i.formToken(ctx, cred.ID, tokenBrokerURL, form)
 	}
 	if clientID == "" || clientSecret == "" || refreshToken == "" {
 		return "", fmt.Errorf("credential %q requires client_id, client_secret, and refresh_token", cred.ID)
@@ -226,7 +239,10 @@ func (i *Injector) formToken(ctx context.Context, credentialID, tokenURL string,
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return "", fmt.Errorf("token endpoint returned %s", resp.Status)
 	}
+	return i.decodeAndCacheToken(credentialID, resp)
+}
 
+func (i *Injector) decodeAndCacheToken(credentialID string, resp *http.Response) (string, error) {
 	var body struct {
 		AccessToken string `json:"access_token"`
 		TokenType   string `json:"token_type"`

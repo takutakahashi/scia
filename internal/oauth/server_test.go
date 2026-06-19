@@ -325,6 +325,139 @@ func TestNamespaceGoogleTokenInjectsClientSecret(t *testing.T) {
 	}
 }
 
+func TestNamespaceGoogleAccessTokenUsesStoredRefreshToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "refresh_token", "stored-refresh-token")
+		assertFormValue(t, r, "client_id", "secret-client-id")
+		assertFormValue(t, r, "client_secret", "secret-client-secret")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "stored-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Google: config.GoogleOAuthConfig{
+							ClientIDSecretRef: "service-a.google.client-id",
+							ClientSecretRef:   "service-a.google.client-secret",
+							TokenURL:          tokenEndpoint.URL,
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "service-a.google", "client-id", "secret-client-id"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "service-a.google", "client-secret", "secret-client-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "service-a.google", "refresh_token", "stored-refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/google/access-token", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "stored-access-token") {
+		t.Fatalf("token response was not proxied: %s", rec.Body.String())
+	}
+}
+
+func TestNamespaceGoogleAccessTokenUsesKubernetesUserSecret(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "refresh_token", "user-refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "user-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Secrets: config.SecretsConfig{Mode: "kubernetes"},
+			Users: map[string]config.UserConfig{
+				"alice": {SecretName: "scia-oauth-alice"},
+			},
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"alice": {
+						Google: config.GoogleOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+							TokenURL:     tokenEndpoint.URL,
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "alice", "refresh_token", "user-refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/alice/google/access-token", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "user-access-token") {
+		t.Fatalf("token response was not proxied: %s", rec.Body.String())
+	}
+}
+
+func TestNamespaceGoogleAccessTokenRequiresStoredRefreshToken(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Google: config.GoogleOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+						},
+					},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, newMemorySecretStore(), slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/google/access-token", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGoogleOAuthCallbackStoresRefreshTokenForKubernetesUser(t *testing.T) {
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
