@@ -83,6 +83,10 @@ func (h *Handler) serveForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := h.store.Get()
+	if isProxySelfTarget(cfg.Server.Listen, target.Host, target.Scheme) {
+		http.Error(w, "proxy self-target denied", http.StatusLoopDetected)
+		return
+	}
 	decision := policy.Evaluate(cfg, r, target.Host)
 	if !h.authorizeDecision(w, r, decision, target.String()) {
 		return
@@ -111,6 +115,10 @@ func (h *Handler) serveForward(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) serveConnect(w http.ResponseWriter, r *http.Request) {
 	cfg := h.store.Get()
+	if isProxySelfTarget(cfg.Server.Listen, r.Host, "") {
+		http.Error(w, "proxy self-target denied", http.StatusLoopDetected)
+		return
+	}
 	decision := policy.Evaluate(cfg, r, r.Host)
 	if !h.authorizeDecision(w, r, decision, r.Host) {
 		return
@@ -438,6 +446,52 @@ func integrationMITMHosts(cfg *config.Config) []string {
 		return nil
 	}
 	return cfg.Server.Integrations.Google.Hosts
+}
+
+func isProxySelfTarget(listenAddr, targetHost, scheme string) bool {
+	listenPort := portFromHost(defaultListenAddr(listenAddr), "")
+	if listenPort == "" {
+		return false
+	}
+	targetPort := portFromHost(targetHost, scheme)
+	if targetPort != listenPort {
+		return false
+	}
+	host := strings.ToLower(stripPort(targetHost))
+	return host == "" ||
+		host == "localhost" ||
+		host == "127.0.0.1" ||
+		host == "::1" ||
+		host == "::" ||
+		host == "0.0.0.0" ||
+		host == "[::]"
+}
+
+func defaultListenAddr(listenAddr string) string {
+	if strings.TrimSpace(listenAddr) == "" {
+		return ":8080"
+	}
+	return listenAddr
+}
+
+func portFromHost(host, scheme string) string {
+	if _, port, err := net.SplitHostPort(host); err == nil {
+		return port
+	}
+	if strings.HasPrefix(host, ":") {
+		return strings.TrimPrefix(host, ":")
+	}
+	if strings.Contains(host, ":") {
+		return ""
+	}
+	switch scheme {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 func writeWebSocketRequest(conn net.Conn, r *http.Request) error {

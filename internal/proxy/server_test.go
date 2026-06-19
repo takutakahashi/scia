@@ -91,6 +91,56 @@ rules:
 	}
 }
 
+func TestForwardProxyRejectsSelfTarget(t *testing.T) {
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+server:
+  listen: "0.0.0.0:18081"
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem")))
+	defer proxyServer.Close()
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get("http://127.0.0.1:18081/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusLoopDetected {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+}
+
+func TestConnectRejectsSelfTarget(t *testing.T) {
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+server:
+  listen: "0.0.0.0:18081"
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem")))
+	defer proxyServer.Close()
+
+	proxyURL := mustParseURL(t, proxyServer.URL)
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprint(conn, "CONNECT 127.0.0.1:18081 HTTP/1.1\r\nHost: 127.0.0.1:18081\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusLoopDetected {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+}
+
 func TestMITMConnectInjectsCredentialIntoHTTPSRequest(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer mitm-token" {
