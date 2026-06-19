@@ -295,19 +295,25 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		s.namespaceGoogleAuthorizationURL(w, r, credentialID, googleCfg, false)
+		s.namespaceGoogleAuthorizationURL(w, r, namespace, credentialID, googleCfg, false)
 	case "start":
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		s.namespaceGoogleAuthorizationURL(w, r, credentialID, googleCfg, true)
+		s.namespaceGoogleAuthorizationURL(w, r, namespace, credentialID, googleCfg, true)
 	case "token":
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		s.namespaceGoogleToken(w, r, googleCfg)
+	case "access-token":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceGoogleAccessToken(w, r, namespace, credentialID, googleCfg)
 	case "revoke":
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -319,7 +325,7 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.Request, credentialID string, googleCfg config.GoogleOAuthConfig, redirect bool) {
+func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, googleCfg config.GoogleOAuthConfig, redirect bool) {
 	clientID, err := s.googleClientValue(r.Context(), googleCfg.ClientID, googleCfg.ClientIDSecretRef)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -368,7 +374,11 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 	}
 	location := authURL + "?" + q.Encode()
 	if redirect {
-		s.states.Store(state, stateInfo{CredentialID: credentialID, CreatedAt: time.Now()})
+		s.states.Store(state, stateInfo{
+			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+			CredentialID: credentialID,
+			CreatedAt:    time.Now(),
+		})
 		http.Redirect(w, r, location, http.StatusFound)
 		return
 	}
@@ -419,6 +429,39 @@ func (s *Server) namespaceGoogleToken(w http.ResponseWriter, r *http.Request, go
 		upstream.Set("redirect_uri", form.Get("redirect_uri"))
 	}
 	if scope := form.Get("scope"); scope != "" {
+		upstream.Set("scope", scope)
+	}
+	tokenURL := googleCfg.TokenURL
+	if tokenURL == "" {
+		tokenURL = googleTokenURL
+	}
+	s.forwardForm(w, r, tokenURL, upstream)
+}
+
+func (s *Server) namespaceGoogleAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string, googleCfg config.GoogleOAuthConfig) {
+	cfg := s.store.Get()
+	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
+	refreshToken, ok, err := s.secrets.Get(r.Context(), storageID, "refresh_token")
+	if err != nil {
+		s.logger.Error("failed to load google refresh token", "error", err, "credential", credentialID, "storage", storageID)
+		http.Error(w, "failed to load refresh token", http.StatusInternalServerError)
+		return
+	}
+	if !ok || refreshToken == "" {
+		http.Error(w, "refresh_token is not registered", http.StatusNotFound)
+		return
+	}
+	clientID, clientSecret, err := s.googleClientPair(r.Context(), googleCfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	upstream := url.Values{}
+	upstream.Set("grant_type", "refresh_token")
+	upstream.Set("client_id", clientID)
+	upstream.Set("client_secret", clientSecret)
+	upstream.Set("refresh_token", refreshToken)
+	if scope := r.URL.Query().Get("scope"); scope != "" {
 		upstream.Set("scope", scope)
 	}
 	tokenURL := googleCfg.TokenURL
@@ -529,6 +572,13 @@ func (s *Server) storageUserID(cfg *config.Config, info stateInfo) string {
 		return config.CredentialUserID(cfg, cred)
 	}
 	return info.CredentialID
+}
+
+func (s *Server) namespaceStorageID(cfg *config.Config, namespace, credentialID string) string {
+	if cfg.Server.Secrets.Mode == "kubernetes" && cfg.HasUser(namespace) {
+		return namespace
+	}
+	return credentialID
 }
 
 func (s *Server) googleCredential(cfg *config.Config, credentialID string) (config.CredentialConfig, bool) {

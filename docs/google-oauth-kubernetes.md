@@ -79,6 +79,16 @@ In kubernetes mode, each user gets their own authorize button. After authorizati
 `scia` stores the Google refresh token in that user's Kubernetes Secret under the
 `refresh_token` key.
 
+To let a caller obtain a short-lived Google access token without receiving the
+refresh token or OAuth client secret, call the namespaced broker endpoint:
+
+```sh
+curl -X POST http://localhost:18081/oauth/alice/google/access-token
+```
+
+For namespaces that are also configured users, `scia` reads the refresh token from
+that user's Kubernetes Secret and forwards a refresh-token grant to Google.
+
 ## Proxy server
 
 Example config: [configs/proxy-kubernetes.yaml](../configs/proxy-kubernetes.yaml)

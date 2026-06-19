@@ -127,6 +127,7 @@ Google broker endpoints:
 - `GET /oauth/{namespace}/google/authorization-url?state=...` returns a generated Google authorization URL.
 - `GET /oauth/{namespace}/google/start` redirects to the generated Google authorization URL.
 - `POST /oauth/{namespace}/google/token` forwards a refresh-token or authorization-code request to Google with the configured client ID and client secret injected by scia.
+- `POST /oauth/{namespace}/google/access-token` exchanges the refresh token stored by scia for a Google access token.
 - `POST /oauth/{namespace}/google/revoke` forwards a revoke request to Google.
 
 The proxy can also reference the namespaced Google credential ID directly:
