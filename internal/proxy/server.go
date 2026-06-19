@@ -3,7 +3,9 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/sha1"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -253,6 +255,7 @@ func (h *Handler) handleMITMWebSocket(r *http.Request, connectHost string, cfg *
 		_ = resp.Write(clientConn)
 		return nil
 	}
+	normalizeWebSocketUpgradeResponse(resp, r)
 	if err := resp.Write(clientConn); err != nil {
 		return fmt.Errorf("write websocket response to client: %w", err)
 	}
@@ -264,6 +267,22 @@ type mitmClientConnKey struct{}
 func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
+func normalizeWebSocketUpgradeResponse(resp *http.Response, clientReq *http.Request) {
+	resp.Proto = "HTTP/1.1"
+	resp.ProtoMajor = 1
+	resp.ProtoMinor = 1
+	resp.Header.Set("Connection", "Upgrade")
+	resp.Header.Set("Upgrade", "websocket")
+	if key := strings.TrimSpace(clientReq.Header.Get("Sec-WebSocket-Key")); key != "" {
+		resp.Header.Set("Sec-WebSocket-Accept", websocketAccept(key))
+	}
+}
+
+func websocketAccept(key string) string {
+	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
 func cloneWebSocketRequest(r *http.Request) *http.Request {

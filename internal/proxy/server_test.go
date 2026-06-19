@@ -370,7 +370,8 @@ rules:
 		t.Fatal(err)
 	}
 	defer tlsConn.Close()
-	if _, err := fmt.Fprintf(tlsConn, "GET /ws HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", upstreamURL.Host); err != nil {
+	wsKey := "dGhlIHNhbXBsZSBub25jZQ=="
+	if _, err := fmt.Fprintf(tlsConn, "GET /ws HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", upstreamURL.Host, wsKey); err != nil {
 		t.Fatal(err)
 	}
 	wsResp, err := http.ReadResponse(bufio.NewReader(tlsConn), &http.Request{Method: http.MethodGet})
@@ -379,6 +380,9 @@ rules:
 	}
 	if wsResp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("unexpected websocket status: %s", wsResp.Status)
+	}
+	if got := wsResp.Header.Get("Sec-WebSocket-Accept"); got != websocketAccept(wsKey) {
+		t.Fatalf("unexpected websocket accept header: %q", got)
 	}
 	if _, err := tlsConn.Write([]byte("ping")); err != nil {
 		t.Fatal(err)
