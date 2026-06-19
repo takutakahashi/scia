@@ -168,7 +168,9 @@ func (h *Handler) serveMITMConnect(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		inner = inner.WithContext(context.WithValue(inner.Context(), mitmClientConnKey{}, tlsConn))
+		ctx := context.WithValue(inner.Context(), mitmClientConnKey{}, tlsConn)
+		ctx = context.WithValue(ctx, mitmClientReaderKey{}, reader)
+		inner = inner.WithContext(ctx)
 		resp := h.roundTripMITMRequest(inner, r.Host)
 		if resp == nil {
 			_ = inner.Body.Close()
@@ -230,6 +232,10 @@ func (h *Handler) handleMITMWebSocket(r *http.Request, connectHost string, cfg *
 	if !ok {
 		return errors.New("missing mitm client connection")
 	}
+	clientReader, ok := r.Context().Value(mitmClientReaderKey{}).(*bufio.Reader)
+	if !ok {
+		return errors.New("missing mitm client reader")
+	}
 	next := cloneWebSocketRequest(r)
 	next.URL = &url.URL{Scheme: "https", Host: connectHost, Path: r.URL.Path, RawQuery: r.URL.RawQuery}
 	next.Host = connectHost
@@ -259,10 +265,11 @@ func (h *Handler) handleMITMWebSocket(r *http.Request, connectHost string, cfg *
 	if err := writeWebSocketResponse(clientConn, resp); err != nil {
 		return fmt.Errorf("write websocket response to client: %w", err)
 	}
-	return pipeBidirectional(clientConn, upstream, upstreamReader)
+	return pipeBidirectional(clientConn, clientReader, upstream, upstreamReader)
 }
 
 type mitmClientConnKey struct{}
+type mitmClientReaderKey struct{}
 
 func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
@@ -406,10 +413,10 @@ func writeWebSocketResponse(conn net.Conn, resp *http.Response) error {
 	return nil
 }
 
-func pipeBidirectional(client net.Conn, upstream net.Conn, upstreamReader *bufio.Reader) error {
+func pipeBidirectional(client net.Conn, clientReader *bufio.Reader, upstream net.Conn, upstreamReader *bufio.Reader) error {
 	errCh := make(chan error, 2)
 	go func() {
-		_, err := io.Copy(upstream, client)
+		_, err := io.Copy(upstream, clientReader)
 		errCh <- err
 	}()
 	go func() {
