@@ -45,6 +45,7 @@ type Server struct {
 type stateInfo struct {
 	User         string
 	CredentialID string
+	RedirectURI  string
 	CreatedAt    time.Time
 }
 
@@ -198,10 +199,14 @@ func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create state", http.StatusInternalServerError)
 		return
 	}
-	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, CreatedAt: time.Now()})
+	redirectURI := r.URL.Query().Get("redirect_uri")
+	if redirectURI == "" {
+		redirectURI = s.redirectURL(r)
+	}
+	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, RedirectURI: redirectURI, CreatedAt: time.Now()})
 	q := url.Values{}
 	q.Set("client_id", clientID)
-	q.Set("redirect_uri", s.redirectURL(r))
+	q.Set("redirect_uri", redirectURI)
 	q.Set("response_type", "code")
 	q.Set("scope", scope)
 	q.Set("access_type", "offline")
@@ -237,7 +242,7 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credential disappeared", http.StatusBadRequest)
 		return
 	}
-	token, err := s.exchangeCode(r.Context(), r, cred, code)
+	token, err := s.exchangeCode(r.Context(), r, cred, code, info.RedirectURI)
 	if err != nil {
 		s.logger.Error("google oauth code exchange failed", "error", err)
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
@@ -524,7 +529,7 @@ type tokenResponse struct {
 	ErrorDesc    string `json:"error_description"`
 }
 
-func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.CredentialConfig, code string) (tokenResponse, error) {
+func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.CredentialConfig, code, redirectURI string) (tokenResponse, error) {
 	cfg := s.store.Get()
 	tokenURL := cred.Params["token_url"]
 	googleCfg, hasGoogleCfg := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
@@ -547,7 +552,10 @@ func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.
 	form.Set("code", code)
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSecret)
-	form.Set("redirect_uri", s.redirectURL(r))
+	if redirectURI == "" {
+		redirectURI = s.redirectURL(r)
+	}
+	form.Set("redirect_uri", redirectURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return tokenResponse{}, err
@@ -945,6 +953,7 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 		s.states.Store(state, stateInfo{
 			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
 			CredentialID: credentialID,
+			RedirectURI:  redirectURI,
 			CreatedAt:    time.Now(),
 		})
 		http.Redirect(w, r, location, http.StatusFound)
