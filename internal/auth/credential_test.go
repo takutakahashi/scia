@@ -532,6 +532,162 @@ func TestNotionRefreshTokenUsesNamespacedNotionClientSecretRefs(t *testing.T) {
 	}
 }
 
+func TestTodoistRefreshTokenInjectsAccessTokenAndStoresRotatedRefreshToken(t *testing.T) {
+	var tokenRequests int
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenRequests++
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "client_id", "client-id")
+		assertFormValue(t, r, "client_secret", "client-secret")
+		assertFormValue(t, r, "refresh_token", "refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "todoist-access-token",
+			"refresh_token": "rotated-refresh-token",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	secretStore := newMemorySecretStore()
+	cfg := &config.Config{
+		Credentials: []config.CredentialConfig{
+			{
+				ID:   "todoist",
+				Type: "todoist-oauth-refresh-token",
+				Params: map[string]string{
+					"token_url":     tokenEndpoint.URL,
+					"client_id":     "client-id",
+					"client_secret": "client-secret",
+					"refresh_token": "refresh-token",
+				},
+			},
+		},
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.todoist.com/api/v1/tasks", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	injector := NewInjector(secretStore)
+	if err := injector.Apply(context.Background(), req, cfg, []string{"todoist"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer todoist-access-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "todoist", "refresh_token"); err != nil || !ok || got != "rotated-refresh-token" {
+		t.Fatalf("rotated refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+
+	secondReq, err := http.NewRequest(http.MethodGet, "https://api.todoist.com/api/v1/tasks", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := injector.Apply(context.Background(), secondReq, cfg, []string{"todoist"}); err != nil {
+		t.Fatal(err)
+	}
+	if tokenRequests != 1 {
+		t.Fatalf("expected token response to be cached, got %d token requests", tokenRequests)
+	}
+}
+
+func TestTodoistRefreshTokenUsesStoredAccessToken(t *testing.T) {
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "todoist", "access_token", "legacy-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Credentials: []config.CredentialConfig{
+			{ID: "todoist", Type: "todoist-oauth-refresh-token", Params: map[string]string{}},
+		},
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.todoist.com/api/v1/tasks", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewInjector(secretStore).Apply(context.Background(), req, cfg, []string{"todoist"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer legacy-access-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+}
+
+func TestTodoistRefreshTokenUsesNamespacedTodoistClientSecretRefs(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "client_id", "service-client-id")
+		assertFormValue(t, r, "client_secret", "service-client-secret")
+		assertFormValue(t, r, "refresh_token", "stored-refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "service-access-token",
+			"refresh_token": "service-rotated-refresh-token",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	secretStore := newMemorySecretStore()
+	for key, value := range map[string]string{
+		"client-id":     "service-client-id",
+		"client-secret": "service-client-secret",
+		"refresh_token": "stored-refresh-token",
+	} {
+		if err := secretStore.Put(context.Background(), "service-a.todoist", key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Todoist: config.TodoistOAuthConfig{
+							ClientIDSecretRef: "service-a.todoist.client-id",
+							ClientSecretRef:   "service-a.todoist.client-secret",
+							TokenURL:          tokenEndpoint.URL,
+						},
+					},
+				},
+			},
+		},
+		Rules: []config.RuleConfig{
+			{
+				Name:        "service-a-todoist",
+				Hosts:       []string{"api.todoist.com"},
+				Paths:       []string{"/api/v1/*"},
+				Action:      "allow",
+				Credentials: []string{"service-a.todoist"},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.todoist.com/api/v1/tasks", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewInjector(secretStore).Apply(context.Background(), req, cfg, []string{"service-a.todoist"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer service-access-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "service-a.todoist", "refresh_token"); err != nil || !ok || got != "service-rotated-refresh-token" {
+		t.Fatalf("rotated refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
 func assertFormValue(t *testing.T, r *http.Request, key, want string) {
 	t.Helper()
 	if got := r.Form.Get(key); got != want {

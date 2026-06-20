@@ -23,6 +23,12 @@ server:
       clientSecret: "env:NOTION_OAUTH_CLIENT_SECRET"
       redirectUrl: "http://localhost:8081/oauth/notion/callback"
       notionVersion: "2026-03-11"
+    todoist:
+      credentialId: todoist
+      clientId: "env:TODOIST_OAUTH_CLIENT_ID"
+      clientSecret: "env:TODOIST_OAUTH_CLIENT_SECRET"
+      scope: "data:read_write"
+      redirectUrl: "http://localhost:8081/oauth/todoist/callback"
     slack:
       credentialId: slack-user
       clientId: "env:SLACK_OAUTH_CLIENT_ID"
@@ -41,6 +47,10 @@ server:
           clientIdSecretRef: "secret:service-a.notion.client-id"
           clientSecretRef: "secret:service-a.notion.client-secret"
           redirectUrl: "http://localhost:8081/oauth/notion/callback"
+        todoist:
+          clientIdSecretRef: "secret:service-a.todoist.client-id"
+          clientSecretRef: "secret:service-a.todoist.client-secret"
+          scope: "data:read_write"
         slack:
           clientIdSecretRef: "secret:service-a.slack.client-id"
           clientSecretRef: "secret:service-a.slack.client-secret"
@@ -76,6 +86,9 @@ credentials:
   - id: notion-workspace
     type: notion-oauth-refresh-token
     params: {}
+  - id: todoist
+    type: todoist-oauth-refresh-token
+    params: {}
   - id: slack-user
     type: slack-oauth-access-token
     params:
@@ -89,6 +102,11 @@ credentials:
     type: notion-oauth-refresh-token
     params:
       token_broker_url: "http://scia-oauth:8081/oauth/service-a/notion/token"
+      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
+  - id: service-a.todoist
+    type: todoist-oauth-refresh-token
+    params:
+      token_broker_url: "http://scia-oauth:8081/oauth/service-a/todoist/token"
       token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
   - id: service-a.slack
     type: slack-oauth-access-token
@@ -131,6 +149,12 @@ rules:
     paths: ["/v1/*"]
     action: allow
     credentials: ["notion-workspace"]
+  - name: inject-todoist-token
+    hosts: ["api.todoist.com"]
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+    paths: ["/api/v1/*"]
+    action: allow
+    credentials: ["todoist"]
   - name: inject-slack-user-token
     hosts: ["slack.com"]
     methods: ["GET", "POST"]

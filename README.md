@@ -7,7 +7,7 @@ SaaS credential injector for agents.
 ## Features
 
 - Forward proxy for HTTP and HTTPS requests with credential injection.
-- Credential types: bearer token, basic auth, static header, OAuth2 client credentials, Google OAuth refresh tokens, and Notion OAuth refresh tokens.
+- Credential types: bearer token, basic auth, static header, OAuth2 client credentials, Google OAuth refresh tokens, Notion OAuth refresh tokens, and Todoist OAuth refresh tokens.
 - Policy rules by host, method, and path with `allow`, `deny`, or `approval` actions.
 - Blocking approval flow exposed through local admin endpoints.
 - Reloadable configuration through a provider interface. The first adapter is YAML from the filesystem; database and AWS Secrets Manager providers can be added behind the same `config.Provider` interface.
@@ -91,6 +91,30 @@ the authorization request to Notion with `owner=user`, exchanges the returned
 code with JSON + HTTP Basic authentication, and stores the resulting
 `refresh_token`.
 
+Todoist apps use the same helper UI. Configure the Todoist app redirect URI to
+match `server.oauth.todoist.redirectUrl`, for example:
+
+```yaml
+server:
+  oauth:
+    todoist:
+      credentialId: todoist
+      clientId: "env:TODOIST_OAUTH_CLIENT_ID"
+      clientSecret: "env:TODOIST_OAUTH_CLIENT_SECRET"
+      scope: "data:read_write"
+      redirectUrl: "http://localhost:8081/oauth/todoist/callback"
+```
+
+Open `http://localhost:8081/` and choose the Todoist credential. `scia` sends
+the authorization request to Todoist, exchanges the returned code at
+`https://api.todoist.com/oauth/access_token`, and stores the returned
+`refresh_token`. Legacy Todoist apps that do not issue refresh tokens store the
+long-lived `access_token` instead.
+
+See [docs/todoist-oauth.md](docs/todoist-oauth.md) for the full Todoist setup
+guide, including local helper setup, proxy injection, and namespaced broker
+configuration.
+
 Slack apps use the same helper UI. Configure bot scopes with `scope`, user
 scopes with `userScope`, and set `tokenType: "user"` to store the Slack
 `authed_user.access_token` as the credential access token:
@@ -124,8 +148,12 @@ callback stores `refresh_token`; request-time injection reads
 `params.refresh_token` first and falls back to the secret store. For Notion
 credentials, request-time injection prefers the secret store because Notion
 refreshes return a new `refresh_token`, which `scia` stores for the next
-refresh. For Slack credentials, callback stores `access_token`; if Slack returns
-a rotated `refresh_token`, that value is stored too.
+refresh.
+For Todoist credentials, request-time injection uses a stored `access_token`
+when present, otherwise refreshes with a stored `refresh_token` and stores any
+rotated refresh token returned by Todoist.
+For Slack credentials, callback stores `access_token`; if Slack returns a
+rotated `refresh_token`, that value is stored too.
 
 The SQLite store is local persistence, not encryption. Keep the database path on a protected volume and restrict filesystem access to the `scia` process.
 
@@ -150,6 +178,10 @@ server:
           clientIdSecretRef: "secret:service-a.notion.client-id"
           clientSecretRef: "secret:service-a.notion.client-secret"
           redirectUrl: "https://service-a.example.com/oauth/notion/callback"
+        todoist:
+          clientIdSecretRef: "secret:service-a.todoist.client-id"
+          clientSecretRef: "secret:service-a.todoist.client-secret"
+          scope: "data:read_write"
         slack:
           clientIdSecretRef: "secret:service-a.slack.client-id"
           clientSecretRef: "secret:service-a.slack.client-secret"
@@ -193,6 +225,14 @@ Notion broker endpoints:
 - `POST /oauth/{namespace}/notion/token` forwards a refresh-token or authorization-code request to Notion with the configured client ID and client secret injected by scia.
 - `POST /oauth/{namespace}/notion/access-token` exchanges the refresh token stored by scia for a Notion access token and stores any rotated refresh token returned by Notion.
 - `POST /oauth/{namespace}/notion/revoke` forwards a revoke request to Notion.
+
+Todoist broker endpoints:
+
+- `GET /oauth/{namespace}/todoist/authorization-url?state=...` returns a generated Todoist authorization URL.
+- `GET /oauth/{namespace}/todoist/start` redirects to the generated Todoist authorization URL.
+- `POST /oauth/{namespace}/todoist/token` forwards a refresh-token or authorization-code request to Todoist with the configured client ID and client secret injected by scia.
+- `POST /oauth/{namespace}/todoist/access-token` returns a stored Todoist legacy access token, or exchanges the stored refresh token for a new access token and stores any rotated refresh token returned by Todoist.
+- `POST /oauth/{namespace}/todoist/revoke` forwards a revoke request to Todoist.
 
 Slack broker endpoints:
 
@@ -244,6 +284,11 @@ credentials:
     type: notion-oauth-refresh-token
     params:
       token_broker_url: "http://scia-oauth:8081/oauth/service-a/notion/token"
+      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
+  - id: service-a.todoist
+    type: todoist-oauth-refresh-token
+    params:
+      token_broker_url: "http://scia-oauth:8081/oauth/service-a/todoist/token"
       token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
 ```
 
@@ -309,6 +354,37 @@ rules:
 `https://api.notion.com/v1/oauth/token`, caches the returned access token, stores
 rotated refresh tokens, and injects `Authorization: Bearer <access_token>` plus a
 default `Notion-Version: 2026-03-11` header for matching rules.
+
+Todoist OAuth client credentials can be configured once under
+`server.oauth.todoist`. The `credentials` entry is optional when
+`server.oauth.todoist.credentialId` is configured:
+
+```yaml
+server:
+  oauth:
+    todoist:
+      credentialId: todoist
+      clientId: "env:TODOIST_OAUTH_CLIENT_ID"
+      clientSecret: "env:TODOIST_OAUTH_CLIENT_SECRET"
+      scope: "data:read_write"
+
+credentials:
+  - id: todoist
+    type: todoist-oauth-refresh-token
+    params: {}
+
+rules:
+  - name: inject-todoist-token
+    hosts: ["api.todoist.com"]
+    paths: ["/api/v1/*"]
+    action: allow
+    credentials: ["todoist"]
+```
+
+`scia` exchanges Todoist refresh tokens at
+`https://api.todoist.com/oauth/access_token`, caches the returned access token,
+stores rotated refresh tokens, and injects
+`Authorization: Bearer <access_token>` for matching rules.
 
 ## Build
 

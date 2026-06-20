@@ -159,6 +159,44 @@ func TestNotionOAuthStartRedirectsToNotion(t *testing.T) {
 	}
 }
 
+func TestTodoistOAuthStartRedirectsToTodoist(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Todoist: config.TodoistOAuthConfig{
+					CredentialID: "todoist",
+					ClientID:     "todoist-client-id",
+					ClientSecret: "todoist-client-secret",
+					Scope:        "data:read_write",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/todoist/start?credential=todoist", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.HasPrefix(location, todoistAuthURL+"?") {
+		t.Fatalf("unexpected redirect: %s", location)
+	}
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	assertQueryValue(t, query, "client_id", "todoist-client-id")
+	assertQueryValue(t, query, "scope", "data:read_write")
+	if query.Get("state") == "" {
+		t.Fatal("missing state")
+	}
+}
+
 func TestSlackOAuthStartRedirectsWithUserScope(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{
@@ -428,6 +466,91 @@ func TestNotionOAuthCallbackUsesJSONBasicAuthAndStoresRefreshToken(t *testing.T)
 	}
 }
 
+func TestTodoistOAuthCallbackStoresRefreshToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "code", "auth-code")
+		assertFormValue(t, r, "client_id", "todoist-client-id")
+		assertFormValue(t, r, "client_secret", "todoist-client-secret")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "todoist-access-token",
+			"refresh_token": "todoist-refresh-token",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Todoist: config.TodoistOAuthConfig{
+					CredentialID: "todoist",
+					ClientID:     "todoist-client-id",
+					ClientSecret: "todoist-client-secret",
+					TokenURL:     tokenEndpoint.URL,
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	srv := NewServer(store, secretStore, slog.Default())
+	state := "test-state"
+	srv.states.Store(state, stateInfo{CredentialID: "todoist", CreatedAt: time.Now()})
+	req := httptest.NewRequest(http.MethodGet, "/oauth/todoist/callback?state="+state+"&code=auth-code", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "todoist", "refresh_token"); err != nil || !ok || got != "todoist-refresh-token" {
+		t.Fatalf("refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestTodoistOAuthCallbackStoresLegacyAccessToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "legacy-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   315360000,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Todoist: config.TodoistOAuthConfig{
+					CredentialID: "todoist",
+					ClientID:     "todoist-client-id",
+					ClientSecret: "todoist-client-secret",
+					TokenURL:     tokenEndpoint.URL,
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	srv := NewServer(store, secretStore, slog.Default())
+	state := "test-state"
+	srv.states.Store(state, stateInfo{CredentialID: "todoist", CreatedAt: time.Now()})
+	req := httptest.NewRequest(http.MethodGet, "/oauth/todoist/callback?state="+state+"&code=auth-code", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "todoist", "access_token"); err != nil || !ok || got != "legacy-access-token" {
+		t.Fatalf("access token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
 func TestNamespaceGoogleAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{
@@ -470,6 +593,52 @@ func TestNamespaceGoogleAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	assertQueryValue(t, query, "client_id", "secret-client-id")
 	assertQueryValue(t, query, "redirect_uri", "https://service-a.example.com/oauth/callback")
 	assertQueryValue(t, query, "scope", "https://www.googleapis.com/auth/calendar")
+	assertQueryValue(t, query, "state", "state-1")
+	if strings.Contains(body["authorization_url"], "client-secret") {
+		t.Fatalf("authorization URL leaked client secret: %s", body["authorization_url"])
+	}
+}
+
+func TestNamespaceTodoistAuthorizationURLUsesSecretRefClientID(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Todoist: config.TodoistOAuthConfig{
+							ClientIDSecretRef: "service-a.todoist.client-id",
+							ClientSecretRef:   "service-a.todoist.client-secret",
+							Scope:             "data:read_write",
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "service-a.todoist", "client-id", "secret-client-id"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/service-a/todoist/authorization-url?state=state-1", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(body["authorization_url"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	assertQueryValue(t, query, "client_id", "secret-client-id")
+	assertQueryValue(t, query, "scope", "data:read_write")
 	assertQueryValue(t, query, "state", "state-1")
 	if strings.Contains(body["authorization_url"], "client-secret") {
 		t.Fatalf("authorization URL leaked client secret: %s", body["authorization_url"])
@@ -696,6 +865,99 @@ func TestNamespaceNotionAccessTokenUsesStoredRefreshTokenAndStoresRotatedRefresh
 	}
 	if got, ok, err := secretStore.Get(context.Background(), "service-a.notion", "refresh_token"); err != nil || !ok || got != "rotated-refresh-token" {
 		t.Fatalf("rotated refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestNamespaceTodoistAccessTokenUsesStoredRefreshTokenAndStoresRotatedRefreshToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "refresh_token", "stored-refresh-token")
+		assertFormValue(t, r, "client_id", "secret-client-id")
+		assertFormValue(t, r, "client_secret", "secret-client-secret")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "stored-access-token",
+			"refresh_token": "rotated-refresh-token",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Todoist: config.TodoistOAuthConfig{
+							ClientIDSecretRef: "service-a.todoist.client-id",
+							ClientSecretRef:   "service-a.todoist.client-secret",
+							TokenURL:          tokenEndpoint.URL,
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	for key, value := range map[string]string{
+		"client-id":     "secret-client-id",
+		"client-secret": "secret-client-secret",
+		"refresh_token": "stored-refresh-token",
+	} {
+		if err := secretStore.Put(context.Background(), "service-a.todoist", key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/todoist/access-token", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "stored-access-token") {
+		t.Fatalf("token response was not proxied: %s", rec.Body.String())
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "service-a.todoist", "refresh_token"); err != nil || !ok || got != "rotated-refresh-token" {
+		t.Fatalf("rotated refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestNamespaceTodoistAccessTokenUsesStoredAccessToken(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Todoist: config.TodoistOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "service-a.todoist", "access_token", "legacy-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/todoist/access-token", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "legacy-access-token") {
+		t.Fatalf("token response did not include stored access token: %s", rec.Body.String())
 	}
 }
 

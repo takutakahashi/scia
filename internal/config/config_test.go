@@ -94,6 +94,30 @@ func TestValidateAllowsNamespacedNotionCredentialReference(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsNamespacedTodoistCredentialReference(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			OAuth: OAuthConfig{
+				Namespaces: map[string]OAuthNamespaceConfig{
+					"service-a": {
+						Todoist: TodoistOAuthConfig{
+							ClientIDSecretRef: "service-a.todoist.client-id",
+							ClientSecretRef:   "service-a.todoist.client-secret",
+						},
+					},
+				},
+			},
+		},
+		Rules: []RuleConfig{
+			{Name: "todoist", Action: "allow", Credentials: []string{"service-a.todoist"}},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateAllowsNamespacedSlackCredentialReference(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{
