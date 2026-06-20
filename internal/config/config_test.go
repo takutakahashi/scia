@@ -118,6 +118,32 @@ func TestValidateAllowsNamespacedTodoistCredentialReference(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsNamespacedSlackCredentialReference(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			OAuth: OAuthConfig{
+				Namespaces: map[string]OAuthNamespaceConfig{
+					"service-a": {
+						Slack: SlackOAuthConfig{
+							ClientIDSecretRef: "service-a.slack.client-id",
+							ClientSecretRef:   "service-a.slack.client-secret",
+							UserScope:         "chat:write",
+							TokenType:         "user",
+						},
+					},
+				},
+			},
+		},
+		Rules: []RuleConfig{
+			{Name: "slack", Action: "allow", Credentials: []string{"service-a.slack"}},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateRequiresUsersForKubernetesMode(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{

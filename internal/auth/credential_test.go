@@ -113,6 +113,32 @@ func TestGoogleRefreshTokenUsesSecretStore(t *testing.T) {
 	}
 }
 
+func TestSlackAccessTokenUsesSecretStore(t *testing.T) {
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "slack-user", "access_token", "xoxp-user-token"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Credentials: []config.CredentialConfig{
+			{
+				ID:   "slack-user",
+				Type: "slack-oauth-access-token",
+			},
+		},
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://slack.com/api/chat.postMessage", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewInjector(secretStore).Apply(context.Background(), req, cfg, []string{"slack-user"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer xoxp-user-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+}
+
 func TestGoogleRefreshTokenUsesTokenBroker(t *testing.T) {
 	var tokenRequests int
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -115,6 +115,26 @@ See [docs/todoist-oauth.md](docs/todoist-oauth.md) for the full Todoist setup
 guide, including local helper setup, proxy injection, and namespaced broker
 configuration.
 
+Slack apps use the same helper UI. Configure bot scopes with `scope`, user
+scopes with `userScope`, and set `tokenType: "user"` to store the Slack
+`authed_user.access_token` as the credential access token:
+
+```yaml
+server:
+  oauth:
+    slack:
+      credentialId: slack-user
+      clientId: "env:SLACK_OAUTH_CLIENT_ID"
+      clientSecret: "env:SLACK_OAUTH_CLIENT_SECRET"
+      userScope: "chat:write users:read"
+      tokenType: "user"
+      redirectUrl: "http://localhost:8081/oauth/slack/callback"
+```
+
+Open `http://localhost:8081/` and choose the Slack credential. `scia` exchanges
+the returned code with Slack `oauth.v2.access` and stores the selected
+`access_token`.
+
 OAuth callback refresh tokens are stored in the SQLite secret store by default:
 
 ```yaml
@@ -132,6 +152,8 @@ refresh.
 For Todoist credentials, request-time injection uses a stored `access_token`
 when present, otherwise refreshes with a stored `refresh_token` and stores any
 rotated refresh token returned by Todoist.
+For Slack credentials, callback stores `access_token`; if Slack returns a
+rotated `refresh_token`, that value is stored too.
 
 The SQLite store is local persistence, not encryption. Keep the database path on a protected volume and restrict filesystem access to the `scia` process.
 
@@ -160,6 +182,12 @@ server:
           clientIdSecretRef: "secret:service-a.todoist.client-id"
           clientSecretRef: "secret:service-a.todoist.client-secret"
           scope: "data:read_write"
+        slack:
+          clientIdSecretRef: "secret:service-a.slack.client-id"
+          clientSecretRef: "secret:service-a.slack.client-secret"
+          userScope: "chat:write users:read"
+          tokenType: "user"
+          redirectUrl: "https://service-a.example.com/oauth/slack/callback"
 ```
 
 `server.mode` is exclusive:
@@ -206,12 +234,26 @@ Todoist broker endpoints:
 - `POST /oauth/{namespace}/todoist/access-token` returns a stored Todoist legacy access token, or exchanges the stored refresh token for a new access token and stores any rotated refresh token returned by Todoist.
 - `POST /oauth/{namespace}/todoist/revoke` forwards a revoke request to Todoist.
 
+Slack broker endpoints:
+
+- `GET /oauth/{namespace}/slack/authorization-url?state=...` returns a generated Slack authorization URL.
+- `GET /oauth/{namespace}/slack/start` redirects to the generated Slack authorization URL.
+- `POST /oauth/{namespace}/slack/token` forwards an authorization-code or refresh-token request to Slack with the configured client ID and client secret injected by scia.
+- `POST /oauth/{namespace}/slack/access-token` returns the Slack access token stored by scia.
+- `POST /oauth/{namespace}/slack/revoke` forwards a revoke request to Slack.
+
+Slack OAuth supports bot and user tokens. Configure bot scopes with `scope`,
+user scopes with `userScope`, and set `tokenType: "user"` when the proxy should
+inject the `authed_user.access_token` returned by Slack. This follows Slack's
+OAuth v2 response shape, where user tokens are returned under `authed_user` when
+user scopes are requested.
+
 When `server.oauth.brokerToken` is set, broker API requests to
 `authorization-url`, `token`, `access-token`, and `revoke` must include
 `Authorization: Bearer <token>`. `env:` values are expanded, so the OAuth server
 and proxy can share a Kubernetes Secret or deployment environment variable
 without putting the token in config files. The browser redirect endpoint
-`/oauth/{namespace}/google/start` is not protected by this header because
+`/oauth/{namespace}/{provider}/start` is not protected by this header because
 browsers do not attach service-to-service bearer tokens during redirects.
 
 The proxy can also reference the namespaced Google credential ID directly:

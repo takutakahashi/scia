@@ -32,6 +32,9 @@ const notionVersion = "2026-03-11"
 const todoistAuthURL = "https://app.todoist.com/oauth/authorize"
 const todoistTokenURL = "https://api.todoist.com/oauth/access_token"
 const todoistRevokeURL = "https://api.todoist.com/api/v1/revoke"
+const slackAuthURL = "https://slack.com/oauth/v2/authorize"
+const slackTokenURL = "https://slack.com/api/oauth.v2.access"
+const slackRevokeURL = "https://slack.com/api/auth.revoke"
 
 type Server struct {
 	store   *config.Store
@@ -67,6 +70,15 @@ type todoistOption struct {
 	Source       string
 }
 
+type slackOption struct {
+	User         string
+	CredentialID string
+	Scope        string
+	UserScope    string
+	TokenType    string
+	Source       string
+}
+
 func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logger) *Server {
 	if secretStore == nil {
 		secretStore = secrets.NoopStore{}
@@ -89,6 +101,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/oauth/notion/callback", s.notionCallback)
 	mux.HandleFunc("/oauth/todoist/start", s.startTodoist)
 	mux.HandleFunc("/oauth/todoist/callback", s.todoistCallback)
+	mux.HandleFunc("/oauth/slack/start", s.startSlack)
+	mux.HandleFunc("/oauth/slack/callback", s.slackCallback)
 	mux.HandleFunc("/oauth/", s.namespaceOAuth)
 	return mux
 }
@@ -110,7 +124,8 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		GoogleOptions  []googleOption
 		NotionOptions  []notionOption
 		TodoistOptions []todoistOption
-	}{GoogleOptions: options, NotionOptions: s.notionOptions(s.store.Get()), TodoistOptions: s.todoistOptions(s.store.Get())}
+		SlackOptions   []slackOption
+	}{GoogleOptions: options, NotionOptions: s.notionOptions(s.store.Get()), TodoistOptions: s.todoistOptions(s.store.Get()), SlackOptions: s.slackOptions(s.store.Get())}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = indexTemplate.Execute(w, data)
 }
@@ -476,6 +491,143 @@ func (s *Server) todoistCallback(w http.ResponseWriter, r *http.Request) {
 	_ = callbackTemplate.Execute(w, data)
 }
 
+func (s *Server) startSlack(w http.ResponseWriter, r *http.Request) {
+	credentialID := r.URL.Query().Get("credential")
+	userID := r.URL.Query().Get("user")
+	cfg := s.store.Get()
+	if cfg.Server.Secrets.Mode == "kubernetes" {
+		if userID == "" {
+			http.Error(w, "user is required in kubernetes mode", http.StatusBadRequest)
+			return
+		}
+		if !cfg.HasUser(userID) {
+			http.Error(w, "unknown user", http.StatusBadRequest)
+			return
+		}
+	}
+	cred, ok := s.slackCredential(cfg, credentialID)
+	if !ok {
+		http.Error(w, "unknown slack credential", http.StatusBadRequest)
+		return
+	}
+	clientID, err := s.slackClientID(r.Context(), cfg, cred)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if clientID == "" {
+		http.Error(w, "credential is missing client_id", http.StatusBadRequest)
+		return
+	}
+	state, err := randomState()
+	if err != nil {
+		http.Error(w, "failed to create state", http.StatusInternalServerError)
+		return
+	}
+	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, CreatedAt: time.Now()})
+	authURL := slackAuthURL
+	if slackCfg, ok := config.SlackOAuthConfigForCredential(cfg, cred.ID); ok && slackCfg.AuthURL != "" {
+		authURL = slackCfg.AuthURL
+	}
+	q := url.Values{}
+	q.Set("client_id", clientID)
+	q.Set("redirect_uri", s.providerRedirectURL(r, "slack"))
+	scope := slackScope(cfg, cred)
+	userScope := slackUserScope(cfg, cred)
+	if scope != "" {
+		q.Set("scope", scope)
+	}
+	if userScope != "" {
+		q.Set("user_scope", userScope)
+	}
+	q.Set("state", state)
+	http.Redirect(w, r, authURL+"?"+q.Encode(), http.StatusFound)
+}
+
+func (s *Server) slackCallback(w http.ResponseWriter, r *http.Request) {
+	if errText := r.URL.Query().Get("error"); errText != "" {
+		http.Error(w, errText, http.StatusBadRequest)
+		return
+	}
+	state := r.URL.Query().Get("state")
+	rawInfo, ok := s.states.LoadAndDelete(state)
+	if !ok {
+		http.Error(w, "invalid state", http.StatusBadRequest)
+		return
+	}
+	info := rawInfo.(stateInfo)
+	if time.Since(info.CreatedAt) > 10*time.Minute {
+		http.Error(w, "state expired", http.StatusBadRequest)
+		return
+	}
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "missing code", http.StatusBadRequest)
+		return
+	}
+	cfg := s.store.Get()
+	cred, ok := s.slackCredential(cfg, info.CredentialID)
+	if !ok {
+		http.Error(w, "credential disappeared", http.StatusBadRequest)
+		return
+	}
+	token, err := s.exchangeSlackCode(r.Context(), r, cred, code)
+	if err != nil {
+		s.logger.Error("slack oauth code exchange failed", "error", err)
+		http.Error(w, "token exchange failed", http.StatusBadGateway)
+		return
+	}
+	storageID := s.storageUserID(cfg, info)
+	selected, err := selectSlackToken(cfg, cred, token)
+	if err != nil {
+		s.logger.Error("slack oauth token selection failed", "error", err, "credential", info.CredentialID, "user", info.User)
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if err := s.secrets.Put(r.Context(), storageID, "access_token", selected.AccessToken); err != nil {
+		s.logger.Error("failed to store slack access token", "error", err, "credential", info.CredentialID, "user", info.User)
+		http.Error(w, "failed to store access token", http.StatusInternalServerError)
+		return
+	}
+	if selected.RefreshToken != "" {
+		if err := s.secrets.Put(r.Context(), storageID, "refresh_token", selected.RefreshToken); err != nil {
+			s.logger.Error("failed to store slack refresh token", "error", err, "credential", info.CredentialID, "user", info.User)
+			http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
+			return
+		}
+	}
+	if selected.Scope != "" {
+		if err := s.secrets.Put(r.Context(), storageID, "scope", selected.Scope); err != nil {
+			s.logger.Error("failed to store slack token scope", "error", err, "credential", info.CredentialID, "user", info.User)
+			http.Error(w, "failed to store token scope", http.StatusInternalServerError)
+			return
+		}
+	}
+	data := struct {
+		Provider     string
+		User         string
+		CredentialID string
+		TokenKind    string
+		TokenValue   string
+		RefreshToken string
+		AccessToken  string
+		ExpiresIn    int64
+		Stored       bool
+	}{
+		Provider:     "Slack",
+		User:         info.User,
+		CredentialID: info.CredentialID,
+		TokenKind:    "access_token",
+		TokenValue:   selected.AccessToken,
+		RefreshToken: selected.RefreshToken,
+		AccessToken:  selected.AccessToken,
+		ExpiresIn:    selected.ExpiresIn,
+		Stored:       true,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = callbackTemplate.Execute(w, data)
+}
+
 type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
@@ -483,6 +635,34 @@ type tokenResponse struct {
 	ExpiresIn    int64  `json:"expires_in"`
 	Error        string `json:"error"`
 	ErrorDesc    string `json:"error_description"`
+}
+
+type slackTokenResponse struct {
+	OK           *bool           `json:"ok"`
+	AccessToken  string          `json:"access_token"`
+	RefreshToken string          `json:"refresh_token"`
+	TokenType    string          `json:"token_type"`
+	Scope        string          `json:"scope"`
+	ExpiresIn    int64           `json:"expires_in"`
+	AuthedUser   slackAuthedUser `json:"authed_user"`
+	Error        string          `json:"error"`
+	ErrorDesc    string          `json:"error_description"`
+}
+
+type slackAuthedUser struct {
+	ID           string `json:"id"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	Scope        string `json:"scope"`
+	ExpiresIn    int64  `json:"expires_in"`
+}
+
+type selectedSlackToken struct {
+	AccessToken  string
+	RefreshToken string
+	Scope        string
+	ExpiresIn    int64
 }
 
 func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.CredentialConfig, code string) (tokenResponse, error) {
@@ -641,6 +821,86 @@ func (s *Server) exchangeTodoistCode(ctx context.Context, cred config.Credential
 	return token, nil
 }
 
+func (s *Server) exchangeSlackCode(ctx context.Context, r *http.Request, cred config.CredentialConfig, code string) (slackTokenResponse, error) {
+	cfg := s.store.Get()
+	tokenURL := cred.Params["token_url"]
+	slackCfg, hasSlackCfg := config.SlackOAuthConfigForCredential(cfg, cred.ID)
+	if tokenURL == "" && hasSlackCfg {
+		tokenURL = slackCfg.TokenURL
+	}
+	if tokenURL == "" {
+		tokenURL = slackTokenURL
+	}
+	clientID, err := s.slackClientID(ctx, cfg, cred)
+	if err != nil {
+		return slackTokenResponse{}, err
+	}
+	clientSecret, err := s.slackClientSecret(ctx, cfg, cred)
+	if err != nil {
+		return slackTokenResponse{}, err
+	}
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("redirect_uri", s.providerRedirectURL(r, "slack"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return slackTokenResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return slackTokenResponse{}, err
+	}
+	defer resp.Body.Close()
+	var token slackTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		return slackTokenResponse{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		if token.Error != "" {
+			return slackTokenResponse{}, fmt.Errorf("%s: %s", token.Error, token.ErrorDesc)
+		}
+		return slackTokenResponse{}, fmt.Errorf("token endpoint returned %s", resp.Status)
+	}
+	if token.OK != nil && !*token.OK {
+		if token.Error != "" {
+			return slackTokenResponse{}, fmt.Errorf("%s: %s", token.Error, token.ErrorDesc)
+		}
+		return slackTokenResponse{}, fmt.Errorf("slack token endpoint returned ok=false")
+	}
+	return token, nil
+}
+
+func selectSlackToken(cfg *config.Config, cred config.CredentialConfig, token slackTokenResponse) (selectedSlackToken, error) {
+	switch slackTokenType(cfg, cred) {
+	case "user":
+		if token.AuthedUser.AccessToken == "" {
+			return selectedSlackToken{}, fmt.Errorf("slack response did not include authed_user.access_token")
+		}
+		return selectedSlackToken{
+			AccessToken:  token.AuthedUser.AccessToken,
+			RefreshToken: token.AuthedUser.RefreshToken,
+			Scope:        token.AuthedUser.Scope,
+			ExpiresIn:    token.AuthedUser.ExpiresIn,
+		}, nil
+	case "bot":
+		if token.AccessToken == "" {
+			return selectedSlackToken{}, fmt.Errorf("slack response did not include access_token")
+		}
+		return selectedSlackToken{
+			AccessToken:  token.AccessToken,
+			RefreshToken: token.RefreshToken,
+			Scope:        token.Scope,
+			ExpiresIn:    token.ExpiresIn,
+		}, nil
+	default:
+		return selectedSlackToken{}, fmt.Errorf("unsupported slack token_type %q", slackTokenType(cfg, cred))
+	}
+}
+
 func (s *Server) redirectURL(r *http.Request) string {
 	return s.providerRedirectURL(r, "google")
 }
@@ -658,6 +918,10 @@ func (s *Server) providerRedirectURL(r *http.Request, provider string) string {
 		}
 	case "todoist":
 		if redirect := cfg.Server.OAuth.Todoist.RedirectURL; redirect != "" {
+			return redirect
+		}
+	case "slack":
+		if redirect := cfg.Server.OAuth.Slack.RedirectURL; redirect != "" {
 			return redirect
 		}
 	}
@@ -710,6 +974,14 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.namespaceTodoistOAuth(w, r, namespace, credentialID, action, todoistCfg)
+	case "slack":
+		credentialID := config.NamespaceSlackCredentialID(namespace)
+		slackCfg, ok := config.SlackOAuthConfigForCredential(cfg, credentialID)
+		if !ok {
+			http.Error(w, "unknown slack namespace", http.StatusNotFound)
+			return
+		}
+		s.namespaceSlackOAuth(w, r, namespace, credentialID, action, slackCfg)
 	default:
 		http.NotFound(w, r)
 	}
@@ -821,6 +1093,43 @@ func (s *Server) namespaceTodoistOAuth(w http.ResponseWriter, r *http.Request, n
 			return
 		}
 		s.namespaceTodoistRevoke(w, r, todoistCfg)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) namespaceSlackOAuth(w http.ResponseWriter, r *http.Request, namespace, credentialID, action string, slackCfg config.SlackOAuthConfig) {
+	switch action {
+	case "authorization-url":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceSlackAuthorizationURL(w, r, namespace, credentialID, slackCfg, false)
+	case "start":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceSlackAuthorizationURL(w, r, namespace, credentialID, slackCfg, true)
+	case "token":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceSlackToken(w, r, slackCfg)
+	case "access-token":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceSlackAccessToken(w, r, namespace, credentialID)
+	case "revoke":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceSlackRevoke(w, r, slackCfg)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1041,6 +1350,76 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 	})
 }
 
+func (s *Server) namespaceSlackAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, slackCfg config.SlackOAuthConfig, redirect bool) {
+	clientID, err := s.slackClientValue(r.Context(), slackCfg.ClientID, slackCfg.ClientIDSecretRef)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if clientID == "" {
+		http.Error(w, "slack namespace is missing client id", http.StatusBadRequest)
+		return
+	}
+	authURL := slackCfg.AuthURL
+	if authURL == "" {
+		authURL = slackAuthURL
+	}
+	redirectURI := r.URL.Query().Get("redirect_uri")
+	if redirectURI == "" {
+		redirectURI = slackCfg.RedirectURL
+	}
+	if redirectURI == "" {
+		redirectURI = s.providerRedirectURL(r, "slack")
+	}
+	scope := r.URL.Query().Get("scope")
+	if scope == "" {
+		scope = slackCfg.Scope
+	}
+	userScope := r.URL.Query().Get("user_scope")
+	if userScope == "" {
+		userScope = slackCfg.UserScope
+	}
+	state := r.URL.Query().Get("state")
+	if state == "" && redirect {
+		generated, err := randomState()
+		if err != nil {
+			http.Error(w, "failed to create state", http.StatusInternalServerError)
+			return
+		}
+		state = generated
+	}
+	q := url.Values{}
+	q.Set("client_id", clientID)
+	q.Set("redirect_uri", redirectURI)
+	if scope != "" {
+		q.Set("scope", scope)
+	}
+	if userScope != "" {
+		q.Set("user_scope", userScope)
+	}
+	if state != "" {
+		q.Set("state", state)
+	}
+	location := authURL + "?" + q.Encode()
+	if redirect {
+		s.states.Store(state, stateInfo{
+			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+			CredentialID: credentialID,
+			CreatedAt:    time.Now(),
+		})
+		http.Redirect(w, r, location, http.StatusFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"credential_id":     credentialID,
+		"authorization_url": location,
+		"auth_url":          authURL,
+		"redirect_uri":      redirectURI,
+		"scope":             scope,
+		"user_scope":        userScope,
+	})
+}
+
 func (s *Server) namespaceGoogleToken(w http.ResponseWriter, r *http.Request, googleCfg config.GoogleOAuthConfig) {
 	form, err := parseFormOrJSON(r)
 	if err != nil {
@@ -1139,6 +1518,55 @@ func (s *Server) namespaceTodoistToken(w http.ResponseWriter, r *http.Request, t
 	s.forwardForm(w, r, tokenURL, upstream)
 }
 
+func (s *Server) namespaceSlackToken(w http.ResponseWriter, r *http.Request, slackCfg config.SlackOAuthConfig) {
+	form, err := parseFormOrJSON(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	grantType := form.Get("grant_type")
+	if grantType == "" {
+		grantType = "authorization_code"
+	}
+	if grantType != "authorization_code" && grantType != "refresh_token" {
+		http.Error(w, "unsupported grant_type", http.StatusBadRequest)
+		return
+	}
+	clientID, err := s.slackClientValue(r.Context(), slackCfg.ClientID, slackCfg.ClientIDSecretRef)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	clientSecret, err := s.slackClientValue(r.Context(), slackCfg.ClientSecret, slackCfg.ClientSecretRef)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	upstream := url.Values{}
+	upstream.Set("grant_type", grantType)
+	upstream.Set("client_id", clientID)
+	upstream.Set("client_secret", clientSecret)
+	if grantType == "authorization_code" {
+		if form.Get("code") == "" || form.Get("redirect_uri") == "" {
+			http.Error(w, "code and redirect_uri are required", http.StatusBadRequest)
+			return
+		}
+		upstream.Set("code", form.Get("code"))
+		upstream.Set("redirect_uri", form.Get("redirect_uri"))
+	} else {
+		if form.Get("refresh_token") == "" {
+			http.Error(w, "refresh_token is required", http.StatusBadRequest)
+			return
+		}
+		upstream.Set("refresh_token", form.Get("refresh_token"))
+	}
+	tokenURL := slackCfg.TokenURL
+	if tokenURL == "" {
+		tokenURL = slackTokenURL
+	}
+	s.forwardForm(w, r, tokenURL, upstream)
+}
+
 func (s *Server) namespaceGoogleAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string, googleCfg config.GoogleOAuthConfig) {
 	cfg := s.store.Get()
 	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
@@ -1217,6 +1645,25 @@ func (s *Server) namespaceTodoistAccessToken(w http.ResponseWriter, r *http.Requ
 		tokenURL = todoistTokenURL
 	}
 	s.forwardTodoistForm(w, r, tokenURL, upstream, storageID)
+}
+
+func (s *Server) namespaceSlackAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string) {
+	cfg := s.store.Get()
+	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
+	accessToken, ok, err := s.secrets.Get(r.Context(), storageID, "access_token")
+	if err != nil {
+		s.logger.Error("failed to load slack access token", "error", err, "credential", credentialID, "storage", storageID)
+		http.Error(w, "failed to load access token", http.StatusInternalServerError)
+		return
+	}
+	if !ok || accessToken == "" {
+		http.Error(w, "access_token is not registered", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"access_token": accessToken,
+		"token_type":   "Bearer",
+	})
 }
 
 func (s *Server) namespaceNotionToken(w http.ResponseWriter, r *http.Request, notionCfg config.NotionOAuthConfig) {
@@ -1338,6 +1785,25 @@ func (s *Server) namespaceTodoistRevoke(w http.ResponseWriter, r *http.Request, 
 		revokeURL = todoistRevokeURL
 	}
 	s.forwardTodoistRevoke(w, r, revokeURL, clientID, clientSecret, token)
+}
+
+func (s *Server) namespaceSlackRevoke(w http.ResponseWriter, r *http.Request, slackCfg config.SlackOAuthConfig) {
+	form, err := parseFormOrJSON(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if form.Get("token") == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+	revokeURL := slackCfg.RevokeURL
+	if revokeURL == "" {
+		revokeURL = slackRevokeURL
+	}
+	upstream := url.Values{}
+	upstream.Set("token", form.Get("token"))
+	s.forwardForm(w, r, revokeURL, upstream)
 }
 
 func (s *Server) forwardForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values) {
@@ -1635,6 +2101,63 @@ func (s *Server) todoistOptions(cfg *config.Config) []todoistOption {
 	return options
 }
 
+func (s *Server) slackOptions(cfg *config.Config) []slackOption {
+	var options []slackOption
+	appendOption := func(userID, credentialID, scope, userScope, tokenType, source string) {
+		options = append(options, slackOption{
+			User:         userID,
+			CredentialID: credentialID,
+			Scope:        scope,
+			UserScope:    userScope,
+			TokenType:    tokenType,
+			Source:       source,
+		})
+	}
+	configID := cfg.SlackOAuthCredentialID()
+	hasConfigClient := cfg.Server.OAuth.Slack.HasClientConfig()
+	hasExplicitConfigCredential := false
+	for _, cred := range cfg.Credentials {
+		if cred.Type == "slack-oauth-access-token" && cred.ID == configID {
+			hasExplicitConfigCredential = true
+			break
+		}
+	}
+	if hasConfigClient && !hasExplicitConfigCredential {
+		cred := config.CredentialConfig{ID: configID, Type: "slack-oauth-access-token", Params: map[string]string{}}
+		if cfg.Server.Secrets.Mode == "kubernetes" {
+			for userID := range cfg.Server.Users {
+				appendOption(userID, configID, slackScope(cfg, cred), slackUserScope(cfg, cred), slackTokenType(cfg, cred), "server.oauth.slack")
+			}
+		} else {
+			appendOption("", configID, slackScope(cfg, cred), slackUserScope(cfg, cred), slackTokenType(cfg, cred), "server.oauth.slack")
+		}
+	}
+	for _, cred := range cfg.Credentials {
+		if cred.Type == "slack-oauth-access-token" {
+			userID := config.CredentialUserID(cfg, cred)
+			if cfg.Server.Secrets.Mode == "kubernetes" && userID == cred.ID {
+				for configuredUserID := range cfg.Server.Users {
+					appendOption(configuredUserID, cred.ID, slackScope(cfg, cred), slackUserScope(cfg, cred), slackTokenType(cfg, cred), "credentials")
+				}
+				continue
+			}
+			appendOption(userID, cred.ID, slackScope(cfg, cred), slackUserScope(cfg, cred), slackTokenType(cfg, cred), "credentials")
+		}
+	}
+	for namespace, ns := range cfg.Server.OAuth.Namespaces {
+		if ns.Slack.HasClientConfig() {
+			credentialID := config.NamespaceSlackCredentialID(namespace)
+			cred := config.CredentialConfig{ID: credentialID, Type: "slack-oauth-access-token", Params: map[string]string{}}
+			if cfg.Server.Secrets.Mode == "kubernetes" && cfg.HasUser(namespace) {
+				appendOption(namespace, credentialID, ns.Slack.Scope, ns.Slack.UserScope, slackTokenType(cfg, cred), "server.oauth.namespaces."+namespace+".slack")
+			} else if cfg.Server.Secrets.Mode != "kubernetes" {
+				appendOption("", credentialID, ns.Slack.Scope, ns.Slack.UserScope, slackTokenType(cfg, cred), "server.oauth.namespaces."+namespace+".slack")
+			}
+		}
+	}
+	return options
+}
+
 func (s *Server) storageUserID(cfg *config.Config, info stateInfo) string {
 	if cfg.Server.Secrets.Mode == "kubernetes" {
 		return info.User
@@ -1672,6 +2195,14 @@ func (s *Server) notionCredential(cfg *config.Config, credentialID string) (conf
 func (s *Server) todoistCredential(cfg *config.Config, credentialID string) (config.CredentialConfig, bool) {
 	cred, ok := config.CredentialByID(cfg, credentialID)
 	if !ok || cred.Type != "todoist-oauth-refresh-token" {
+		return config.CredentialConfig{}, false
+	}
+	return cred, true
+}
+
+func (s *Server) slackCredential(cfg *config.Config, credentialID string) (config.CredentialConfig, bool) {
+	cred, ok := config.CredentialByID(cfg, credentialID)
+	if !ok || cred.Type != "slack-oauth-access-token" {
 		return config.CredentialConfig{}, false
 	}
 	return cred, true
@@ -1788,6 +2319,28 @@ func (s *Server) todoistClientPair(ctx context.Context, todoistCfg config.Todois
 	return clientID, clientSecret, nil
 }
 
+func (s *Server) slackClientID(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	if value := config.HeaderValueFromEnv(cred.Params["client_id"]); value != "" {
+		return value, nil
+	}
+	slackCfg, ok := config.SlackOAuthConfigForCredential(cfg, cred.ID)
+	if !ok {
+		return "", nil
+	}
+	return s.slackClientValue(ctx, slackCfg.ClientID, slackCfg.ClientIDSecretRef)
+}
+
+func (s *Server) slackClientSecret(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	if value := config.HeaderValueFromEnv(cred.Params["client_secret"]); value != "" {
+		return value, nil
+	}
+	slackCfg, ok := config.SlackOAuthConfigForCredential(cfg, cred.ID)
+	if !ok {
+		return "", nil
+	}
+	return s.slackClientValue(ctx, slackCfg.ClientSecret, slackCfg.ClientSecretRef)
+}
+
 func (s *Server) todoistClientValue(ctx context.Context, literal, secretRef string) (string, error) {
 	if value := config.HeaderValueFromEnv(literal); value != "" {
 		return value, nil
@@ -1818,6 +2371,16 @@ func (s *Server) googleClientValue(ctx context.Context, literal, secretRef strin
 	return secrets.ResolveRef(ctx, s.secrets, secretRef)
 }
 
+func (s *Server) slackClientValue(ctx context.Context, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, s.secrets, secretRef)
+}
+
 func googleScope(cfg *config.Config, cred config.CredentialConfig) string {
 	if cred.Params["scope"] != "" {
 		return cred.Params["scope"]
@@ -1838,6 +2401,48 @@ func todoistScope(cfg *config.Config, cred config.CredentialConfig) string {
 		return todoistCfg.Scope
 	}
 	return ""
+}
+
+func slackScope(cfg *config.Config, cred config.CredentialConfig) string {
+	if cred.Params["scope"] != "" {
+		return cred.Params["scope"]
+	}
+	slackCfg, ok := config.SlackOAuthConfigForCredential(cfg, cred.ID)
+	if ok {
+		return slackCfg.Scope
+	}
+	return ""
+}
+
+func slackUserScope(cfg *config.Config, cred config.CredentialConfig) string {
+	if cred.Params["user_scope"] != "" {
+		return cred.Params["user_scope"]
+	}
+	if cred.Params["userScope"] != "" {
+		return cred.Params["userScope"]
+	}
+	slackCfg, ok := config.SlackOAuthConfigForCredential(cfg, cred.ID)
+	if ok {
+		return slackCfg.UserScope
+	}
+	return ""
+}
+
+func slackTokenType(cfg *config.Config, cred config.CredentialConfig) string {
+	if tokenType := cred.Params["token_type"]; tokenType != "" {
+		return tokenType
+	}
+	if tokenType := cred.Params["tokenType"]; tokenType != "" {
+		return tokenType
+	}
+	slackCfg, ok := config.SlackOAuthConfigForCredential(cfg, cred.ID)
+	if ok && slackCfg.TokenType != "" {
+		return slackCfg.TokenType
+	}
+	if slackScope(cfg, cred) == "" && slackUserScope(cfg, cred) != "" {
+		return "user"
+	}
+	return "bot"
 }
 
 func todoistRedirectURLForCredential(cfg *config.Config, cred config.CredentialConfig) string {
@@ -1928,7 +2533,7 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
 </head>
 <body>
   <h1>scia OAuth</h1>
-  {{if or .GoogleOptions .NotionOptions .TodoistOptions}}
+  {{if or .GoogleOptions .NotionOptions .TodoistOptions .SlackOptions}}
     {{range .GoogleOptions}}
       <div class="item">
         <div><strong>{{.CredentialID}}</strong>{{if .User}} for user <code>{{.User}}</code>{{end}}</div>
@@ -1950,6 +2555,14 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
         <p class="muted"><code>{{.Scope}}</code></p>
         <p class="muted">{{.Source}}</p>
         <a class="button" href="/oauth/todoist/start?credential={{.CredentialID}}{{if .User}}&amp;user={{.User}}{{end}}">Authorize with Todoist</a>
+      </div>
+    {{end}}
+    {{range .SlackOptions}}
+      <div class="item">
+        <div><strong>{{.CredentialID}}</strong>{{if .User}} for user <code>{{.User}}</code>{{end}}</div>
+        <p class="muted">token: <code>{{.TokenType}}</code>{{if .Scope}} scope: <code>{{.Scope}}</code>{{end}}{{if .UserScope}} user_scope: <code>{{.UserScope}}</code>{{end}}</p>
+        <p class="muted">{{.Source}}</p>
+        <a class="button" href="/oauth/slack/start?credential={{.CredentialID}}{{if .User}}&amp;user={{.User}}{{end}}">Authorize with Slack</a>
       </div>
     {{end}}
   {{else}}

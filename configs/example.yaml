@@ -29,6 +29,13 @@ server:
       clientSecret: "env:TODOIST_OAUTH_CLIENT_SECRET"
       scope: "data:read_write"
       redirectUrl: "http://localhost:8081/oauth/todoist/callback"
+    slack:
+      credentialId: slack-user
+      clientId: "env:SLACK_OAUTH_CLIENT_ID"
+      clientSecret: "env:SLACK_OAUTH_CLIENT_SECRET"
+      userScope: "chat:write users:read"
+      tokenType: "user"
+      redirectUrl: "http://localhost:8081/oauth/slack/callback"
     namespaces:
       service-a:
         google:
@@ -44,6 +51,12 @@ server:
           clientIdSecretRef: "secret:service-a.todoist.client-id"
           clientSecretRef: "secret:service-a.todoist.client-secret"
           scope: "data:read_write"
+        slack:
+          clientIdSecretRef: "secret:service-a.slack.client-id"
+          clientSecretRef: "secret:service-a.slack.client-secret"
+          userScope: "chat:write"
+          tokenType: "user"
+          redirectUrl: "http://localhost:8081/oauth/slack/callback"
       service-b:
         google:
           clientIdSecretRef: "env:SERVICE_B_GOOGLE_CLIENT_ID"
@@ -76,6 +89,10 @@ credentials:
   - id: todoist
     type: todoist-oauth-refresh-token
     params: {}
+  - id: slack-user
+    type: slack-oauth-access-token
+    params:
+      token_type: user
   - id: service-a.google
     type: google-oauth-refresh-token
     params:
@@ -91,6 +108,9 @@ credentials:
     params:
       token_broker_url: "http://scia-oauth:8081/oauth/service-a/todoist/token"
       token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
+  - id: service-a.slack
+    type: slack-oauth-access-token
+    params: {}
 
 rules:
   - name: deny-dangerous-admin-api
@@ -135,3 +155,9 @@ rules:
     paths: ["/api/v1/*"]
     action: allow
     credentials: ["todoist"]
+  - name: inject-slack-user-token
+    hosts: ["slack.com"]
+    methods: ["GET", "POST"]
+    paths: ["/api/*"]
+    action: allow
+    credentials: ["slack-user"]
