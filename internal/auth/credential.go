@@ -78,6 +78,12 @@ func (i *Injector) applyOne(ctx context.Context, r *http.Request, cfg *config.Co
 		if r.Header.Get("Notion-Version") == "" {
 			r.Header.Set("Notion-Version", notionVersion)
 		}
+	case "todoist-oauth-refresh-token":
+		token, err := i.todoistRefreshToken(ctx, cfg, cred)
+		if err != nil {
+			return err
+		}
+		r.Header.Set("Authorization", "Bearer "+token)
 	default:
 		return fmt.Errorf("unsupported credential type %q", cred.Type)
 	}
@@ -282,7 +288,104 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 	return i.formToken(ctx, cred.ID, tokenURL, form, "")
 }
 
+func (i *Injector) todoistRefreshToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	if value, ok := i.cache.Load(cred.ID); ok {
+		token := value.(cachedToken)
+		if time.Until(token.expiresAt) > 30*time.Second {
+			return token.accessToken, nil
+		}
+	}
+
+	if accessToken, err := i.secretValue(ctx, cfg, cred, "access_token"); err != nil {
+		return "", err
+	} else if accessToken != "" {
+		expiresIn := time.Duration(315360000) * time.Second
+		i.cache.Store(cred.ID, cachedToken{accessToken: accessToken, expiresAt: time.Now().Add(expiresIn)})
+		return accessToken, nil
+	}
+
+	tokenURL := cred.Params["token_url"]
+	tokenBrokerURL := config.HeaderValueFromEnv(cred.Params["token_broker_url"])
+	todoistCfg, hasTodoistCfg := config.TodoistOAuthConfigForCredential(cfg, cred.ID)
+	if tokenURL == "" && hasTodoistCfg {
+		tokenURL = todoistCfg.TokenURL
+	}
+	if tokenURL == "" {
+		tokenURL = "https://api.todoist.com/oauth/access_token"
+	}
+	clientID := config.HeaderValueFromEnv(cred.Params["client_id"])
+	if clientID == "" && hasTodoistCfg {
+		var err error
+		clientID, err = i.todoistClientValue(ctx, todoistCfg.ClientID, todoistCfg.ClientIDSecretRef)
+		if err != nil {
+			return "", err
+		}
+	}
+	clientSecret := config.HeaderValueFromEnv(cred.Params["client_secret"])
+	if clientSecret == "" && hasTodoistCfg {
+		var err error
+		clientSecret, err = i.todoistClientValue(ctx, todoistCfg.ClientSecret, todoistCfg.ClientSecretRef)
+		if err != nil {
+			return "", err
+		}
+	}
+	refreshToken, err := i.secretValue(ctx, cfg, cred, "refresh_token")
+	if err != nil {
+		return "", err
+	}
+	if tokenBrokerURL != "" {
+		if refreshToken == "" {
+			return "", fmt.Errorf("credential %q requires refresh_token or access_token", cred.ID)
+		}
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", refreshToken)
+		if scope := cred.Params["scope"]; scope != "" {
+			form.Set("scope", scope)
+		}
+		token, rotatedRefreshToken, err := i.formTokenWithRefresh(ctx, cred.ID, tokenBrokerURL, form, config.HeaderValueFromEnv(cred.Params["token_broker_token"]))
+		if err != nil {
+			return "", err
+		}
+		if rotatedRefreshToken != "" {
+			if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+				return "", err
+			}
+		}
+		return token, nil
+	}
+	if clientID == "" || clientSecret == "" || refreshToken == "" {
+		return "", fmt.Errorf("credential %q requires client_id, client_secret, and refresh_token, or access_token", cred.ID)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("refresh_token", refreshToken)
+	token, rotatedRefreshToken, err := i.formTokenWithRefresh(ctx, cred.ID, tokenURL, form, "")
+	if err != nil {
+		return "", err
+	}
+	if rotatedRefreshToken != "" {
+		if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+			return "", err
+		}
+	}
+	return token, nil
+}
+
 func (i *Injector) googleClientValue(ctx context.Context, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, i.secrets, secretRef)
+}
+
+func (i *Injector) todoistClientValue(ctx context.Context, literal, secretRef string) (string, error) {
 	if value := config.HeaderValueFromEnv(literal); value != "" {
 		return value, nil
 	}
@@ -348,6 +451,47 @@ func (i *Injector) formToken(ctx context.Context, credentialID, tokenURL string,
 		return "", fmt.Errorf("token endpoint returned %s", resp.Status)
 	}
 	return i.decodeAndCacheToken(credentialID, resp)
+}
+
+func (i *Injector) formTokenWithRefresh(ctx context.Context, credentialID, tokenURL string, form url.Values, bearerToken string) (string, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewBufferString(form.Encode()))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", "", fmt.Errorf("token endpoint returned %s", resp.Status)
+	}
+	var token struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		return "", "", err
+	}
+	if token.AccessToken == "" {
+		return "", "", errors.New("token endpoint response did not include access_token")
+	}
+	if token.TokenType != "" && !strings.EqualFold(token.TokenType, "bearer") {
+		return "", "", fmt.Errorf("unsupported token_type %q", token.TokenType)
+	}
+	expiresIn := time.Duration(token.ExpiresIn) * time.Second
+	if expiresIn <= 0 {
+		expiresIn = time.Hour
+	}
+	i.cache.Store(credentialID, cachedToken{accessToken: token.AccessToken, expiresAt: time.Now().Add(expiresIn)})
+	return token.AccessToken, token.RefreshToken, nil
 }
 
 func (i *Injector) notionJSONToken(ctx context.Context, credentialID, tokenURL, notionVersion string, body map[string]string, clientID, clientSecret, bearerToken string) (string, string, error) {

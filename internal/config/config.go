@@ -110,6 +110,7 @@ type OAuthConfig struct {
 	BrokerToken string                          `yaml:"brokerToken"`
 	Google      GoogleOAuthConfig               `yaml:"google"`
 	Notion      NotionOAuthConfig               `yaml:"notion"`
+	Todoist     TodoistOAuthConfig              `yaml:"todoist"`
 	Namespaces  map[string]OAuthNamespaceConfig `yaml:"namespaces"`
 }
 
@@ -139,9 +140,23 @@ type NotionOAuthConfig struct {
 	NotionVersion     string `yaml:"notionVersion"`
 }
 
+type TodoistOAuthConfig struct {
+	CredentialID      string `yaml:"credentialId"`
+	ClientID          string `yaml:"clientId"`
+	ClientIDSecretRef string `yaml:"clientIdSecretRef"`
+	ClientSecret      string `yaml:"clientSecret"`
+	ClientSecretRef   string `yaml:"clientSecretRef"`
+	Scope             string `yaml:"scope"`
+	AuthURL           string `yaml:"authUrl"`
+	TokenURL          string `yaml:"tokenUrl"`
+	RevokeURL         string `yaml:"revokeUrl"`
+	RedirectURL       string `yaml:"redirectUrl"`
+}
+
 type OAuthNamespaceConfig struct {
-	Google GoogleOAuthConfig `yaml:"google"`
-	Notion NotionOAuthConfig `yaml:"notion"`
+	Google  GoogleOAuthConfig  `yaml:"google"`
+	Notion  NotionOAuthConfig  `yaml:"notion"`
+	Todoist TodoistOAuthConfig `yaml:"todoist"`
 }
 
 type SecretsConfig struct {
@@ -256,7 +271,7 @@ func (c *Config) Validate() error {
 		}
 		seenCreds[cred.ID] = struct{}{}
 		switch cred.Type {
-		case "bearer", "basic", "static-header", "oauth2-client-credentials", "google-oauth-refresh-token", "notion-oauth-refresh-token":
+		case "bearer", "basic", "static-header", "oauth2-client-credentials", "google-oauth-refresh-token", "notion-oauth-refresh-token", "todoist-oauth-refresh-token":
 		default:
 			return fmt.Errorf("credential %q has unsupported type %q", cred.ID, cred.Type)
 		}
@@ -270,6 +285,9 @@ func (c *Config) Validate() error {
 	if c.Server.OAuth.Notion.HasClientConfig() {
 		seenCreds[c.NotionOAuthCredentialID()] = struct{}{}
 	}
+	if c.Server.OAuth.Todoist.HasClientConfig() {
+		seenCreds[c.TodoistOAuthCredentialID()] = struct{}{}
+	}
 	for namespace, ns := range c.Server.OAuth.Namespaces {
 		if namespace == "" {
 			return fmt.Errorf("server.oauth.namespaces cannot include an empty namespace")
@@ -282,6 +300,9 @@ func (c *Config) Validate() error {
 		}
 		if ns.Notion.HasClientConfig() {
 			seenCreds[NamespaceNotionCredentialID(namespace)] = struct{}{}
+		}
+		if ns.Todoist.HasClientConfig() {
+			seenCreds[NamespaceTodoistCredentialID(namespace)] = struct{}{}
 		}
 	}
 	for i, rule := range c.Rules {
@@ -314,6 +335,9 @@ func CredentialByID(cfg *Config, id string) (CredentialConfig, bool) {
 	if cfg.Server.OAuth.Notion.HasClientConfig() && id == cfg.NotionOAuthCredentialID() {
 		return CredentialConfig{ID: id, Type: "notion-oauth-refresh-token", Params: map[string]string{}}, true
 	}
+	if cfg.Server.OAuth.Todoist.HasClientConfig() && id == cfg.TodoistOAuthCredentialID() {
+		return CredentialConfig{ID: id, Type: "todoist-oauth-refresh-token", Params: map[string]string{}}, true
+	}
 	if namespace, ok := GoogleCredentialNamespace(id); ok {
 		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Google.HasClientConfig() {
 			return CredentialConfig{ID: id, Type: "google-oauth-refresh-token", Params: map[string]string{}}, true
@@ -322,6 +346,11 @@ func CredentialByID(cfg *Config, id string) (CredentialConfig, bool) {
 	if namespace, ok := NotionCredentialNamespace(id); ok {
 		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Notion.HasClientConfig() {
 			return CredentialConfig{ID: id, Type: "notion-oauth-refresh-token", Params: map[string]string{}}, true
+		}
+	}
+	if namespace, ok := TodoistCredentialNamespace(id); ok {
+		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Todoist.HasClientConfig() {
+			return CredentialConfig{ID: id, Type: "todoist-oauth-refresh-token", Params: map[string]string{}}, true
 		}
 	}
 	return CredentialConfig{}, false
@@ -341,12 +370,23 @@ func (c *Config) NotionOAuthCredentialID() string {
 	return "notion"
 }
 
+func (c *Config) TodoistOAuthCredentialID() string {
+	if c.Server.OAuth.Todoist.CredentialID != "" {
+		return c.Server.OAuth.Todoist.CredentialID
+	}
+	return "todoist"
+}
+
 func (g GoogleOAuthConfig) HasClientConfig() bool {
 	return (g.ClientID != "" || g.ClientIDSecretRef != "") && (g.ClientSecret != "" || g.ClientSecretRef != "")
 }
 
 func (n NotionOAuthConfig) HasClientConfig() bool {
 	return (n.ClientID != "" || n.ClientIDSecretRef != "") && (n.ClientSecret != "" || n.ClientSecretRef != "")
+}
+
+func (t TodoistOAuthConfig) HasClientConfig() bool {
+	return (t.ClientID != "" || t.ClientIDSecretRef != "") && (t.ClientSecret != "" || t.ClientSecretRef != "")
 }
 
 func GoogleCredentialNamespace(id string) (string, bool) {
@@ -365,12 +405,24 @@ func NotionCredentialNamespace(id string) (string, bool) {
 	return namespace, true
 }
 
+func TodoistCredentialNamespace(id string) (string, bool) {
+	namespace, provider, ok := strings.Cut(id, ".")
+	if !ok || namespace == "" || provider != "todoist" {
+		return "", false
+	}
+	return namespace, true
+}
+
 func NamespaceGoogleCredentialID(namespace string) string {
 	return namespace + ".google"
 }
 
 func NamespaceNotionCredentialID(namespace string) string {
 	return namespace + ".notion"
+}
+
+func NamespaceTodoistCredentialID(namespace string) string {
+	return namespace + ".todoist"
 }
 
 func GoogleOAuthConfigForCredential(cfg *Config, credentialID string) (GoogleOAuthConfig, bool) {
@@ -403,6 +455,22 @@ func NotionOAuthConfigForCredential(cfg *Config, credentialID string) (NotionOAu
 		}
 	}
 	return NotionOAuthConfig{}, false
+}
+
+func TodoistOAuthConfigForCredential(cfg *Config, credentialID string) (TodoistOAuthConfig, bool) {
+	if credentialID == "" || credentialID == cfg.TodoistOAuthCredentialID() {
+		if cfg.Server.OAuth.Todoist.HasClientConfig() {
+			return cfg.Server.OAuth.Todoist, true
+		}
+		return TodoistOAuthConfig{}, false
+	}
+	if namespace, ok := TodoistCredentialNamespace(credentialID); ok {
+		ns, exists := cfg.Server.OAuth.Namespaces[namespace]
+		if exists && ns.Todoist.HasClientConfig() {
+			return ns.Todoist, true
+		}
+	}
+	return TodoistOAuthConfig{}, false
 }
 
 func SecretRefParts(ref string) (string, string, error) {
