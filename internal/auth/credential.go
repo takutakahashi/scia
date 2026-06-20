@@ -78,10 +78,27 @@ func (i *Injector) applyOne(ctx context.Context, r *http.Request, cfg *config.Co
 		if r.Header.Get("Notion-Version") == "" {
 			r.Header.Set("Notion-Version", notionVersion)
 		}
+	case "slack-oauth-access-token":
+		token, err := i.slackAccessToken(ctx, cfg, cred)
+		if err != nil {
+			return err
+		}
+		r.Header.Set("Authorization", "Bearer "+token)
 	default:
 		return fmt.Errorf("unsupported credential type %q", cred.Type)
 	}
 	return nil
+}
+
+func (i *Injector) slackAccessToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	token, err := i.secretValue(ctx, cfg, cred, "access_token")
+	if err != nil {
+		return "", err
+	}
+	if token == "" {
+		return "", fmt.Errorf("credential %q requires access_token", cred.ID)
+	}
+	return token, nil
 }
 
 func (i *Injector) notionRefreshToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, string, error) {
