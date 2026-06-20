@@ -29,6 +29,9 @@ const notionAuthURL = "https://api.notion.com/v1/oauth/authorize"
 const notionTokenURL = "https://api.notion.com/v1/oauth/token"
 const notionRevokeURL = "https://api.notion.com/v1/oauth/revoke"
 const notionVersion = "2026-03-11"
+const todoistAuthURL = "https://app.todoist.com/oauth/authorize"
+const todoistTokenURL = "https://api.todoist.com/oauth/access_token"
+const todoistRevokeURL = "https://api.todoist.com/api/v1/revoke"
 
 type Server struct {
 	store   *config.Store
@@ -57,6 +60,13 @@ type notionOption struct {
 	Source       string
 }
 
+type todoistOption struct {
+	User         string
+	CredentialID string
+	Scope        string
+	Source       string
+}
+
 func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logger) *Server {
 	if secretStore == nil {
 		secretStore = secrets.NoopStore{}
@@ -77,6 +87,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
 	mux.HandleFunc("/oauth/notion/start", s.startNotion)
 	mux.HandleFunc("/oauth/notion/callback", s.notionCallback)
+	mux.HandleFunc("/oauth/todoist/start", s.startTodoist)
+	mux.HandleFunc("/oauth/todoist/callback", s.todoistCallback)
 	mux.HandleFunc("/oauth/", s.namespaceOAuth)
 	return mux
 }
@@ -95,9 +107,10 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	}
 	options := s.googleOptions(s.store.Get())
 	data := struct {
-		GoogleOptions []googleOption
-		NotionOptions []notionOption
-	}{GoogleOptions: options, NotionOptions: s.notionOptions(s.store.Get())}
+		GoogleOptions  []googleOption
+		NotionOptions  []notionOption
+		TodoistOptions []todoistOption
+	}{GoogleOptions: options, NotionOptions: s.notionOptions(s.store.Get()), TodoistOptions: s.todoistOptions(s.store.Get())}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = indexTemplate.Execute(w, data)
 }
@@ -201,6 +214,8 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		Provider     string
 		User         string
 		CredentialID string
+		TokenKind    string
+		TokenValue   string
 		RefreshToken string
 		AccessToken  string
 		ExpiresIn    int64
@@ -209,6 +224,8 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		Provider:     "Google",
 		User:         info.User,
 		CredentialID: info.CredentialID,
+		TokenKind:    "refresh_token",
+		TokenValue:   token.RefreshToken,
 		RefreshToken: token.RefreshToken,
 		AccessToken:  token.AccessToken,
 		ExpiresIn:    token.ExpiresIn,
@@ -307,6 +324,8 @@ func (s *Server) notionCallback(w http.ResponseWriter, r *http.Request) {
 		Provider     string
 		User         string
 		CredentialID string
+		TokenKind    string
+		TokenValue   string
 		RefreshToken string
 		AccessToken  string
 		ExpiresIn    int64
@@ -315,6 +334,139 @@ func (s *Server) notionCallback(w http.ResponseWriter, r *http.Request) {
 		Provider:     "Notion",
 		User:         info.User,
 		CredentialID: info.CredentialID,
+		TokenKind:    "refresh_token",
+		TokenValue:   token.RefreshToken,
+		RefreshToken: token.RefreshToken,
+		AccessToken:  token.AccessToken,
+		ExpiresIn:    token.ExpiresIn,
+		Stored:       true,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = callbackTemplate.Execute(w, data)
+}
+
+func (s *Server) startTodoist(w http.ResponseWriter, r *http.Request) {
+	credentialID := r.URL.Query().Get("credential")
+	userID := r.URL.Query().Get("user")
+	cfg := s.store.Get()
+	if cfg.Server.Secrets.Mode == "kubernetes" {
+		if userID == "" {
+			http.Error(w, "user is required in kubernetes mode", http.StatusBadRequest)
+			return
+		}
+		if !cfg.HasUser(userID) {
+			http.Error(w, "unknown user", http.StatusBadRequest)
+			return
+		}
+	}
+	cred, ok := s.todoistCredential(cfg, credentialID)
+	if !ok {
+		http.Error(w, "unknown todoist credential", http.StatusBadRequest)
+		return
+	}
+	clientID, err := s.todoistClientID(r.Context(), cfg, cred)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if clientID == "" {
+		http.Error(w, "credential is missing client_id", http.StatusBadRequest)
+		return
+	}
+	scope := todoistScope(cfg, cred)
+	if scope == "" {
+		scope = "data:read"
+	}
+	state, err := randomState()
+	if err != nil {
+		http.Error(w, "failed to create state", http.StatusInternalServerError)
+		return
+	}
+	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, CreatedAt: time.Now()})
+	authURL := todoistAuthURL
+	redirectURI := ""
+	if todoistCfg, ok := config.TodoistOAuthConfigForCredential(cfg, cred.ID); ok && todoistCfg.AuthURL != "" {
+		authURL = todoistCfg.AuthURL
+		redirectURI = todoistCfg.RedirectURL
+	} else if todoistCfg, ok := config.TodoistOAuthConfigForCredential(cfg, cred.ID); ok {
+		redirectURI = todoistCfg.RedirectURL
+	}
+	q := url.Values{}
+	q.Set("client_id", clientID)
+	if redirectURI != "" {
+		q.Set("redirect_uri", redirectURI)
+	}
+	q.Set("response_type", "code")
+	q.Set("scope", scope)
+	q.Set("state", state)
+	http.Redirect(w, r, authURL+"?"+q.Encode(), http.StatusFound)
+}
+
+func (s *Server) todoistCallback(w http.ResponseWriter, r *http.Request) {
+	if errText := r.URL.Query().Get("error"); errText != "" {
+		http.Error(w, errText, http.StatusBadRequest)
+		return
+	}
+	state := r.URL.Query().Get("state")
+	rawInfo, ok := s.states.LoadAndDelete(state)
+	if !ok {
+		http.Error(w, "invalid state", http.StatusBadRequest)
+		return
+	}
+	info := rawInfo.(stateInfo)
+	if time.Since(info.CreatedAt) > 10*time.Minute {
+		http.Error(w, "state expired", http.StatusBadRequest)
+		return
+	}
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "missing code", http.StatusBadRequest)
+		return
+	}
+	cfg := s.store.Get()
+	cred, ok := s.todoistCredential(cfg, info.CredentialID)
+	if !ok {
+		http.Error(w, "credential disappeared", http.StatusBadRequest)
+		return
+	}
+	token, err := s.exchangeTodoistCode(r.Context(), cred, code)
+	if err != nil {
+		s.logger.Error("todoist oauth code exchange failed", "error", err)
+		http.Error(w, "token exchange failed", http.StatusBadGateway)
+		return
+	}
+	storageID := s.storageUserID(cfg, info)
+	storedTokenKind := "refresh_token"
+	storedTokenValue := token.RefreshToken
+	if storedTokenValue == "" {
+		storedTokenKind = "access_token"
+		storedTokenValue = token.AccessToken
+	}
+	if storedTokenValue == "" {
+		http.Error(w, "token response did not include refresh_token or access_token", http.StatusBadGateway)
+		return
+	}
+	if err := s.secrets.Put(r.Context(), storageID, storedTokenKind, storedTokenValue); err != nil {
+		s.logger.Error("failed to store todoist token", "error", err, "credential", info.CredentialID, "user", info.User, "token_kind", storedTokenKind)
+		http.Error(w, "failed to store token", http.StatusInternalServerError)
+		return
+	}
+	data := struct {
+		Provider     string
+		User         string
+		CredentialID string
+		TokenKind    string
+		TokenValue   string
+		RefreshToken string
+		AccessToken  string
+		ExpiresIn    int64
+		Stored       bool
+	}{
+		Provider:     "Todoist",
+		User:         info.User,
+		CredentialID: info.CredentialID,
+		TokenKind:    storedTokenKind,
+		TokenValue:   storedTokenValue,
 		RefreshToken: token.RefreshToken,
 		AccessToken:  token.AccessToken,
 		ExpiresIn:    token.ExpiresIn,
@@ -438,6 +590,57 @@ func (s *Server) exchangeNotionCode(ctx context.Context, r *http.Request, cred c
 	return token, nil
 }
 
+func (s *Server) exchangeTodoistCode(ctx context.Context, cred config.CredentialConfig, code string) (tokenResponse, error) {
+	cfg := s.store.Get()
+	tokenURL := cred.Params["token_url"]
+	todoistCfg, hasTodoistCfg := config.TodoistOAuthConfigForCredential(cfg, cred.ID)
+	if tokenURL == "" && hasTodoistCfg {
+		tokenURL = todoistCfg.TokenURL
+	}
+	if tokenURL == "" {
+		tokenURL = todoistTokenURL
+	}
+	clientID, err := s.todoistClientID(ctx, cfg, cred)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	clientSecret, err := s.todoistClientSecret(ctx, cfg, cred)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	form := url.Values{}
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("code", code)
+	if redirectURI := todoistRedirectURLForCredential(cfg, cred); redirectURI != "" {
+		form.Set("redirect_uri", redirectURI)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	defer resp.Body.Close()
+	var token tokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		return tokenResponse{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		if token.Error != "" {
+			return tokenResponse{}, fmt.Errorf("%s: %s", token.Error, token.ErrorDesc)
+		}
+		return tokenResponse{}, fmt.Errorf("token endpoint returned %s", resp.Status)
+	}
+	if token.AccessToken == "" {
+		return tokenResponse{}, fmt.Errorf("todoist did not return an access_token")
+	}
+	return token, nil
+}
+
 func (s *Server) redirectURL(r *http.Request) string {
 	return s.providerRedirectURL(r, "google")
 }
@@ -451,6 +654,10 @@ func (s *Server) providerRedirectURL(r *http.Request, provider string) string {
 		}
 	case "notion":
 		if redirect := cfg.Server.OAuth.Notion.RedirectURL; redirect != "" {
+			return redirect
+		}
+	case "todoist":
+		if redirect := cfg.Server.OAuth.Todoist.RedirectURL; redirect != "" {
 			return redirect
 		}
 	}
@@ -495,6 +702,14 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.namespaceNotionOAuth(w, r, namespace, credentialID, action, notionCfg)
+	case "todoist":
+		credentialID := config.NamespaceTodoistCredentialID(namespace)
+		todoistCfg, ok := config.TodoistOAuthConfigForCredential(cfg, credentialID)
+		if !ok {
+			http.Error(w, "unknown todoist namespace", http.StatusNotFound)
+			return
+		}
+		s.namespaceTodoistOAuth(w, r, namespace, credentialID, action, todoistCfg)
 	default:
 		http.NotFound(w, r)
 	}
@@ -569,6 +784,43 @@ func (s *Server) namespaceNotionOAuth(w http.ResponseWriter, r *http.Request, na
 			return
 		}
 		s.namespaceNotionRevoke(w, r, notionCfg)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) namespaceTodoistOAuth(w http.ResponseWriter, r *http.Request, namespace, credentialID, action string, todoistCfg config.TodoistOAuthConfig) {
+	switch action {
+	case "authorization-url":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceTodoistAuthorizationURL(w, r, namespace, credentialID, todoistCfg, false)
+	case "start":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceTodoistAuthorizationURL(w, r, namespace, credentialID, todoistCfg, true)
+	case "token":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceTodoistToken(w, r, todoistCfg)
+	case "access-token":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceTodoistAccessToken(w, r, namespace, credentialID, todoistCfg)
+	case "revoke":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceTodoistRevoke(w, r, todoistCfg)
 	default:
 		http.NotFound(w, r)
 	}
@@ -726,6 +978,69 @@ func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.
 	})
 }
 
+func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, todoistCfg config.TodoistOAuthConfig, redirect bool) {
+	clientID, err := s.todoistClientValue(r.Context(), todoistCfg.ClientID, todoistCfg.ClientIDSecretRef)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if clientID == "" {
+		http.Error(w, "todoist namespace is missing client id", http.StatusBadRequest)
+		return
+	}
+	authURL := todoistCfg.AuthURL
+	if authURL == "" {
+		authURL = todoistAuthURL
+	}
+	scope := r.URL.Query().Get("scope")
+	if scope == "" {
+		scope = todoistCfg.Scope
+	}
+	if scope == "" {
+		scope = "data:read"
+	}
+	state := r.URL.Query().Get("state")
+	if state == "" && redirect {
+		generated, err := randomState()
+		if err != nil {
+			http.Error(w, "failed to create state", http.StatusInternalServerError)
+			return
+		}
+		state = generated
+	}
+	q := url.Values{}
+	q.Set("client_id", clientID)
+	redirectURI := r.URL.Query().Get("redirect_uri")
+	if redirectURI == "" {
+		redirectURI = todoistCfg.RedirectURL
+	}
+	if redirectURI != "" {
+		q.Set("redirect_uri", redirectURI)
+	}
+	q.Set("response_type", "code")
+	q.Set("scope", scope)
+	if state != "" {
+		q.Set("state", state)
+	}
+	location := authURL + "?" + q.Encode()
+	if redirect {
+		s.states.Store(state, stateInfo{
+			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+			CredentialID: credentialID,
+			CreatedAt:    time.Now(),
+		})
+		http.Redirect(w, r, location, http.StatusFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"credential_id":     credentialID,
+		"authorization_url": location,
+		"auth_url":          authURL,
+		"redirect_uri":      redirectURI,
+		"scope":             scope,
+	})
+}
+
 func (s *Server) namespaceGoogleToken(w http.ResponseWriter, r *http.Request, googleCfg config.GoogleOAuthConfig) {
 	form, err := parseFormOrJSON(r)
 	if err != nil {
@@ -773,6 +1088,57 @@ func (s *Server) namespaceGoogleToken(w http.ResponseWriter, r *http.Request, go
 	s.forwardForm(w, r, tokenURL, upstream)
 }
 
+func (s *Server) namespaceTodoistToken(w http.ResponseWriter, r *http.Request, todoistCfg config.TodoistOAuthConfig) {
+	form, err := parseFormOrJSON(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	grantType := form.Get("grant_type")
+	if grantType == "" {
+		grantType = "refresh_token"
+	}
+	if grantType != "refresh_token" && grantType != "authorization_code" {
+		http.Error(w, "unsupported grant_type", http.StatusBadRequest)
+		return
+	}
+	clientID, clientSecret, err := s.todoistClientPair(r.Context(), todoistCfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	upstream := url.Values{}
+	upstream.Set("client_id", clientID)
+	upstream.Set("client_secret", clientSecret)
+	if grantType == "refresh_token" {
+		upstream.Set("grant_type", grantType)
+		if form.Get("refresh_token") == "" {
+			http.Error(w, "refresh_token is required", http.StatusBadRequest)
+			return
+		}
+		upstream.Set("refresh_token", form.Get("refresh_token"))
+		if scope := form.Get("scope"); scope != "" {
+			upstream.Set("scope", scope)
+		}
+	} else {
+		if form.Get("code") == "" {
+			http.Error(w, "code is required", http.StatusBadRequest)
+			return
+		}
+		upstream.Set("code", form.Get("code"))
+		if redirectURI := form.Get("redirect_uri"); redirectURI != "" {
+			upstream.Set("redirect_uri", redirectURI)
+		} else if todoistCfg.RedirectURL != "" {
+			upstream.Set("redirect_uri", todoistCfg.RedirectURL)
+		}
+	}
+	tokenURL := todoistCfg.TokenURL
+	if tokenURL == "" {
+		tokenURL = todoistTokenURL
+	}
+	s.forwardForm(w, r, tokenURL, upstream)
+}
+
 func (s *Server) namespaceGoogleAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string, googleCfg config.GoogleOAuthConfig) {
 	cfg := s.store.Get()
 	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
@@ -804,6 +1170,53 @@ func (s *Server) namespaceGoogleAccessToken(w http.ResponseWriter, r *http.Reque
 		tokenURL = googleTokenURL
 	}
 	s.forwardForm(w, r, tokenURL, upstream)
+}
+
+func (s *Server) namespaceTodoistAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string, todoistCfg config.TodoistOAuthConfig) {
+	cfg := s.store.Get()
+	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
+	accessToken, ok, err := s.secrets.Get(r.Context(), storageID, "access_token")
+	if err != nil {
+		s.logger.Error("failed to load todoist access token", "error", err, "credential", credentialID, "storage", storageID)
+		http.Error(w, "failed to load access token", http.StatusInternalServerError)
+		return
+	}
+	if ok && accessToken != "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"access_token": accessToken,
+			"token_type":   "Bearer",
+			"expires_in":   315360000,
+		})
+		return
+	}
+	refreshToken, ok, err := s.secrets.Get(r.Context(), storageID, "refresh_token")
+	if err != nil {
+		s.logger.Error("failed to load todoist refresh token", "error", err, "credential", credentialID, "storage", storageID)
+		http.Error(w, "failed to load refresh token", http.StatusInternalServerError)
+		return
+	}
+	if !ok || refreshToken == "" {
+		http.Error(w, "refresh_token or access_token is not registered", http.StatusNotFound)
+		return
+	}
+	clientID, clientSecret, err := s.todoistClientPair(r.Context(), todoistCfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	upstream := url.Values{}
+	upstream.Set("grant_type", "refresh_token")
+	upstream.Set("client_id", clientID)
+	upstream.Set("client_secret", clientSecret)
+	upstream.Set("refresh_token", refreshToken)
+	if scope := r.URL.Query().Get("scope"); scope != "" {
+		upstream.Set("scope", scope)
+	}
+	tokenURL := todoistCfg.TokenURL
+	if tokenURL == "" {
+		tokenURL = todoistTokenURL
+	}
+	s.forwardTodoistForm(w, r, tokenURL, upstream, storageID)
 }
 
 func (s *Server) namespaceNotionToken(w http.ResponseWriter, r *http.Request, notionCfg config.NotionOAuthConfig) {
@@ -901,6 +1314,32 @@ func (s *Server) namespaceNotionRevoke(w http.ResponseWriter, r *http.Request, n
 	s.forwardNotionJSON(w, r, revokeURL, notionCfg, map[string]string{"token": form.Get("token")}, "")
 }
 
+func (s *Server) namespaceTodoistRevoke(w http.ResponseWriter, r *http.Request, todoistCfg config.TodoistOAuthConfig) {
+	form, err := parseFormOrJSON(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	token := form.Get("token")
+	if token == "" {
+		token = form.Get("access_token")
+	}
+	if token == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+	clientID, clientSecret, err := s.todoistClientPair(r.Context(), todoistCfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	revokeURL := todoistCfg.RevokeURL
+	if revokeURL == "" {
+		revokeURL = todoistRevokeURL
+	}
+	s.forwardTodoistRevoke(w, r, revokeURL, clientID, clientSecret, token)
+}
+
 func (s *Server) forwardForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewBufferString(form.Encode()))
 	if err != nil {
@@ -908,6 +1347,73 @@ func (s *Server) forwardForm(w http.ResponseWriter, r *http.Request, endpoint st
 		return
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for _, value := range resp.Header.Values("Content-Type") {
+		w.Header().Add("Content-Type", value)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func (s *Server) forwardTodoistForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values, storageID string) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewBufferString(form.Encode()))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for _, value := range resp.Header.Values("Content-Type") {
+		w.Header().Add("Content-Type", value)
+	}
+	if storageID == "" || resp.StatusCode < 200 || resp.StatusCode > 299 {
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+	var token tokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		http.Error(w, "failed to decode upstream token response", http.StatusBadGateway)
+		return
+	}
+	if token.RefreshToken != "" {
+		if err := s.secrets.Put(r.Context(), storageID, "refresh_token", token.RefreshToken); err != nil {
+			s.logger.Error("failed to store rotated todoist refresh token", "error", err, "storage", storageID)
+			http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
+			return
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_ = json.NewEncoder(w).Encode(token)
+}
+
+func (s *Server) forwardTodoistRevoke(w http.ResponseWriter, r *http.Request, endpoint, clientID, clientSecret, token string) {
+	payload, err := json.Marshal(map[string]string{
+		"token":           token,
+		"token_type_hint": "access_token",
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth(clientID, clientSecret)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
@@ -1076,6 +1582,59 @@ func (s *Server) notionOptions(cfg *config.Config) []notionOption {
 	return options
 }
 
+func (s *Server) todoistOptions(cfg *config.Config) []todoistOption {
+	var options []todoistOption
+	appendOption := func(userID, credentialID, scope, source string) {
+		options = append(options, todoistOption{
+			User:         userID,
+			CredentialID: credentialID,
+			Scope:        scope,
+			Source:       source,
+		})
+	}
+	configID := cfg.TodoistOAuthCredentialID()
+	hasConfigClient := cfg.Server.OAuth.Todoist.HasClientConfig()
+	hasExplicitConfigCredential := false
+	for _, cred := range cfg.Credentials {
+		if cred.Type == "todoist-oauth-refresh-token" && cred.ID == configID {
+			hasExplicitConfigCredential = true
+			break
+		}
+	}
+	if hasConfigClient && !hasExplicitConfigCredential {
+		if cfg.Server.Secrets.Mode == "kubernetes" {
+			for userID := range cfg.Server.Users {
+				appendOption(userID, configID, todoistScope(cfg, config.CredentialConfig{}), "server.oauth.todoist")
+			}
+		} else {
+			appendOption("", configID, todoistScope(cfg, config.CredentialConfig{}), "server.oauth.todoist")
+		}
+	}
+	for _, cred := range cfg.Credentials {
+		if cred.Type == "todoist-oauth-refresh-token" {
+			userID := config.CredentialUserID(cfg, cred)
+			if cfg.Server.Secrets.Mode == "kubernetes" && userID == cred.ID {
+				for configuredUserID := range cfg.Server.Users {
+					appendOption(configuredUserID, cred.ID, todoistScope(cfg, cred), "credentials")
+				}
+				continue
+			}
+			appendOption(userID, cred.ID, todoistScope(cfg, cred), "credentials")
+		}
+	}
+	for namespace, ns := range cfg.Server.OAuth.Namespaces {
+		if ns.Todoist.HasClientConfig() {
+			credentialID := config.NamespaceTodoistCredentialID(namespace)
+			if cfg.Server.Secrets.Mode == "kubernetes" && cfg.HasUser(namespace) {
+				appendOption(namespace, credentialID, ns.Todoist.Scope, "server.oauth.namespaces."+namespace+".todoist")
+			} else if cfg.Server.Secrets.Mode != "kubernetes" {
+				appendOption("", credentialID, ns.Todoist.Scope, "server.oauth.namespaces."+namespace+".todoist")
+			}
+		}
+	}
+	return options
+}
+
 func (s *Server) storageUserID(cfg *config.Config, info stateInfo) string {
 	if cfg.Server.Secrets.Mode == "kubernetes" {
 		return info.User
@@ -1105,6 +1664,14 @@ func (s *Server) googleCredential(cfg *config.Config, credentialID string) (conf
 func (s *Server) notionCredential(cfg *config.Config, credentialID string) (config.CredentialConfig, bool) {
 	cred, ok := config.CredentialByID(cfg, credentialID)
 	if !ok || cred.Type != "notion-oauth-refresh-token" {
+		return config.CredentialConfig{}, false
+	}
+	return cred, true
+}
+
+func (s *Server) todoistCredential(cfg *config.Config, credentialID string) (config.CredentialConfig, bool) {
+	cred, ok := config.CredentialByID(cfg, credentialID)
+	if !ok || cred.Type != "todoist-oauth-refresh-token" {
 		return config.CredentialConfig{}, false
 	}
 	return cred, true
@@ -1184,6 +1751,53 @@ func (s *Server) notionClientPair(ctx context.Context, notionCfg config.NotionOA
 	return clientID, clientSecret, nil
 }
 
+func (s *Server) todoistClientID(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	if value := config.HeaderValueFromEnv(cred.Params["client_id"]); value != "" {
+		return value, nil
+	}
+	todoistCfg, ok := config.TodoistOAuthConfigForCredential(cfg, cred.ID)
+	if !ok {
+		return "", nil
+	}
+	return s.todoistClientValue(ctx, todoistCfg.ClientID, todoistCfg.ClientIDSecretRef)
+}
+
+func (s *Server) todoistClientSecret(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	if value := config.HeaderValueFromEnv(cred.Params["client_secret"]); value != "" {
+		return value, nil
+	}
+	todoistCfg, ok := config.TodoistOAuthConfigForCredential(cfg, cred.ID)
+	if !ok {
+		return "", nil
+	}
+	return s.todoistClientValue(ctx, todoistCfg.ClientSecret, todoistCfg.ClientSecretRef)
+}
+
+func (s *Server) todoistClientPair(ctx context.Context, todoistCfg config.TodoistOAuthConfig) (string, string, error) {
+	clientID, err := s.todoistClientValue(ctx, todoistCfg.ClientID, todoistCfg.ClientIDSecretRef)
+	if err != nil {
+		return "", "", err
+	}
+	clientSecret, err := s.todoistClientValue(ctx, todoistCfg.ClientSecret, todoistCfg.ClientSecretRef)
+	if err != nil {
+		return "", "", err
+	}
+	if clientID == "" || clientSecret == "" {
+		return "", "", fmt.Errorf("todoist namespace requires client id and client secret")
+	}
+	return clientID, clientSecret, nil
+}
+
+func (s *Server) todoistClientValue(ctx context.Context, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, s.secrets, secretRef)
+}
+
 func (s *Server) notionClientValue(ctx context.Context, literal, secretRef string) (string, error) {
 	if value := config.HeaderValueFromEnv(literal); value != "" {
 		return value, nil
@@ -1211,6 +1825,27 @@ func googleScope(cfg *config.Config, cred config.CredentialConfig) string {
 	googleCfg, ok := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
 	if ok {
 		return googleCfg.Scope
+	}
+	return ""
+}
+
+func todoistScope(cfg *config.Config, cred config.CredentialConfig) string {
+	if cred.Params["scope"] != "" {
+		return cred.Params["scope"]
+	}
+	todoistCfg, ok := config.TodoistOAuthConfigForCredential(cfg, cred.ID)
+	if ok {
+		return todoistCfg.Scope
+	}
+	return ""
+}
+
+func todoistRedirectURLForCredential(cfg *config.Config, cred config.CredentialConfig) string {
+	if redirectURI := cred.Params["redirect_uri"]; redirectURI != "" {
+		return redirectURI
+	}
+	if todoistCfg, ok := config.TodoistOAuthConfigForCredential(cfg, cred.ID); ok {
+		return todoistCfg.RedirectURL
 	}
 	return ""
 }
@@ -1293,7 +1928,7 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
 </head>
 <body>
   <h1>scia OAuth</h1>
-  {{if or .GoogleOptions .NotionOptions}}
+  {{if or .GoogleOptions .NotionOptions .TodoistOptions}}
     {{range .GoogleOptions}}
       <div class="item">
         <div><strong>{{.CredentialID}}</strong>{{if .User}} for user <code>{{.User}}</code>{{end}}</div>
@@ -1307,6 +1942,14 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
         <div><strong>{{.CredentialID}}</strong>{{if .User}} for user <code>{{.User}}</code>{{end}}</div>
         <p class="muted">{{.Source}}</p>
         <a class="button" href="/oauth/notion/start?credential={{.CredentialID}}{{if .User}}&amp;user={{.User}}{{end}}">Authorize with Notion</a>
+      </div>
+    {{end}}
+    {{range .TodoistOptions}}
+      <div class="item">
+        <div><strong>{{.CredentialID}}</strong>{{if .User}} for user <code>{{.User}}</code>{{end}}</div>
+        <p class="muted"><code>{{.Scope}}</code></p>
+        <p class="muted">{{.Source}}</p>
+        <a class="button" href="/oauth/todoist/start?credential={{.CredentialID}}{{if .User}}&amp;user={{.User}}{{end}}">Authorize with Todoist</a>
       </div>
     {{end}}
   {{else}}
@@ -1331,8 +1974,8 @@ var callbackTemplate = template.Must(template.New("callback").Parse(`<!doctype h
   <h1>{{.Provider}} OAuth Complete</h1>
   {{if .User}}<p>User: <code>{{.User}}</code></p>{{end}}
   <p>Credential: <code>{{.CredentialID}}</code></p>
-  <textarea readonly>refresh_token: "{{.RefreshToken}}"</textarea>
-  {{if .Stored}}<p>The refresh token was stored in the configured scia secret store.</p>{{end}}
-  <p>You can also copy this value into <code>params.refresh_token</code>{{if .ExpiresIn}}. Access token expires in {{.ExpiresIn}} seconds{{end}}.</p>
+  <textarea readonly>{{.TokenKind}}: "{{.TokenValue}}"</textarea>
+  {{if .Stored}}<p>The token was stored in the configured scia secret store.</p>{{end}}
+  <p>You can also copy this value into <code>params.{{.TokenKind}}</code>{{if .ExpiresIn}}. Access token expires in {{.ExpiresIn}} seconds{{end}}.</p>
 </body>
 </html>`))
