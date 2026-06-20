@@ -111,6 +111,10 @@ the authorization request to Todoist, exchanges the returned code at
 `refresh_token`. Legacy Todoist apps that do not issue refresh tokens store the
 long-lived `access_token` instead.
 
+See [docs/todoist-oauth.md](docs/todoist-oauth.md) for the full Todoist setup
+guide, including local helper setup, proxy injection, and namespaced broker
+configuration.
+
 OAuth callback refresh tokens are stored in the SQLite secret store by default:
 
 ```yaml
