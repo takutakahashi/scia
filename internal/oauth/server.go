@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +68,33 @@ type todoistOption struct {
 	Source       string
 }
 
+type integrationsResponse struct {
+	Integrations []frontendIntegration `json:"integrations"`
+}
+
+type frontendIntegration struct {
+	ID                       string                     `json:"id"`
+	Provider                 string                     `json:"provider"`
+	Namespace                string                     `json:"namespace,omitempty"`
+	CredentialID             string                     `json:"credential_id"`
+	Name                     string                     `json:"name"`
+	IconURL                  string                     `json:"icon_url,omitempty"`
+	Description              string                     `json:"description,omitempty"`
+	Released                 bool                       `json:"released"`
+	Source                   string                     `json:"source"`
+	StartURL                 string                     `json:"start_url"`
+	AuthorizationURLEndpoint string                     `json:"authorization_url_endpoint"`
+	Setup                    map[string]string          `json:"setup"`
+	Scopes                   []frontendIntegrationScope `json:"scopes"`
+}
+
+type frontendIntegrationScope struct {
+	Value       string `json:"value"`
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
+	Enabled     bool   `json:"enabled"`
+}
+
 func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logger) *Server {
 	if secretStore == nil {
 		secretStore = secrets.NoopStore{}
@@ -83,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.index)
 	mux.HandleFunc("/_scia/healthz", s.healthz)
+	mux.HandleFunc("/api/integrations", s.frontendIntegrations)
 	mux.HandleFunc("/oauth/google/start", s.startGoogle)
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
 	mux.HandleFunc("/oauth/notion/start", s.startNotion)
@@ -123,6 +152,14 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) frontendIntegrations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, integrationsResponse{Integrations: s.frontendIntegrationList(r, s.store.Get())})
+}
+
 func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 	credentialID := r.URL.Query().Get("credential")
 	userID := r.URL.Query().Get("user")
@@ -151,9 +188,10 @@ func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credential is missing client_id", http.StatusBadRequest)
 		return
 	}
-	scope := googleScope(cfg, cred)
-	if scope == "" {
-		scope = "openid email profile"
+	scope, err := oauthScopeFromRequest(cfg, cred.ID, "google", r.URL.Query().Get("scope"), googleScope(cfg, cred), "openid email profile")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	state, err := randomState()
 	if err != nil {
@@ -373,9 +411,10 @@ func (s *Server) startTodoist(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credential is missing client_id", http.StatusBadRequest)
 		return
 	}
-	scope := todoistScope(cfg, cred)
-	if scope == "" {
-		scope = "data:read"
+	scope, err := oauthScopeFromRequest(cfg, cred.ID, "todoist", r.URL.Query().Get("scope"), todoistScope(cfg, cred), "data:read")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	state, err := randomState()
 	if err != nil {
@@ -877,12 +916,10 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 	if redirectURI == "" {
 		redirectURI = s.redirectURL(r)
 	}
-	scope := r.URL.Query().Get("scope")
-	if scope == "" {
-		scope = googleCfg.Scope
-	}
-	if scope == "" {
-		scope = "openid email profile"
+	scope, err := oauthScopeFromRequest(s.store.Get(), credentialID, "google", r.URL.Query().Get("scope"), googleCfg.Scope, "openid email profile")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	state := r.URL.Query().Get("state")
 	if state == "" && redirect {
@@ -992,12 +1029,10 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 	if authURL == "" {
 		authURL = todoistAuthURL
 	}
-	scope := r.URL.Query().Get("scope")
-	if scope == "" {
-		scope = todoistCfg.Scope
-	}
-	if scope == "" {
-		scope = "data:read"
+	scope, err := oauthScopeFromRequest(s.store.Get(), credentialID, "todoist", r.URL.Query().Get("scope"), todoistCfg.Scope, "data:read")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	state := r.URL.Query().Get("state")
 	if state == "" && redirect {
@@ -1475,6 +1510,293 @@ func (s *Server) forwardNotionJSON(w http.ResponseWriter, r *http.Request, endpo
 	}
 	w.WriteHeader(resp.StatusCode)
 	_ = json.NewEncoder(w).Encode(token)
+}
+
+func (s *Server) frontendIntegrationList(r *http.Request, cfg *config.Config) []frontendIntegration {
+	var integrations []frontendIntegration
+	for _, option := range s.googleOptions(cfg) {
+		integrations = append(integrations, s.googleFrontendIntegration(r, cfg, option))
+	}
+	for _, option := range s.notionOptions(cfg) {
+		integrations = append(integrations, s.notionFrontendIntegration(r, cfg, option))
+	}
+	for _, option := range s.todoistOptions(cfg) {
+		integrations = append(integrations, s.todoistFrontendIntegration(r, cfg, option))
+	}
+	sort.SliceStable(integrations, func(i, j int) bool {
+		return integrations[i].ID < integrations[j].ID
+	})
+	return integrations
+}
+
+func (s *Server) googleFrontendIntegration(r *http.Request, cfg *config.Config, option googleOption) frontendIntegration {
+	metadata := oauthIntegrationMetadata(cfg, option.CredentialID, "google")
+	googleCfg, _ := config.GoogleOAuthConfigForCredential(cfg, option.CredentialID)
+	cred, _ := config.CredentialByID(cfg, option.CredentialID)
+	scope := option.Scope
+	if scope == "" {
+		scope = "openid email profile"
+	}
+	authURL := firstNonEmpty(cred.Params["auth_url"], googleCfg.AuthURL)
+	if authURL == "" {
+		authURL = googleAuthURL
+	}
+	tokenURL := firstNonEmpty(cred.Params["token_url"], googleCfg.TokenURL)
+	if tokenURL == "" {
+		tokenURL = googleTokenURL
+	}
+	revokeURL := firstNonEmpty(cred.Params["revoke_url"], googleCfg.RevokeURL)
+	if revokeURL == "" {
+		revokeURL = googleRevokeURL
+	}
+	callbackURL := firstNonEmpty(cred.Params["redirect_uri"], googleCfg.RedirectURL)
+	if callbackURL == "" {
+		callbackURL = s.redirectURL(r)
+	}
+	return s.frontendIntegration(metadata, "google", option.CredentialID, option.Source, scope, callbackURL, authURL, tokenURL, revokeURL)
+}
+
+func (s *Server) notionFrontendIntegration(r *http.Request, cfg *config.Config, option notionOption) frontendIntegration {
+	metadata := oauthIntegrationMetadata(cfg, option.CredentialID, "notion")
+	notionCfg, _ := config.NotionOAuthConfigForCredential(cfg, option.CredentialID)
+	cred, _ := config.CredentialByID(cfg, option.CredentialID)
+	authURL := firstNonEmpty(cred.Params["auth_url"], notionCfg.AuthURL)
+	if authURL == "" {
+		authURL = notionAuthURL
+	}
+	tokenURL := firstNonEmpty(cred.Params["token_url"], notionCfg.TokenURL)
+	if tokenURL == "" {
+		tokenURL = notionTokenURL
+	}
+	revokeURL := firstNonEmpty(cred.Params["revoke_url"], notionCfg.RevokeURL)
+	if revokeURL == "" {
+		revokeURL = notionRevokeURL
+	}
+	callbackURL := firstNonEmpty(cred.Params["redirect_uri"], notionCfg.RedirectURL)
+	if callbackURL == "" {
+		callbackURL = s.providerRedirectURL(r, "notion")
+	}
+	return s.frontendIntegration(metadata, "notion", option.CredentialID, option.Source, "", callbackURL, authURL, tokenURL, revokeURL)
+}
+
+func (s *Server) todoistFrontendIntegration(_ *http.Request, cfg *config.Config, option todoistOption) frontendIntegration {
+	metadata := oauthIntegrationMetadata(cfg, option.CredentialID, "todoist")
+	todoistCfg, _ := config.TodoistOAuthConfigForCredential(cfg, option.CredentialID)
+	cred, _ := config.CredentialByID(cfg, option.CredentialID)
+	scope := option.Scope
+	if scope == "" {
+		scope = "data:read"
+	}
+	authURL := firstNonEmpty(cred.Params["auth_url"], todoistCfg.AuthURL)
+	if authURL == "" {
+		authURL = todoistAuthURL
+	}
+	tokenURL := firstNonEmpty(cred.Params["token_url"], todoistCfg.TokenURL)
+	if tokenURL == "" {
+		tokenURL = todoistTokenURL
+	}
+	revokeURL := firstNonEmpty(cred.Params["revoke_url"], todoistCfg.RevokeURL)
+	if revokeURL == "" {
+		revokeURL = todoistRevokeURL
+	}
+	return s.frontendIntegration(metadata, "todoist", option.CredentialID, option.Source, scope, firstNonEmpty(cred.Params["redirect_uri"], todoistCfg.RedirectURL), authURL, tokenURL, revokeURL)
+}
+
+func (s *Server) frontendIntegration(metadata config.OAuthIntegrationMetadataConfig, provider, credentialID, source, configuredScope, callbackURL, authURL, tokenURL, revokeURL string) frontendIntegration {
+	namespace := ""
+	if strings.HasPrefix(source, "server.oauth.namespaces.") {
+		namespace, _, _ = strings.Cut(strings.TrimPrefix(source, "server.oauth.namespaces."), ".")
+	}
+	setup := map[string]string{
+		"callback_url": callbackURL,
+		"auth_url":     authURL,
+		"token_url":    tokenURL,
+		"revoke_url":   revokeURL,
+	}
+	for key, value := range metadata.Setup {
+		setup[key] = value
+	}
+	startURL := "/oauth/" + provider + "/start?credential=" + url.QueryEscape(credentialID)
+	authorizationEndpoint := ""
+	if namespace != "" {
+		startURL = "/oauth/" + namespace + "/" + provider + "/start"
+		authorizationEndpoint = "/oauth/" + namespace + "/" + provider + "/authorization-url"
+	}
+	return frontendIntegration{
+		ID:                       credentialID,
+		Provider:                 provider,
+		Namespace:                namespace,
+		CredentialID:             credentialID,
+		Name:                     integrationName(metadata, provider),
+		IconURL:                  metadata.IconURL,
+		Description:              metadata.Description,
+		Released:                 integrationReleased(metadata),
+		Source:                   source,
+		StartURL:                 startURL,
+		AuthorizationURLEndpoint: authorizationEndpoint,
+		Setup:                    setup,
+		Scopes:                   integrationScopes(metadata, configuredScope),
+	}
+}
+
+func oauthIntegrationMetadata(cfg *config.Config, id, provider string) config.OAuthIntegrationMetadataConfig {
+	if cfg.Server.OAuth.Integrations != nil {
+		if metadata, ok := cfg.Server.OAuth.Integrations[id]; ok {
+			return metadata
+		}
+		if metadata, ok := cfg.Server.OAuth.Integrations[provider]; ok {
+			return metadata
+		}
+	}
+	return config.OAuthIntegrationMetadataConfig{}
+}
+
+func integrationName(metadata config.OAuthIntegrationMetadataConfig, provider string) string {
+	if metadata.Name != "" {
+		return metadata.Name
+	}
+	switch provider {
+	case "google":
+		return "Google"
+	case "notion":
+		return "Notion"
+	case "todoist":
+		return "Todoist"
+	default:
+		return provider
+	}
+}
+
+func integrationReleased(metadata config.OAuthIntegrationMetadataConfig) bool {
+	if metadata.Released == nil {
+		return true
+	}
+	return *metadata.Released
+}
+
+func integrationScopes(metadata config.OAuthIntegrationMetadataConfig, configured string) []frontendIntegrationScope {
+	configuredScopes := splitScopeValues(configured)
+	enabledByValue := make(map[string]struct{}, len(configuredScopes))
+	for _, scope := range configuredScopes {
+		enabledByValue[scope] = struct{}{}
+	}
+	if len(metadata.Scopes) > 0 {
+		scopes := make([]frontendIntegrationScope, 0, len(metadata.Scopes))
+		for _, scope := range metadata.Scopes {
+			if scope.Value == "" {
+				continue
+			}
+			enabled := false
+			if scope.Enabled != nil {
+				enabled = *scope.Enabled
+			} else if _, ok := enabledByValue[scope.Value]; ok {
+				enabled = true
+			}
+			scopes = append(scopes, frontendIntegrationScope{
+				Value:       scope.Value,
+				Label:       scope.Label,
+				Description: scope.Description,
+				Enabled:     enabled,
+			})
+		}
+		return scopes
+	}
+	scopes := make([]frontendIntegrationScope, 0, len(configuredScopes))
+	for _, scope := range configuredScopes {
+		scopes = append(scopes, frontendIntegrationScope{Value: scope, Enabled: true})
+	}
+	return scopes
+}
+
+func oauthScopeFromRequest(cfg *config.Config, credentialID, provider, requested, configured, fallback string) (string, error) {
+	metadata := oauthIntegrationMetadata(cfg, credentialID, provider)
+	if len(metadata.Scopes) == 0 {
+		if requested != "" {
+			return requested, nil
+		}
+		if configured != "" {
+			return configured, nil
+		}
+		return fallback, nil
+	}
+
+	allowed := make(map[string]struct{}, len(metadata.Scopes))
+	var selected []string
+	for _, scope := range metadata.Scopes {
+		if scope.Value == "" {
+			continue
+		}
+		allowed[scope.Value] = struct{}{}
+		if requested == "" && scopeDefaultEnabled(scope, configured) {
+			selected = append(selected, scope.Value)
+		}
+	}
+	if requested != "" {
+		selected = splitScopeValues(requested)
+		if len(selected) == 0 {
+			return "", fmt.Errorf("scope must include at least one value")
+		}
+		for _, scope := range selected {
+			if _, ok := allowed[scope]; !ok {
+				return "", fmt.Errorf("scope %q is not allowed for %s", scope, credentialID)
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return "", fmt.Errorf("no scopes are enabled for %s", credentialID)
+	}
+	return strings.Join(selected, oauthScopeSeparator(provider)), nil
+}
+
+func scopeDefaultEnabled(scope config.OAuthIntegrationScopeConfig, configured string) bool {
+	if scope.Enabled != nil {
+		return *scope.Enabled
+	}
+	for _, configuredScope := range splitScopeValues(configured) {
+		if configuredScope == scope.Value {
+			return true
+		}
+	}
+	return false
+}
+
+func oauthScopeSeparator(provider string) string {
+	if provider == "todoist" {
+		return ","
+	}
+	return " "
+}
+
+func splitScopeValues(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var scopes []string
+	for _, scope := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t'
+	}) {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		scopes = append(scopes, scope)
+	}
+	return scopes
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Server) googleOptions(cfg *config.Config) []googleOption {

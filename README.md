@@ -206,6 +206,39 @@ Todoist broker endpoints:
 - `POST /oauth/{namespace}/todoist/access-token` returns a stored Todoist legacy access token, or exchanges the stored refresh token for a new access token and stores any rotated refresh token returned by Todoist.
 - `POST /oauth/{namespace}/todoist/revoke` forwards a revoke request to Todoist.
 
+Frontend integration metadata:
+
+- `GET /api/integrations` returns configured OAuth integrations as JSON for a frontend.
+- The response is generated from the current config on every request, so config reloads are reflected without frontend changes.
+- Secrets are not returned. The response includes provider IDs, display metadata, setup URLs such as callback/auth/token/revoke URLs, start endpoints, and scope enabled state.
+- `server.oauth.integrations.<provider-or-credential-id>.released: false` can be used to configure an integration before exposing it in the frontend.
+- `scopes[].enabled` means the scope is selected by default. Frontends can pass a `scope` query parameter to OAuth `start` or `authorization-url` endpoints to authorize a different subset.
+- When integration metadata scopes are configured, requested scopes must match `scopes[].value`; unknown scopes are rejected with `400 Bad Request`.
+
+Example:
+
+```yaml
+server:
+  oauth:
+    integrations:
+      google-calendar:
+        name: "Google Calendar"
+        iconUrl: "https://www.gstatic.com/images/branding/product/1x/calendar_2020q4_48dp.png"
+        description: "Connect Google Calendar to read and update calendar events."
+        released: false
+        setup:
+          callback_url: "https://scia.example.com/oauth/google/callback"
+        scopes:
+          - value: "https://www.googleapis.com/auth/calendar"
+            label: "Calendar read/write"
+            description: "Read, create, and update events."
+            enabled: true
+          - value: "https://www.googleapis.com/auth/calendar.readonly"
+            label: "Calendar read-only"
+            description: "Read events without writing changes."
+            enabled: false
+```
+
 When `server.oauth.brokerToken` is set, broker API requests to
 `authorization-url`, `token`, `access-token`, and `revoke` must include
 `Authorization: Bearer <token>`. `env:` values are expanded, so the OAuth server

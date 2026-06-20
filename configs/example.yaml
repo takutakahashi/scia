@@ -12,6 +12,32 @@ server:
     listen: "127.0.0.1:8081"
     redirectUrl: "http://localhost:8081/oauth/google/callback"
     brokerToken: "env:SCIA_OAUTH_BROKER_TOKEN"
+    integrations:
+      google-calendar:
+        name: "Google Calendar"
+        iconUrl: "https://www.gstatic.com/images/branding/product/1x/calendar_2020q4_48dp.png"
+        description: "Connect Google Calendar to read and update calendar events."
+        released: true
+        setup:
+          callback_url: "http://localhost:8081/oauth/google/callback"
+        scopes:
+          - value: "https://www.googleapis.com/auth/calendar"
+            label: "Calendar read/write"
+            description: "Read, create, and update events."
+            enabled: true
+          - value: "https://www.googleapis.com/auth/calendar.readonly"
+            label: "Calendar read-only"
+            description: "Read events without writing changes."
+            enabled: false
+      notion-workspace:
+        name: "Notion"
+        iconUrl: "https://www.notion.so/images/favicon.ico"
+        description: "Connect a Notion workspace."
+        released: false
+      todoist:
+        name: "Todoist"
+        iconUrl: "https://todoist.com/favicon.ico"
+        description: "Connect Todoist tasks and projects."
     google:
       credentialId: google-calendar
       clientId: "env:GOOGLE_OAUTH_CLIENT_ID"

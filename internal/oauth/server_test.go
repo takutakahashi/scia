@@ -41,6 +41,247 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestFrontendIntegrationsReturnsConfiguredOAuthIntegrations(t *testing.T) {
+	released := false
+	calendarScopeEnabled := true
+	driveScopeEnabled := false
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				RedirectURL: "http://localhost:8081/oauth/google/callback",
+				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
+					"google-calendar": {
+						Name:        "Google Calendar",
+						IconURL:     "https://example.com/google-calendar.png",
+						Description: "Connect Google Calendar.",
+						Released:    &released,
+						Setup: map[string]string{
+							"project": "Google Cloud OAuth client",
+						},
+						Scopes: []config.OAuthIntegrationScopeConfig{
+							{
+								Value:       "https://www.googleapis.com/auth/calendar",
+								Label:       "Calendar write",
+								Description: "Read and write calendars.",
+								Enabled:     &calendarScopeEnabled,
+							},
+							{
+								Value:   "https://www.googleapis.com/auth/drive",
+								Label:   "Drive",
+								Enabled: &driveScopeEnabled,
+							},
+						},
+					},
+				},
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "client-id",
+					ClientSecret: "client-secret",
+					Scope:        "https://www.googleapis.com/auth/calendar",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body integrationsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Integrations) != 1 {
+		t.Fatalf("unexpected integrations: %#v", body.Integrations)
+	}
+	got := body.Integrations[0]
+	if got.ID != "google-calendar" || got.Provider != "google" || got.CredentialID != "google-calendar" {
+		t.Fatalf("unexpected integration identity: %#v", got)
+	}
+	if got.Name != "Google Calendar" || got.IconURL != "https://example.com/google-calendar.png" || got.Description != "Connect Google Calendar." {
+		t.Fatalf("metadata was not applied: %#v", got)
+	}
+	if got.Released {
+		t.Fatalf("released flag was not applied: %#v", got)
+	}
+	if got.StartURL != "/oauth/google/start?credential=google-calendar" {
+		t.Fatalf("unexpected start_url: %q", got.StartURL)
+	}
+	if got.Setup["callback_url"] != "http://localhost:8081/oauth/google/callback" {
+		t.Fatalf("unexpected callback_url: %#v", got.Setup)
+	}
+	if got.Setup["auth_url"] != googleAuthURL || got.Setup["token_url"] != googleTokenURL || got.Setup["revoke_url"] != googleRevokeURL {
+		t.Fatalf("unexpected setup URLs: %#v", got.Setup)
+	}
+	if got.Setup["project"] != "Google Cloud OAuth client" {
+		t.Fatalf("custom setup metadata missing: %#v", got.Setup)
+	}
+	if len(got.Scopes) != 2 {
+		t.Fatalf("unexpected scopes: %#v", got.Scopes)
+	}
+	if got.Scopes[0].Value != "https://www.googleapis.com/auth/calendar" || !got.Scopes[0].Enabled {
+		t.Fatalf("unexpected first scope: %#v", got.Scopes[0])
+	}
+	if got.Scopes[1].Value != "https://www.googleapis.com/auth/drive" || got.Scopes[1].Enabled {
+		t.Fatalf("unexpected second scope: %#v", got.Scopes[1])
+	}
+}
+
+func TestFrontendIntegrationsReturnsNamespacedOAuthIntegrations(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Todoist: config.TodoistOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+							Scope:        "data:read,data:read_write",
+							RedirectURL:  "https://service-a.example.com/oauth/todoist/callback",
+						},
+					},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body integrationsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Integrations) != 1 {
+		t.Fatalf("unexpected integrations: %#v", body.Integrations)
+	}
+	got := body.Integrations[0]
+	if got.ID != "service-a.todoist" || got.Namespace != "service-a" || got.Provider != "todoist" {
+		t.Fatalf("unexpected namespaced integration: %#v", got)
+	}
+	if got.StartURL != "/oauth/service-a/todoist/start" {
+		t.Fatalf("unexpected start_url: %q", got.StartURL)
+	}
+	if got.AuthorizationURLEndpoint != "/oauth/service-a/todoist/authorization-url" {
+		t.Fatalf("unexpected authorization_url_endpoint: %q", got.AuthorizationURLEndpoint)
+	}
+	if got.Setup["callback_url"] != "https://service-a.example.com/oauth/todoist/callback" {
+		t.Fatalf("unexpected setup: %#v", got.Setup)
+	}
+	if len(got.Scopes) != 2 || got.Scopes[0].Value != "data:read" || got.Scopes[1].Value != "data:read_write" {
+		t.Fatalf("unexpected scopes: %#v", got.Scopes)
+	}
+}
+
+func TestNamespaceTodoistAuthorizationURLUsesEnabledMetadataScopesByDefault(t *testing.T) {
+	readScopeEnabled := true
+	writeScopeEnabled := false
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
+					"service-a.todoist": {
+						Scopes: []config.OAuthIntegrationScopeConfig{
+							{Value: "data:read", Enabled: &readScopeEnabled},
+							{Value: "data:read_write", Enabled: &writeScopeEnabled},
+						},
+					},
+				},
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Todoist: config.TodoistOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+							Scope:        "data:read,data:read_write",
+							RedirectURL:  "https://service-a.example.com/oauth/todoist/callback",
+						},
+					},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/service-a/todoist/authorization-url?state=state-1", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["scope"] != "data:read" {
+		t.Fatalf("unexpected scope: %#v", body)
+	}
+	location, err := url.Parse(body["authorization_url"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertQueryValue(t, location.Query(), "scope", "data:read")
+}
+
+func TestNamespaceTodoistAuthorizationURLRejectsUnknownMetadataScopeSelection(t *testing.T) {
+	readScopeEnabled := true
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
+					"service-a.todoist": {
+						Scopes: []config.OAuthIntegrationScopeConfig{
+							{Value: "data:read", Enabled: &readScopeEnabled},
+						},
+					},
+				},
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Todoist: config.TodoistOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+						},
+					},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/service-a/todoist/authorization-url?scope=data:delete", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "is not allowed") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestFrontendIntegrationsRequiresGet(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/api/integrations", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
 func TestGoogleOAuthStartRedirectsToGoogle(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{
@@ -117,6 +358,121 @@ func TestGoogleOAuthStartUsesConfigGoogleClient(t *testing.T) {
 	assertQueryValue(t, query, "client_id", "config-client-id")
 	assertQueryValue(t, query, "redirect_uri", "http://localhost:8081/oauth/google/callback")
 	assertQueryValue(t, query, "scope", "https://www.googleapis.com/auth/calendar")
+}
+
+func TestGoogleOAuthStartUsesEnabledMetadataScopesByDefault(t *testing.T) {
+	readScopeEnabled := true
+	writeScopeEnabled := false
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				RedirectURL: "http://localhost:8081/oauth/google/callback",
+				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
+					"google-calendar": {
+						Scopes: []config.OAuthIntegrationScopeConfig{
+							{Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
+							{Value: "https://www.googleapis.com/auth/calendar", Enabled: &writeScopeEnabled},
+						},
+					},
+				},
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "config-client-id",
+					ClientSecret: "config-client-secret",
+					Scope:        "https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	location := rec.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertQueryValue(t, parsed.Query(), "scope", "https://www.googleapis.com/auth/calendar.readonly")
+}
+
+func TestGoogleOAuthStartAcceptsAllowedMetadataScopeSelection(t *testing.T) {
+	readScopeEnabled := true
+	writeScopeEnabled := false
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				RedirectURL: "http://localhost:8081/oauth/google/callback",
+				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
+					"google-calendar": {
+						Scopes: []config.OAuthIntegrationScopeConfig{
+							{Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
+							{Value: "https://www.googleapis.com/auth/calendar", Enabled: &writeScopeEnabled},
+						},
+					},
+				},
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "config-client-id",
+					ClientSecret: "config-client-secret",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	location := rec.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertQueryValue(t, parsed.Query(), "scope", "https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar")
+}
+
+func TestGoogleOAuthStartRejectsUnknownMetadataScopeSelection(t *testing.T) {
+	readScopeEnabled := true
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
+					"google-calendar": {
+						Scopes: []config.OAuthIntegrationScopeConfig{
+							{Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
+						},
+					},
+				},
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "config-client-id",
+					ClientSecret: "config-client-secret",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "is not allowed") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
 }
 
 func TestNotionOAuthStartRedirectsToNotion(t *testing.T) {
