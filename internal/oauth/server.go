@@ -90,10 +90,13 @@ type frontendIntegration struct {
 }
 
 type frontendIntegrationScope struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Desc    string `json:"desc,omitempty"`
-	Enabled bool   `json:"enabled"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Desc      string `json:"desc,omitempty"`
+	Group     string `json:"group,omitempty"`
+	GroupName string `json:"group_name,omitempty"`
+	GroupDesc string `json:"group_desc,omitempty"`
+	Enabled   bool   `json:"enabled"`
 }
 
 func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logger) *Server {
@@ -1702,10 +1705,13 @@ func integrationScopes(metadata config.OAuthIntegrationMetadataConfig, configure
 				enabled = true
 			}
 			scopes = append(scopes, frontendIntegrationScope{
-				ID:      integrationScopeID(scope, i),
-				Name:    integrationScopeName(scope, i),
-				Desc:    firstNonEmpty(scope.Desc, scope.Description),
-				Enabled: enabled,
+				ID:        integrationScopeID(scope, i),
+				Name:      integrationScopeName(scope, i),
+				Desc:      firstNonEmpty(scope.Desc, scope.Description),
+				Group:     scope.Group,
+				GroupName: scope.GroupName,
+				GroupDesc: scope.GroupDesc,
+				Enabled:   enabled,
 			})
 		}
 		return scopes
@@ -1733,15 +1739,24 @@ func oauthScopeFromRequest(cfg *config.Config, credentialID, provider, requested
 		return fallback, nil
 	}
 
-	allowed := make(map[string]string, len(metadata.Scopes)*2)
+	type allowedScope struct {
+		value string
+		group string
+	}
+	allowed := make(map[string]allowedScope, len(metadata.Scopes)*2)
 	var selected []string
+	selectedGroups := map[string]string{}
 	for i, scope := range metadata.Scopes {
 		if scope.Value == "" {
 			continue
 		}
-		allowed[integrationScopeID(scope, i)] = scope.Value
-		allowed[scope.Value] = scope.Value
+		allowedValue := allowedScope{value: scope.Value, group: scope.Group}
+		allowed[integrationScopeID(scope, i)] = allowedValue
+		allowed[scope.Value] = allowedValue
 		if requested == "" && scopeDefaultEnabled(scope, configured) {
+			if err := selectOAuthScopeGroup(selectedGroups, allowedValue.value, allowedValue.group); err != nil {
+				return "", err
+			}
 			selected = append(selected, scope.Value)
 		}
 	}
@@ -1752,17 +1767,31 @@ func oauthScopeFromRequest(cfg *config.Config, credentialID, provider, requested
 		}
 		selected = make([]string, 0, len(requestedScopes))
 		for _, scope := range requestedScopes {
-			value, ok := allowed[scope]
+			allowedValue, ok := allowed[scope]
 			if !ok {
 				return "", fmt.Errorf("scope %q is not allowed for %s", scope, credentialID)
 			}
-			selected = append(selected, value)
+			if err := selectOAuthScopeGroup(selectedGroups, allowedValue.value, allowedValue.group); err != nil {
+				return "", err
+			}
+			selected = append(selected, allowedValue.value)
 		}
 	}
 	if len(selected) == 0 {
 		return "", fmt.Errorf("no scopes are enabled for %s", credentialID)
 	}
 	return strings.Join(selected, oauthScopeSeparator(provider)), nil
+}
+
+func selectOAuthScopeGroup(selectedGroups map[string]string, value, group string) error {
+	if group == "" {
+		return nil
+	}
+	if selected, ok := selectedGroups[group]; ok && selected != value {
+		return fmt.Errorf("scope group %q can include only one selected scope", group)
+	}
+	selectedGroups[group] = value
+	return nil
 }
 
 func integrationScopeID(scope config.OAuthIntegrationScopeConfig, index int) string {

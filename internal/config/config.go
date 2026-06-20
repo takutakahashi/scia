@@ -131,6 +131,9 @@ type OAuthIntegrationScopeConfig struct {
 	Desc        string `yaml:"desc"`
 	Label       string `yaml:"label"`
 	Description string `yaml:"description"`
+	Group       string `yaml:"group"`
+	GroupName   string `yaml:"groupName"`
+	GroupDesc   string `yaml:"groupDesc"`
 	Enabled     *bool  `yaml:"enabled"`
 }
 
