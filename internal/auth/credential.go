@@ -69,10 +69,93 @@ func (i *Injector) applyOne(ctx context.Context, r *http.Request, cfg *config.Co
 			return err
 		}
 		r.Header.Set("Authorization", "Bearer "+token)
+	case "notion-oauth-refresh-token":
+		token, notionVersion, err := i.notionRefreshToken(ctx, cfg, cred)
+		if err != nil {
+			return err
+		}
+		r.Header.Set("Authorization", "Bearer "+token)
+		if r.Header.Get("Notion-Version") == "" {
+			r.Header.Set("Notion-Version", notionVersion)
+		}
 	default:
 		return fmt.Errorf("unsupported credential type %q", cred.Type)
 	}
 	return nil
+}
+
+func (i *Injector) notionRefreshToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, string, error) {
+	if value, ok := i.cache.Load(cred.ID); ok {
+		token := value.(cachedToken)
+		if time.Until(token.expiresAt) > 30*time.Second {
+			return token.accessToken, i.notionVersion(cfg, cred), nil
+		}
+	}
+
+	tokenURL := cred.Params["token_url"]
+	tokenBrokerURL := config.HeaderValueFromEnv(cred.Params["token_broker_url"])
+	notionCfg, hasNotionCfg := config.NotionOAuthConfigForCredential(cfg, cred.ID)
+	if tokenURL == "" && hasNotionCfg {
+		tokenURL = notionCfg.TokenURL
+	}
+	if tokenURL == "" {
+		tokenURL = "https://api.notion.com/v1/oauth/token"
+	}
+	refreshToken, err := i.rotatingSecretValue(ctx, cfg, cred, "refresh_token")
+	if err != nil {
+		return "", "", err
+	}
+	if refreshToken == "" {
+		return "", "", fmt.Errorf("credential %q requires refresh_token", cred.ID)
+	}
+	version := i.notionVersion(cfg, cred)
+	if tokenBrokerURL != "" {
+		token, rotatedRefreshToken, err := i.notionJSONToken(ctx, cred.ID, tokenBrokerURL, version, map[string]string{
+			"grant_type":    "refresh_token",
+			"refresh_token": refreshToken,
+		}, "", "", config.HeaderValueFromEnv(cred.Params["token_broker_token"]))
+		if err != nil {
+			return "", "", err
+		}
+		if rotatedRefreshToken != "" {
+			if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+				return "", "", err
+			}
+		}
+		return token, version, nil
+	}
+	clientID := config.HeaderValueFromEnv(cred.Params["client_id"])
+	if clientID == "" && hasNotionCfg {
+		var err error
+		clientID, err = i.notionClientValue(ctx, notionCfg.ClientID, notionCfg.ClientIDSecretRef)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	clientSecret := config.HeaderValueFromEnv(cred.Params["client_secret"])
+	if clientSecret == "" && hasNotionCfg {
+		var err error
+		clientSecret, err = i.notionClientValue(ctx, notionCfg.ClientSecret, notionCfg.ClientSecretRef)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	if clientID == "" || clientSecret == "" {
+		return "", "", fmt.Errorf("credential %q requires client_id, client_secret, and refresh_token", cred.ID)
+	}
+	token, rotatedRefreshToken, err := i.notionJSONToken(ctx, cred.ID, tokenURL, version, map[string]string{
+		"grant_type":    "refresh_token",
+		"refresh_token": refreshToken,
+	}, clientID, clientSecret, "")
+	if err != nil {
+		return "", "", err
+	}
+	if rotatedRefreshToken != "" {
+		if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+			return "", "", err
+		}
+	}
+	return token, version, nil
 }
 
 type cachedToken struct {
@@ -209,6 +292,16 @@ func (i *Injector) googleClientValue(ctx context.Context, literal, secretRef str
 	return secrets.ResolveRef(ctx, i.secrets, secretRef)
 }
 
+func (i *Injector) notionClientValue(ctx context.Context, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, i.secrets, secretRef)
+}
+
 func (i *Injector) secretValue(ctx context.Context, cfg *config.Config, cred config.CredentialConfig, key string) (string, error) {
 	if value := config.HeaderValueFromEnv(cred.Params[key]); value != "" {
 		return value, nil
@@ -222,6 +315,18 @@ func (i *Injector) secretValue(ctx context.Context, cfg *config.Config, cred con
 		return value, nil
 	}
 	return "", nil
+}
+
+func (i *Injector) rotatingSecretValue(ctx context.Context, cfg *config.Config, cred config.CredentialConfig, key string) (string, error) {
+	userID := config.CredentialUserID(cfg, cred)
+	value, ok, err := i.secrets.Get(ctx, userID, key)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return value, nil
+	}
+	return config.HeaderValueFromEnv(cred.Params[key]), nil
 }
 
 func (i *Injector) formToken(ctx context.Context, credentialID, tokenURL string, form url.Values, bearerToken string) (string, error) {
@@ -243,6 +348,65 @@ func (i *Injector) formToken(ctx context.Context, credentialID, tokenURL string,
 		return "", fmt.Errorf("token endpoint returned %s", resp.Status)
 	}
 	return i.decodeAndCacheToken(credentialID, resp)
+}
+
+func (i *Injector) notionJSONToken(ctx context.Context, credentialID, tokenURL, notionVersion string, body map[string]string, clientID, clientSecret, bearerToken string) (string, string, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return "", "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(payload))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Notion-Version", notionVersion)
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	} else {
+		req.SetBasicAuth(clientID, clientSecret)
+	}
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", "", fmt.Errorf("token endpoint returned %s", resp.Status)
+	}
+	var token struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		return "", "", err
+	}
+	if token.AccessToken == "" {
+		return "", "", errors.New("token endpoint response did not include access_token")
+	}
+	if token.TokenType != "" && !strings.EqualFold(token.TokenType, "bearer") {
+		return "", "", fmt.Errorf("unsupported token_type %q", token.TokenType)
+	}
+	expiresIn := time.Duration(token.ExpiresIn) * time.Second
+	if expiresIn <= 0 {
+		expiresIn = time.Hour
+	}
+	i.cache.Store(credentialID, cachedToken{accessToken: token.AccessToken, expiresAt: time.Now().Add(expiresIn)})
+	return token.AccessToken, token.RefreshToken, nil
+}
+
+func (i *Injector) notionVersion(cfg *config.Config, cred config.CredentialConfig) string {
+	if version := cred.Params["notion_version"]; version != "" {
+		return version
+	}
+	if notionCfg, ok := config.NotionOAuthConfigForCredential(cfg, cred.ID); ok && notionCfg.NotionVersion != "" {
+		return notionCfg.NotionVersion
+	}
+	return "2026-03-11"
 }
 
 func (i *Injector) decodeAndCacheToken(credentialID string, resp *http.Response) (string, error) {

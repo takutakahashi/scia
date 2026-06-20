@@ -109,6 +109,7 @@ type OAuthConfig struct {
 	RedirectURL string                          `yaml:"redirectUrl"`
 	BrokerToken string                          `yaml:"brokerToken"`
 	Google      GoogleOAuthConfig               `yaml:"google"`
+	Notion      NotionOAuthConfig               `yaml:"notion"`
 	Namespaces  map[string]OAuthNamespaceConfig `yaml:"namespaces"`
 }
 
@@ -125,8 +126,22 @@ type GoogleOAuthConfig struct {
 	RedirectURL       string `yaml:"redirectUrl"`
 }
 
+type NotionOAuthConfig struct {
+	CredentialID      string `yaml:"credentialId"`
+	ClientID          string `yaml:"clientId"`
+	ClientIDSecretRef string `yaml:"clientIdSecretRef"`
+	ClientSecret      string `yaml:"clientSecret"`
+	ClientSecretRef   string `yaml:"clientSecretRef"`
+	AuthURL           string `yaml:"authUrl"`
+	TokenURL          string `yaml:"tokenUrl"`
+	RevokeURL         string `yaml:"revokeUrl"`
+	RedirectURL       string `yaml:"redirectUrl"`
+	NotionVersion     string `yaml:"notionVersion"`
+}
+
 type OAuthNamespaceConfig struct {
 	Google GoogleOAuthConfig `yaml:"google"`
+	Notion NotionOAuthConfig `yaml:"notion"`
 }
 
 type SecretsConfig struct {
@@ -241,7 +256,7 @@ func (c *Config) Validate() error {
 		}
 		seenCreds[cred.ID] = struct{}{}
 		switch cred.Type {
-		case "bearer", "basic", "static-header", "oauth2-client-credentials", "google-oauth-refresh-token":
+		case "bearer", "basic", "static-header", "oauth2-client-credentials", "google-oauth-refresh-token", "notion-oauth-refresh-token":
 		default:
 			return fmt.Errorf("credential %q has unsupported type %q", cred.ID, cred.Type)
 		}
@@ -252,6 +267,9 @@ func (c *Config) Validate() error {
 	if c.Server.OAuth.Google.HasClientConfig() {
 		seenCreds[c.GoogleOAuthCredentialID()] = struct{}{}
 	}
+	if c.Server.OAuth.Notion.HasClientConfig() {
+		seenCreds[c.NotionOAuthCredentialID()] = struct{}{}
+	}
 	for namespace, ns := range c.Server.OAuth.Namespaces {
 		if namespace == "" {
 			return fmt.Errorf("server.oauth.namespaces cannot include an empty namespace")
@@ -261,6 +279,9 @@ func (c *Config) Validate() error {
 		}
 		if ns.Google.HasClientConfig() {
 			seenCreds[NamespaceGoogleCredentialID(namespace)] = struct{}{}
+		}
+		if ns.Notion.HasClientConfig() {
+			seenCreds[NamespaceNotionCredentialID(namespace)] = struct{}{}
 		}
 	}
 	for i, rule := range c.Rules {
@@ -290,9 +311,17 @@ func CredentialByID(cfg *Config, id string) (CredentialConfig, bool) {
 	if cfg.Server.OAuth.Google.HasClientConfig() && id == cfg.GoogleOAuthCredentialID() {
 		return CredentialConfig{ID: id, Type: "google-oauth-refresh-token", Params: map[string]string{}}, true
 	}
+	if cfg.Server.OAuth.Notion.HasClientConfig() && id == cfg.NotionOAuthCredentialID() {
+		return CredentialConfig{ID: id, Type: "notion-oauth-refresh-token", Params: map[string]string{}}, true
+	}
 	if namespace, ok := GoogleCredentialNamespace(id); ok {
 		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Google.HasClientConfig() {
 			return CredentialConfig{ID: id, Type: "google-oauth-refresh-token", Params: map[string]string{}}, true
+		}
+	}
+	if namespace, ok := NotionCredentialNamespace(id); ok {
+		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Notion.HasClientConfig() {
+			return CredentialConfig{ID: id, Type: "notion-oauth-refresh-token", Params: map[string]string{}}, true
 		}
 	}
 	return CredentialConfig{}, false
@@ -305,8 +334,19 @@ func (c *Config) GoogleOAuthCredentialID() string {
 	return "google"
 }
 
+func (c *Config) NotionOAuthCredentialID() string {
+	if c.Server.OAuth.Notion.CredentialID != "" {
+		return c.Server.OAuth.Notion.CredentialID
+	}
+	return "notion"
+}
+
 func (g GoogleOAuthConfig) HasClientConfig() bool {
 	return (g.ClientID != "" || g.ClientIDSecretRef != "") && (g.ClientSecret != "" || g.ClientSecretRef != "")
+}
+
+func (n NotionOAuthConfig) HasClientConfig() bool {
+	return (n.ClientID != "" || n.ClientIDSecretRef != "") && (n.ClientSecret != "" || n.ClientSecretRef != "")
 }
 
 func GoogleCredentialNamespace(id string) (string, bool) {
@@ -317,8 +357,20 @@ func GoogleCredentialNamespace(id string) (string, bool) {
 	return namespace, true
 }
 
+func NotionCredentialNamespace(id string) (string, bool) {
+	namespace, provider, ok := strings.Cut(id, ".")
+	if !ok || namespace == "" || provider != "notion" {
+		return "", false
+	}
+	return namespace, true
+}
+
 func NamespaceGoogleCredentialID(namespace string) string {
 	return namespace + ".google"
+}
+
+func NamespaceNotionCredentialID(namespace string) string {
+	return namespace + ".notion"
 }
 
 func GoogleOAuthConfigForCredential(cfg *Config, credentialID string) (GoogleOAuthConfig, bool) {
@@ -335,6 +387,22 @@ func GoogleOAuthConfigForCredential(cfg *Config, credentialID string) (GoogleOAu
 		}
 	}
 	return GoogleOAuthConfig{}, false
+}
+
+func NotionOAuthConfigForCredential(cfg *Config, credentialID string) (NotionOAuthConfig, bool) {
+	if credentialID == "" || credentialID == cfg.NotionOAuthCredentialID() {
+		if cfg.Server.OAuth.Notion.HasClientConfig() {
+			return cfg.Server.OAuth.Notion, true
+		}
+		return NotionOAuthConfig{}, false
+	}
+	if namespace, ok := NotionCredentialNamespace(credentialID); ok {
+		ns, exists := cfg.Server.OAuth.Namespaces[namespace]
+		if exists && ns.Notion.HasClientConfig() {
+			return ns.Notion, true
+		}
+	}
+	return NotionOAuthConfig{}, false
 }
 
 func SecretRefParts(ref string) (string, string, error) {

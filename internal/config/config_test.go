@@ -70,6 +70,30 @@ func TestValidateAllowsNamespacedGoogleCredentialReference(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsNamespacedNotionCredentialReference(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			OAuth: OAuthConfig{
+				Namespaces: map[string]OAuthNamespaceConfig{
+					"service-a": {
+						Notion: NotionOAuthConfig{
+							ClientIDSecretRef: "service-a.notion.client-id",
+							ClientSecretRef:   "service-a.notion.client-secret",
+						},
+					},
+				},
+			},
+		},
+		Rules: []RuleConfig{
+			{Name: "notion", Action: "allow", Credentials: []string{"service-a.notion"}},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateRequiresUsersForKubernetesMode(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{
