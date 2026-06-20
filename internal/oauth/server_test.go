@@ -381,6 +381,89 @@ func TestNamespaceGoogleAccessTokenUsesStoredRefreshToken(t *testing.T) {
 	}
 }
 
+func TestNamespaceGoogleAccessTokenRequiresBrokerToken(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				BrokerToken: "broker-shared-token",
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Google: config.GoogleOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "service-a.google", "refresh_token", "stored-refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/google/access-token", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); !strings.Contains(got, "scia-oauth-broker") {
+		t.Fatalf("unexpected WWW-Authenticate header: %q", got)
+	}
+}
+
+func TestNamespaceGoogleAccessTokenAcceptsBrokerToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "refresh_token", "stored-refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "stored-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				BrokerToken: "broker-shared-token",
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Google: config.GoogleOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+							TokenURL:     tokenEndpoint.URL,
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "service-a.google", "refresh_token", "stored-refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/google/access-token", nil)
+	req.Header.Set("Authorization", "Bearer broker-shared-token")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "stored-access-token") {
+		t.Fatalf("token response was not proxied: %s", rec.Body.String())
+	}
+}
+
 func TestNamespaceGoogleAccessTokenUsesKubernetesUserSecret(t *testing.T) {
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {

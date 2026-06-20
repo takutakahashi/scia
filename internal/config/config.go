@@ -107,6 +107,7 @@ type IntegrationConfig struct {
 type OAuthConfig struct {
 	Listen      string                          `yaml:"listen"`
 	RedirectURL string                          `yaml:"redirectUrl"`
+	BrokerToken string                          `yaml:"brokerToken"`
 	Google      GoogleOAuthConfig               `yaml:"google"`
 	Namespaces  map[string]OAuthNamespaceConfig `yaml:"namespaces"`
 }

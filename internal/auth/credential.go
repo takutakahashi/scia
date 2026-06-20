@@ -185,7 +185,7 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 		if scope := cred.Params["scope"]; scope != "" {
 			form.Set("scope", scope)
 		}
-		return i.formToken(ctx, cred.ID, tokenBrokerURL, form)
+		return i.formToken(ctx, cred.ID, tokenBrokerURL, form, config.HeaderValueFromEnv(cred.Params["token_broker_token"]))
 	}
 	if clientID == "" || clientSecret == "" || refreshToken == "" {
 		return "", fmt.Errorf("credential %q requires client_id, client_secret, and refresh_token", cred.ID)
@@ -196,7 +196,7 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSecret)
 	form.Set("refresh_token", refreshToken)
-	return i.formToken(ctx, cred.ID, tokenURL, form)
+	return i.formToken(ctx, cred.ID, tokenURL, form, "")
 }
 
 func (i *Injector) googleClientValue(ctx context.Context, literal, secretRef string) (string, error) {
@@ -224,12 +224,15 @@ func (i *Injector) secretValue(ctx context.Context, cfg *config.Config, cred con
 	return "", nil
 }
 
-func (i *Injector) formToken(ctx context.Context, credentialID, tokenURL string, form url.Values) (string, error) {
+func (i *Injector) formToken(ctx context.Context, credentialID, tokenURL string, form url.Values, bearerToken string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewBufferString(form.Encode()))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
 
 	resp, err := i.client.Do(req)
 	if err != nil {

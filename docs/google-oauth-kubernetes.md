@@ -41,6 +41,7 @@ server:
       secretName: scia-oauth-alice
   oauth:
     redirectUrl: "http://localhost:18081/oauth/google/callback"
+    brokerToken: "env:SCIA_OAUTH_BROKER_TOKEN"
     google:
       credentialId: google-calendar
       clientId: "env:GOOGLE_OAUTH_CLIENT_ID"
@@ -83,11 +84,15 @@ To let a caller obtain a short-lived Google access token without receiving the
 refresh token or OAuth client secret, call the namespaced broker endpoint:
 
 ```sh
-curl -X POST http://localhost:18081/oauth/alice/google/access-token
+curl -H "Authorization: Bearer $SCIA_OAUTH_BROKER_TOKEN" \
+  -X POST http://localhost:18081/oauth/alice/google/access-token
 ```
 
 For namespaces that are also configured users, `scia` reads the refresh token from
 that user's Kubernetes Secret and forwards a refresh-token grant to Google.
+If `server.oauth.brokerToken` is configured, include the same bearer token on
+broker API calls such as `access-token`, `token`, `authorization-url`, and
+`revoke`.
 
 ## Proxy server
 
@@ -119,6 +124,8 @@ credentials:
     type: google-oauth-refresh-token
     params:
       user: alice
+      token_broker_url: "http://scia-oauth:8081/oauth/alice/google/token"
+      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
 
 rules:
   - name: inject-alice-google-calendar-token

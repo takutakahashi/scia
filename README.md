@@ -93,6 +93,7 @@ server:
   mode: "oauth"
   oauth:
     listen: "127.0.0.1:8081"
+    brokerToken: "env:SCIA_OAUTH_BROKER_TOKEN"
     namespaces:
       service-a:
         google:
@@ -130,6 +131,14 @@ Google broker endpoints:
 - `POST /oauth/{namespace}/google/access-token` exchanges the refresh token stored by scia for a Google access token.
 - `POST /oauth/{namespace}/google/revoke` forwards a revoke request to Google.
 
+When `server.oauth.brokerToken` is set, broker API requests to
+`authorization-url`, `token`, `access-token`, and `revoke` must include
+`Authorization: Bearer <token>`. `env:` values are expanded, so the OAuth server
+and proxy can share a Kubernetes Secret or deployment environment variable
+without putting the token in config files. The browser redirect endpoint
+`/oauth/{namespace}/google/start` is not protected by this header because
+browsers do not attach service-to-service bearer tokens during redirects.
+
 The proxy can also reference the namespaced Google credential ID directly:
 
 ```yaml
@@ -153,6 +162,7 @@ credentials:
     type: google-oauth-refresh-token
     params:
       token_broker_url: "http://scia-oauth:8081/oauth/service-a/google/token"
+      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
 ```
 
 ## Configuration

@@ -120,6 +120,9 @@ func TestGoogleRefreshTokenUsesTokenBroker(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method: %s", r.Method)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer broker-shared-token" {
+			t.Fatalf("unexpected broker authorization header: %q", got)
+		}
 		if err := r.ParseForm(); err != nil {
 			t.Fatal(err)
 		}
@@ -139,8 +142,9 @@ func TestGoogleRefreshTokenUsesTokenBroker(t *testing.T) {
 				ID:   "google",
 				Type: "google-oauth-refresh-token",
 				Params: map[string]string{
-					"refresh_token":    "broker-refresh-token",
-					"token_broker_url": tokenEndpoint.URL,
+					"refresh_token":      "broker-refresh-token",
+					"token_broker_url":   tokenEndpoint.URL,
+					"token_broker_token": "broker-shared-token",
 				},
 			},
 		},
