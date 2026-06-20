@@ -482,15 +482,15 @@ type tokenResponse struct {
 }
 
 type slackTokenResponse struct {
-	OK           *bool            `json:"ok"`
-	AccessToken  string           `json:"access_token"`
-	RefreshToken string           `json:"refresh_token"`
-	TokenType    string           `json:"token_type"`
-	Scope        string           `json:"scope"`
-	ExpiresIn    int64            `json:"expires_in"`
-	AuthedUser   slackAuthedUser  `json:"authed_user"`
-	Error        string           `json:"error"`
-	ErrorDesc    string           `json:"error_description"`
+	OK           *bool           `json:"ok"`
+	AccessToken  string          `json:"access_token"`
+	RefreshToken string          `json:"refresh_token"`
+	TokenType    string          `json:"token_type"`
+	Scope        string          `json:"scope"`
+	ExpiresIn    int64           `json:"expires_in"`
+	AuthedUser   slackAuthedUser `json:"authed_user"`
+	Error        string          `json:"error"`
+	ErrorDesc    string          `json:"error_description"`
 }
 
 type slackAuthedUser struct {
