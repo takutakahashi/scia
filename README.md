@@ -7,7 +7,7 @@ SaaS credential injector for agents.
 ## Features
 
 - Forward proxy for HTTP and HTTPS requests with credential injection.
-- Credential types: bearer token, basic auth, static header, OAuth2 client credentials, and Google OAuth refresh tokens.
+- Credential types: bearer token, basic auth, static header, OAuth2 client credentials, Google OAuth refresh tokens, and Notion OAuth refresh tokens.
 - Policy rules by host, method, and path with `allow`, `deny`, or `approval` actions.
 - Blocking approval flow exposed through local admin endpoints.
 - Reloadable configuration through a provider interface. The first adapter is YAML from the filesystem; database and AWS Secrets Manager providers can be added behind the same `config.Provider` interface.
@@ -72,6 +72,25 @@ server:
 
 Open `http://localhost:8081/` to start Google authorization for configured Google credentials.
 
+Notion public connections use the same helper UI. Configure the Notion public
+connection redirect URI to match `server.oauth.notion.redirectUrl`, for example:
+
+```yaml
+server:
+  oauth:
+    notion:
+      credentialId: notion-workspace
+      clientId: "env:NOTION_OAUTH_CLIENT_ID"
+      clientSecret: "env:NOTION_OAUTH_CLIENT_SECRET"
+      redirectUrl: "http://localhost:8081/oauth/notion/callback"
+      notionVersion: "2026-03-11"
+```
+
+Open `http://localhost:8081/` and choose the Notion credential. `scia` sends
+the authorization request to Notion with `owner=user`, exchanges the returned
+code with JSON + HTTP Basic authentication, and stores the resulting
+`refresh_token`.
+
 OAuth callback refresh tokens are stored in the SQLite secret store by default:
 
 ```yaml
@@ -80,7 +99,12 @@ server:
     sqlitePath: "data/scia-secrets.db"
 ```
 
-The SQLite file stores values by credential ID and key. For Google credentials, callback stores `refresh_token`; request-time injection reads `params.refresh_token` first and falls back to the secret store.
+The SQLite file stores values by credential ID and key. For Google credentials,
+callback stores `refresh_token`; request-time injection reads
+`params.refresh_token` first and falls back to the secret store. For Notion
+credentials, request-time injection prefers the secret store because Notion
+refreshes return a new `refresh_token`, which `scia` stores for the next
+refresh.
 
 The SQLite store is local persistence, not encryption. Keep the database path on a protected volume and restrict filesystem access to the `scia` process.
 
@@ -101,6 +125,10 @@ server:
           clientSecretRef: "secret:service-a.google.client-secret"
           scope: "https://www.googleapis.com/auth/calendar"
           redirectUrl: "https://service-a.example.com/oauth/callback"
+        notion:
+          clientIdSecretRef: "secret:service-a.notion.client-id"
+          clientSecretRef: "secret:service-a.notion.client-secret"
+          redirectUrl: "https://service-a.example.com/oauth/notion/callback"
 ```
 
 `server.mode` is exclusive:
@@ -130,6 +158,14 @@ Google broker endpoints:
 - `POST /oauth/{namespace}/google/token` forwards a refresh-token or authorization-code request to Google with the configured client ID and client secret injected by scia.
 - `POST /oauth/{namespace}/google/access-token` exchanges the refresh token stored by scia for a Google access token.
 - `POST /oauth/{namespace}/google/revoke` forwards a revoke request to Google.
+
+Notion broker endpoints:
+
+- `GET /oauth/{namespace}/notion/authorization-url?state=...` returns a generated Notion authorization URL.
+- `GET /oauth/{namespace}/notion/start` redirects to the generated Notion authorization URL.
+- `POST /oauth/{namespace}/notion/token` forwards a refresh-token or authorization-code request to Notion with the configured client ID and client secret injected by scia.
+- `POST /oauth/{namespace}/notion/access-token` exchanges the refresh token stored by scia for a Notion access token and stores any rotated refresh token returned by Notion.
+- `POST /oauth/{namespace}/notion/revoke` forwards a revoke request to Notion.
 
 When `server.oauth.brokerToken` is set, broker API requests to
 `authorization-url`, `token`, `access-token`, and `revoke` must include
@@ -162,6 +198,11 @@ credentials:
     type: google-oauth-refresh-token
     params:
       token_broker_url: "http://scia-oauth:8081/oauth/service-a/google/token"
+      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
+  - id: service-a.notion
+    type: notion-oauth-refresh-token
+    params:
+      token_broker_url: "http://scia-oauth:8081/oauth/service-a/notion/token"
       token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
 ```
 
@@ -196,6 +237,37 @@ rules:
 ```
 
 The `credentials` entry is optional when `server.oauth.google.credentialId` is configured; it is useful when you want to override per-credential params such as `scope`, `token_url`, or `refresh_token`. `scia` exchanges the refresh token at `https://oauth2.googleapis.com/token`, caches the returned access token until it is close to expiry, and injects it as `Authorization: Bearer <access_token>` only for matching rules.
+
+Notion OAuth client credentials can be configured once under
+`server.oauth.notion`. The `credentials` entry is optional when
+`server.oauth.notion.credentialId` is configured:
+
+```yaml
+server:
+  oauth:
+    notion:
+      credentialId: notion-workspace
+      clientId: "env:NOTION_OAUTH_CLIENT_ID"
+      clientSecret: "env:NOTION_OAUTH_CLIENT_SECRET"
+      redirectUrl: "http://localhost:8081/oauth/notion/callback"
+
+credentials:
+  - id: notion-workspace
+    type: notion-oauth-refresh-token
+    params: {}
+
+rules:
+  - name: inject-notion-token
+    hosts: ["api.notion.com"]
+    paths: ["/v1/*"]
+    action: allow
+    credentials: ["notion-workspace"]
+```
+
+`scia` exchanges Notion refresh tokens at
+`https://api.notion.com/v1/oauth/token`, caches the returned access token, stores
+rotated refresh tokens, and injects `Authorization: Bearer <access_token>` plus a
+default `Notion-Version: 2026-03-11` header for matching rules.
 
 ## Build
 

@@ -119,6 +119,46 @@ func TestGoogleOAuthStartUsesConfigGoogleClient(t *testing.T) {
 	assertQueryValue(t, query, "scope", "https://www.googleapis.com/auth/calendar")
 }
 
+func TestNotionOAuthStartRedirectsToNotion(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Notion: config.NotionOAuthConfig{
+					CredentialID: "notion-workspace",
+					ClientID:     "notion-client-id",
+					ClientSecret: "notion-client-secret",
+					RedirectURL:  "http://localhost:8081/oauth/notion/callback",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/notion/start?credential=notion-workspace", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.HasPrefix(location, notionAuthURL+"?") {
+		t.Fatalf("unexpected redirect: %s", location)
+	}
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	assertQueryValue(t, query, "client_id", "notion-client-id")
+	assertQueryValue(t, query, "redirect_uri", "http://localhost:8081/oauth/notion/callback")
+	assertQueryValue(t, query, "response_type", "code")
+	assertQueryValue(t, query, "owner", "user")
+	if query.Get("state") == "" {
+		t.Fatal("missing state")
+	}
+}
+
 func TestGoogleOAuthCallbackShowsRefreshToken(t *testing.T) {
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
@@ -223,6 +263,64 @@ func TestGoogleOAuthCallbackStoresConfigGoogleRefreshToken(t *testing.T) {
 	}
 }
 
+func TestNotionOAuthCallbackUsesJSONBasicAuthAndStoresRefreshToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("unexpected content type: %q", got)
+		}
+		if got := r.Header.Get("Notion-Version"); got != notionVersion {
+			t.Fatalf("unexpected Notion-Version: %q", got)
+		}
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "notion-client-id" || password != "notion-client-secret" {
+			t.Fatalf("unexpected basic auth: username=%q password=%q ok=%v", username, password, ok)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["grant_type"] != "authorization_code" || body["code"] != "auth-code" || body["redirect_uri"] != "http://localhost:8081/oauth/notion/callback" {
+			t.Fatalf("unexpected token request body: %#v", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "notion-access-token",
+			"refresh_token": "notion-refresh-token",
+			"token_type":    "bearer",
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Notion: config.NotionOAuthConfig{
+					CredentialID:  "notion-workspace",
+					ClientID:      "notion-client-id",
+					ClientSecret:  "notion-client-secret",
+					TokenURL:      tokenEndpoint.URL,
+					RedirectURL:   "http://localhost:8081/oauth/notion/callback",
+					NotionVersion: notionVersion,
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	srv := NewServer(store, secretStore, slog.Default())
+	state := "test-state"
+	srv.states.Store(state, stateInfo{CredentialID: "notion-workspace", CreatedAt: time.Now()})
+	req := httptest.NewRequest(http.MethodGet, "/oauth/notion/callback?state="+state+"&code=auth-code", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "notion-workspace", "refresh_token"); err != nil || !ok || got != "notion-refresh-token" {
+		t.Fatalf("refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
 func TestNamespaceGoogleAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{
@@ -265,6 +363,53 @@ func TestNamespaceGoogleAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	assertQueryValue(t, query, "client_id", "secret-client-id")
 	assertQueryValue(t, query, "redirect_uri", "https://service-a.example.com/oauth/callback")
 	assertQueryValue(t, query, "scope", "https://www.googleapis.com/auth/calendar")
+	assertQueryValue(t, query, "state", "state-1")
+	if strings.Contains(body["authorization_url"], "client-secret") {
+		t.Fatalf("authorization URL leaked client secret: %s", body["authorization_url"])
+	}
+}
+
+func TestNamespaceNotionAuthorizationURLUsesSecretRefClientID(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Notion: config.NotionOAuthConfig{
+							ClientIDSecretRef: "service-a.notion.client-id",
+							ClientSecretRef:   "service-a.notion.client-secret",
+							RedirectURL:       "https://service-a.example.com/oauth/notion/callback",
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "service-a.notion", "client-id", "secret-client-id"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/service-a/notion/authorization-url?state=state-1", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(body["authorization_url"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	assertQueryValue(t, query, "client_id", "secret-client-id")
+	assertQueryValue(t, query, "redirect_uri", "https://service-a.example.com/oauth/notion/callback")
+	assertQueryValue(t, query, "owner", "user")
 	assertQueryValue(t, query, "state", "state-1")
 	if strings.Contains(body["authorization_url"], "client-secret") {
 		t.Fatalf("authorization URL leaked client secret: %s", body["authorization_url"])
@@ -378,6 +523,72 @@ func TestNamespaceGoogleAccessTokenUsesStoredRefreshToken(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "stored-access-token") {
 		t.Fatalf("token response was not proxied: %s", rec.Body.String())
+	}
+}
+
+func TestNamespaceNotionAccessTokenUsesStoredRefreshTokenAndStoresRotatedRefreshToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Notion-Version"); got != notionVersion {
+			t.Fatalf("unexpected Notion-Version: %q", got)
+		}
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "secret-client-id" || password != "secret-client-secret" {
+			t.Fatalf("unexpected basic auth: username=%q password=%q ok=%v", username, password, ok)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["grant_type"] != "refresh_token" || body["refresh_token"] != "stored-refresh-token" {
+			t.Fatalf("unexpected token request body: %#v", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "stored-access-token",
+			"refresh_token": "rotated-refresh-token",
+			"token_type":    "bearer",
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Notion: config.NotionOAuthConfig{
+							ClientIDSecretRef: "service-a.notion.client-id",
+							ClientSecretRef:   "service-a.notion.client-secret",
+							TokenURL:          tokenEndpoint.URL,
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	for key, value := range map[string]string{
+		"client-id":     "secret-client-id",
+		"client-secret": "secret-client-secret",
+		"refresh_token": "stored-refresh-token",
+	} {
+		if err := secretStore.Put(context.Background(), "service-a.notion", key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/notion/access-token", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "stored-access-token") {
+		t.Fatalf("token response was not proxied: %s", rec.Body.String())
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "service-a.notion", "refresh_token"); err != nil || !ok || got != "rotated-refresh-token" {
+		t.Fatalf("rotated refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
 	}
 }
 

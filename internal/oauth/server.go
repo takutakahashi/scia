@@ -25,6 +25,10 @@ import (
 const googleAuthURL = "https://accounts.google.com/o/oauth2/v2/auth"
 const googleTokenURL = "https://oauth2.googleapis.com/token"
 const googleRevokeURL = "https://oauth2.googleapis.com/revoke"
+const notionAuthURL = "https://api.notion.com/v1/oauth/authorize"
+const notionTokenURL = "https://api.notion.com/v1/oauth/token"
+const notionRevokeURL = "https://api.notion.com/v1/oauth/revoke"
+const notionVersion = "2026-03-11"
 
 type Server struct {
 	store   *config.Store
@@ -47,6 +51,12 @@ type googleOption struct {
 	Source       string
 }
 
+type notionOption struct {
+	User         string
+	CredentialID string
+	Source       string
+}
+
 func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logger) *Server {
 	if secretStore == nil {
 		secretStore = secrets.NoopStore{}
@@ -65,6 +75,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/_scia/healthz", s.healthz)
 	mux.HandleFunc("/oauth/google/start", s.startGoogle)
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
+	mux.HandleFunc("/oauth/notion/start", s.startNotion)
+	mux.HandleFunc("/oauth/notion/callback", s.notionCallback)
 	mux.HandleFunc("/oauth/", s.namespaceOAuth)
 	return mux
 }
@@ -83,8 +95,9 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	}
 	options := s.googleOptions(s.store.Get())
 	data := struct {
-		Options []googleOption
-	}{Options: options}
+		GoogleOptions []googleOption
+		NotionOptions []notionOption
+	}{GoogleOptions: options, NotionOptions: s.notionOptions(s.store.Get())}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = indexTemplate.Execute(w, data)
 }
@@ -185,6 +198,7 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := struct {
+		Provider     string
 		User         string
 		CredentialID string
 		RefreshToken string
@@ -192,6 +206,113 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		ExpiresIn    int64
 		Stored       bool
 	}{
+		Provider:     "Google",
+		User:         info.User,
+		CredentialID: info.CredentialID,
+		RefreshToken: token.RefreshToken,
+		AccessToken:  token.AccessToken,
+		ExpiresIn:    token.ExpiresIn,
+		Stored:       true,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = callbackTemplate.Execute(w, data)
+}
+
+func (s *Server) startNotion(w http.ResponseWriter, r *http.Request) {
+	credentialID := r.URL.Query().Get("credential")
+	userID := r.URL.Query().Get("user")
+	cfg := s.store.Get()
+	if cfg.Server.Secrets.Mode == "kubernetes" {
+		if userID == "" {
+			http.Error(w, "user is required in kubernetes mode", http.StatusBadRequest)
+			return
+		}
+		if !cfg.HasUser(userID) {
+			http.Error(w, "unknown user", http.StatusBadRequest)
+			return
+		}
+	}
+	cred, ok := s.notionCredential(cfg, credentialID)
+	if !ok {
+		http.Error(w, "unknown notion credential", http.StatusBadRequest)
+		return
+	}
+	clientID, err := s.notionClientID(r.Context(), cfg, cred)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if clientID == "" {
+		http.Error(w, "credential is missing client_id", http.StatusBadRequest)
+		return
+	}
+	state, err := randomState()
+	if err != nil {
+		http.Error(w, "failed to create state", http.StatusInternalServerError)
+		return
+	}
+	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, CreatedAt: time.Now()})
+	authURL := notionAuthURL
+	if notionCfg, ok := config.NotionOAuthConfigForCredential(cfg, cred.ID); ok && notionCfg.AuthURL != "" {
+		authURL = notionCfg.AuthURL
+	}
+	q := url.Values{}
+	q.Set("client_id", clientID)
+	q.Set("redirect_uri", s.providerRedirectURL(r, "notion"))
+	q.Set("response_type", "code")
+	q.Set("owner", "user")
+	q.Set("state", state)
+	http.Redirect(w, r, authURL+"?"+q.Encode(), http.StatusFound)
+}
+
+func (s *Server) notionCallback(w http.ResponseWriter, r *http.Request) {
+	if errText := r.URL.Query().Get("error"); errText != "" {
+		http.Error(w, errText, http.StatusBadRequest)
+		return
+	}
+	state := r.URL.Query().Get("state")
+	rawInfo, ok := s.states.LoadAndDelete(state)
+	if !ok {
+		http.Error(w, "invalid state", http.StatusBadRequest)
+		return
+	}
+	info := rawInfo.(stateInfo)
+	if time.Since(info.CreatedAt) > 10*time.Minute {
+		http.Error(w, "state expired", http.StatusBadRequest)
+		return
+	}
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "missing code", http.StatusBadRequest)
+		return
+	}
+	cfg := s.store.Get()
+	cred, ok := s.notionCredential(cfg, info.CredentialID)
+	if !ok {
+		http.Error(w, "credential disappeared", http.StatusBadRequest)
+		return
+	}
+	token, err := s.exchangeNotionCode(r.Context(), r, cred, code)
+	if err != nil {
+		s.logger.Error("notion oauth code exchange failed", "error", err)
+		http.Error(w, "token exchange failed", http.StatusBadGateway)
+		return
+	}
+	if err := s.secrets.Put(r.Context(), s.storageUserID(cfg, info), "refresh_token", token.RefreshToken); err != nil {
+		s.logger.Error("failed to store notion refresh token", "error", err, "credential", info.CredentialID, "user", info.User)
+		http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
+		return
+	}
+	data := struct {
+		Provider     string
+		User         string
+		CredentialID string
+		RefreshToken string
+		AccessToken  string
+		ExpiresIn    int64
+		Stored       bool
+	}{
+		Provider:     "Notion",
 		User:         info.User,
 		CredentialID: info.CredentialID,
 		RefreshToken: token.RefreshToken,
@@ -262,7 +383,77 @@ func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.
 	return body, nil
 }
 
+func (s *Server) exchangeNotionCode(ctx context.Context, r *http.Request, cred config.CredentialConfig, code string) (tokenResponse, error) {
+	cfg := s.store.Get()
+	tokenURL := cred.Params["token_url"]
+	notionCfg, hasNotionCfg := config.NotionOAuthConfigForCredential(cfg, cred.ID)
+	if tokenURL == "" && hasNotionCfg {
+		tokenURL = notionCfg.TokenURL
+	}
+	if tokenURL == "" {
+		tokenURL = notionTokenURL
+	}
+	clientID, err := s.notionClientID(ctx, cfg, cred)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	clientSecret, err := s.notionClientSecret(ctx, cfg, cred)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	body, err := json.Marshal(map[string]string{
+		"grant_type":   "authorization_code",
+		"code":         code,
+		"redirect_uri": s.providerRedirectURL(r, "notion"),
+	})
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(body))
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Notion-Version", notionConfigVersion(notionCfg))
+	req.SetBasicAuth(clientID, clientSecret)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	defer resp.Body.Close()
+	var token tokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		return tokenResponse{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		if token.Error != "" {
+			return tokenResponse{}, fmt.Errorf("%s: %s", token.Error, token.ErrorDesc)
+		}
+		return tokenResponse{}, fmt.Errorf("token endpoint returned %s", resp.Status)
+	}
+	if token.RefreshToken == "" {
+		return tokenResponse{}, fmt.Errorf("notion did not return a refresh_token")
+	}
+	return token, nil
+}
+
 func (s *Server) redirectURL(r *http.Request) string {
+	return s.providerRedirectURL(r, "google")
+}
+
+func (s *Server) providerRedirectURL(r *http.Request, provider string) string {
+	cfg := s.store.Get()
+	switch provider {
+	case "google":
+		if redirect := cfg.Server.OAuth.Google.RedirectURL; redirect != "" {
+			return redirect
+		}
+	case "notion":
+		if redirect := cfg.Server.OAuth.Notion.RedirectURL; redirect != "" {
+			return redirect
+		}
+	}
 	if redirect := s.store.Get().Server.OAuth.RedirectURL; redirect != "" {
 		return redirect
 	}
@@ -273,26 +464,43 @@ func (s *Server) redirectURL(r *http.Request) string {
 	if strings.HasPrefix(host, ":") {
 		host = "localhost" + host
 	}
-	return "http://" + host + "/oauth/google/callback"
+	return "http://" + host + "/oauth/" + provider + "/callback"
 }
 
 func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/oauth/"), "/")
-	if len(parts) != 3 || parts[1] != "google" {
+	if len(parts) != 3 {
 		http.NotFound(w, r)
 		return
 	}
-	namespace, action := parts[0], parts[2]
-	credentialID := config.NamespaceGoogleCredentialID(namespace)
+	namespace, provider, action := parts[0], parts[1], parts[2]
 	cfg := s.store.Get()
-	googleCfg, ok := config.GoogleOAuthConfigForCredential(cfg, credentialID)
-	if !ok {
-		http.Error(w, "unknown google namespace", http.StatusNotFound)
-		return
-	}
 	if requiresBrokerAuth(action) && !s.authorizeBrokerRequest(w, r, cfg) {
 		return
 	}
+	switch provider {
+	case "google":
+		credentialID := config.NamespaceGoogleCredentialID(namespace)
+		googleCfg, ok := config.GoogleOAuthConfigForCredential(cfg, credentialID)
+		if !ok {
+			http.Error(w, "unknown google namespace", http.StatusNotFound)
+			return
+		}
+		s.namespaceGoogleOAuth(w, r, namespace, credentialID, action, googleCfg)
+	case "notion":
+		credentialID := config.NamespaceNotionCredentialID(namespace)
+		notionCfg, ok := config.NotionOAuthConfigForCredential(cfg, credentialID)
+		if !ok {
+			http.Error(w, "unknown notion namespace", http.StatusNotFound)
+			return
+		}
+		s.namespaceNotionOAuth(w, r, namespace, credentialID, action, notionCfg)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) namespaceGoogleOAuth(w http.ResponseWriter, r *http.Request, namespace, credentialID, action string, googleCfg config.GoogleOAuthConfig) {
 	switch action {
 	case "authorization-url":
 		if r.Method != http.MethodGet {
@@ -324,6 +532,43 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.namespaceGoogleRevoke(w, r, googleCfg)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) namespaceNotionOAuth(w http.ResponseWriter, r *http.Request, namespace, credentialID, action string, notionCfg config.NotionOAuthConfig) {
+	switch action {
+	case "authorization-url":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceNotionAuthorizationURL(w, r, namespace, credentialID, notionCfg, false)
+	case "start":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceNotionAuthorizationURL(w, r, namespace, credentialID, notionCfg, true)
+	case "token":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceNotionToken(w, r, notionCfg)
+	case "access-token":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceNotionAccessToken(w, r, namespace, credentialID, notionCfg)
+	case "revoke":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.namespaceNotionRevoke(w, r, notionCfg)
 	default:
 		http.NotFound(w, r)
 	}
@@ -425,6 +670,62 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 	})
 }
 
+func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, notionCfg config.NotionOAuthConfig, redirect bool) {
+	clientID, err := s.notionClientValue(r.Context(), notionCfg.ClientID, notionCfg.ClientIDSecretRef)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if clientID == "" {
+		http.Error(w, "notion namespace is missing client id", http.StatusBadRequest)
+		return
+	}
+	authURL := notionCfg.AuthURL
+	if authURL == "" {
+		authURL = notionAuthURL
+	}
+	redirectURI := r.URL.Query().Get("redirect_uri")
+	if redirectURI == "" {
+		redirectURI = notionCfg.RedirectURL
+	}
+	if redirectURI == "" {
+		redirectURI = s.providerRedirectURL(r, "notion")
+	}
+	state := r.URL.Query().Get("state")
+	if state == "" && redirect {
+		generated, err := randomState()
+		if err != nil {
+			http.Error(w, "failed to create state", http.StatusInternalServerError)
+			return
+		}
+		state = generated
+	}
+	q := url.Values{}
+	q.Set("client_id", clientID)
+	q.Set("redirect_uri", redirectURI)
+	q.Set("response_type", "code")
+	q.Set("owner", "user")
+	if state != "" {
+		q.Set("state", state)
+	}
+	location := authURL + "?" + q.Encode()
+	if redirect {
+		s.states.Store(state, stateInfo{
+			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+			CredentialID: credentialID,
+			CreatedAt:    time.Now(),
+		})
+		http.Redirect(w, r, location, http.StatusFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"credential_id":     credentialID,
+		"authorization_url": location,
+		"auth_url":          authURL,
+		"redirect_uri":      redirectURI,
+	})
+}
+
 func (s *Server) namespaceGoogleToken(w http.ResponseWriter, r *http.Request, googleCfg config.GoogleOAuthConfig) {
 	form, err := parseFormOrJSON(r)
 	if err != nil {
@@ -505,6 +806,65 @@ func (s *Server) namespaceGoogleAccessToken(w http.ResponseWriter, r *http.Reque
 	s.forwardForm(w, r, tokenURL, upstream)
 }
 
+func (s *Server) namespaceNotionToken(w http.ResponseWriter, r *http.Request, notionCfg config.NotionOAuthConfig) {
+	form, err := parseFormOrJSON(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	grantType := form.Get("grant_type")
+	if grantType == "" {
+		grantType = "refresh_token"
+	}
+	if grantType != "refresh_token" && grantType != "authorization_code" {
+		http.Error(w, "unsupported grant_type", http.StatusBadRequest)
+		return
+	}
+	body := map[string]string{"grant_type": grantType}
+	if grantType == "refresh_token" {
+		if form.Get("refresh_token") == "" {
+			http.Error(w, "refresh_token is required", http.StatusBadRequest)
+			return
+		}
+		body["refresh_token"] = form.Get("refresh_token")
+	} else {
+		if form.Get("code") == "" || form.Get("redirect_uri") == "" {
+			http.Error(w, "code and redirect_uri are required", http.StatusBadRequest)
+			return
+		}
+		body["code"] = form.Get("code")
+		body["redirect_uri"] = form.Get("redirect_uri")
+	}
+	tokenURL := notionCfg.TokenURL
+	if tokenURL == "" {
+		tokenURL = notionTokenURL
+	}
+	s.forwardNotionJSON(w, r, tokenURL, notionCfg, body, "")
+}
+
+func (s *Server) namespaceNotionAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string, notionCfg config.NotionOAuthConfig) {
+	cfg := s.store.Get()
+	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
+	refreshToken, ok, err := s.secrets.Get(r.Context(), storageID, "refresh_token")
+	if err != nil {
+		s.logger.Error("failed to load notion refresh token", "error", err, "credential", credentialID, "storage", storageID)
+		http.Error(w, "failed to load refresh token", http.StatusInternalServerError)
+		return
+	}
+	if !ok || refreshToken == "" {
+		http.Error(w, "refresh_token is not registered", http.StatusNotFound)
+		return
+	}
+	tokenURL := notionCfg.TokenURL
+	if tokenURL == "" {
+		tokenURL = notionTokenURL
+	}
+	s.forwardNotionJSON(w, r, tokenURL, notionCfg, map[string]string{
+		"grant_type":    "refresh_token",
+		"refresh_token": refreshToken,
+	}, storageID)
+}
+
 func (s *Server) namespaceGoogleRevoke(w http.ResponseWriter, r *http.Request, googleCfg config.GoogleOAuthConfig) {
 	form, err := parseFormOrJSON(r)
 	if err != nil {
@@ -522,6 +882,23 @@ func (s *Server) namespaceGoogleRevoke(w http.ResponseWriter, r *http.Request, g
 	upstream := url.Values{}
 	upstream.Set("token", form.Get("token"))
 	s.forwardForm(w, r, revokeURL, upstream)
+}
+
+func (s *Server) namespaceNotionRevoke(w http.ResponseWriter, r *http.Request, notionCfg config.NotionOAuthConfig) {
+	form, err := parseFormOrJSON(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if form.Get("token") == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+	revokeURL := notionCfg.RevokeURL
+	if revokeURL == "" {
+		revokeURL = notionRevokeURL
+	}
+	s.forwardNotionJSON(w, r, revokeURL, notionCfg, map[string]string{"token": form.Get("token")}, "")
 }
 
 func (s *Server) forwardForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values) {
@@ -542,6 +919,56 @@ func (s *Server) forwardForm(w http.ResponseWriter, r *http.Request, endpoint st
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func (s *Server) forwardNotionJSON(w http.ResponseWriter, r *http.Request, endpoint string, notionCfg config.NotionOAuthConfig, body map[string]string, storageID string) {
+	clientID, clientSecret, err := s.notionClientPair(r.Context(), notionCfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Notion-Version", notionConfigVersion(notionCfg))
+	req.SetBasicAuth(clientID, clientSecret)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for _, value := range resp.Header.Values("Content-Type") {
+		w.Header().Add("Content-Type", value)
+	}
+	if storageID == "" || resp.StatusCode < 200 || resp.StatusCode > 299 {
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+	var token tokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		http.Error(w, "failed to decode upstream token response", http.StatusBadGateway)
+		return
+	}
+	if token.RefreshToken != "" {
+		if err := s.secrets.Put(r.Context(), storageID, "refresh_token", token.RefreshToken); err != nil {
+			s.logger.Error("failed to store rotated notion refresh token", "error", err, "storage", storageID)
+			http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
+			return
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_ = json.NewEncoder(w).Encode(token)
 }
 
 func (s *Server) googleOptions(cfg *config.Config) []googleOption {
@@ -597,6 +1024,58 @@ func (s *Server) googleOptions(cfg *config.Config) []googleOption {
 	return options
 }
 
+func (s *Server) notionOptions(cfg *config.Config) []notionOption {
+	var options []notionOption
+	appendOption := func(userID, credentialID, source string) {
+		options = append(options, notionOption{
+			User:         userID,
+			CredentialID: credentialID,
+			Source:       source,
+		})
+	}
+	configID := cfg.NotionOAuthCredentialID()
+	hasConfigClient := cfg.Server.OAuth.Notion.HasClientConfig()
+	hasExplicitConfigCredential := false
+	for _, cred := range cfg.Credentials {
+		if cred.Type == "notion-oauth-refresh-token" && cred.ID == configID {
+			hasExplicitConfigCredential = true
+			break
+		}
+	}
+	if hasConfigClient && !hasExplicitConfigCredential {
+		if cfg.Server.Secrets.Mode == "kubernetes" {
+			for userID := range cfg.Server.Users {
+				appendOption(userID, configID, "server.oauth.notion")
+			}
+		} else {
+			appendOption("", configID, "server.oauth.notion")
+		}
+	}
+	for _, cred := range cfg.Credentials {
+		if cred.Type == "notion-oauth-refresh-token" {
+			userID := config.CredentialUserID(cfg, cred)
+			if cfg.Server.Secrets.Mode == "kubernetes" && userID == cred.ID {
+				for configuredUserID := range cfg.Server.Users {
+					appendOption(configuredUserID, cred.ID, "credentials")
+				}
+				continue
+			}
+			appendOption(userID, cred.ID, "credentials")
+		}
+	}
+	for namespace, ns := range cfg.Server.OAuth.Namespaces {
+		if ns.Notion.HasClientConfig() {
+			credentialID := config.NamespaceNotionCredentialID(namespace)
+			if cfg.Server.Secrets.Mode == "kubernetes" && cfg.HasUser(namespace) {
+				appendOption(namespace, credentialID, "server.oauth.namespaces."+namespace+".notion")
+			} else if cfg.Server.Secrets.Mode != "kubernetes" {
+				appendOption("", credentialID, "server.oauth.namespaces."+namespace+".notion")
+			}
+		}
+	}
+	return options
+}
+
 func (s *Server) storageUserID(cfg *config.Config, info stateInfo) string {
 	if cfg.Server.Secrets.Mode == "kubernetes" {
 		return info.User
@@ -618,6 +1097,14 @@ func (s *Server) namespaceStorageID(cfg *config.Config, namespace, credentialID 
 func (s *Server) googleCredential(cfg *config.Config, credentialID string) (config.CredentialConfig, bool) {
 	cred, ok := config.CredentialByID(cfg, credentialID)
 	if !ok || cred.Type != "google-oauth-refresh-token" {
+		return config.CredentialConfig{}, false
+	}
+	return cred, true
+}
+
+func (s *Server) notionCredential(cfg *config.Config, credentialID string) (config.CredentialConfig, bool) {
+	cred, ok := config.CredentialByID(cfg, credentialID)
+	if !ok || cred.Type != "notion-oauth-refresh-token" {
 		return config.CredentialConfig{}, false
 	}
 	return cred, true
@@ -660,6 +1147,53 @@ func (s *Server) googleClientPair(ctx context.Context, googleCfg config.GoogleOA
 	return clientID, clientSecret, nil
 }
 
+func (s *Server) notionClientID(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	if value := config.HeaderValueFromEnv(cred.Params["client_id"]); value != "" {
+		return value, nil
+	}
+	notionCfg, ok := config.NotionOAuthConfigForCredential(cfg, cred.ID)
+	if !ok {
+		return "", nil
+	}
+	return s.notionClientValue(ctx, notionCfg.ClientID, notionCfg.ClientIDSecretRef)
+}
+
+func (s *Server) notionClientSecret(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	if value := config.HeaderValueFromEnv(cred.Params["client_secret"]); value != "" {
+		return value, nil
+	}
+	notionCfg, ok := config.NotionOAuthConfigForCredential(cfg, cred.ID)
+	if !ok {
+		return "", nil
+	}
+	return s.notionClientValue(ctx, notionCfg.ClientSecret, notionCfg.ClientSecretRef)
+}
+
+func (s *Server) notionClientPair(ctx context.Context, notionCfg config.NotionOAuthConfig) (string, string, error) {
+	clientID, err := s.notionClientValue(ctx, notionCfg.ClientID, notionCfg.ClientIDSecretRef)
+	if err != nil {
+		return "", "", err
+	}
+	clientSecret, err := s.notionClientValue(ctx, notionCfg.ClientSecret, notionCfg.ClientSecretRef)
+	if err != nil {
+		return "", "", err
+	}
+	if clientID == "" || clientSecret == "" {
+		return "", "", fmt.Errorf("notion namespace requires client id and client secret")
+	}
+	return clientID, clientSecret, nil
+}
+
+func (s *Server) notionClientValue(ctx context.Context, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, s.secrets, secretRef)
+}
+
 func (s *Server) googleClientValue(ctx context.Context, literal, secretRef string) (string, error) {
 	if value := config.HeaderValueFromEnv(literal); value != "" {
 		return value, nil
@@ -679,6 +1213,13 @@ func googleScope(cfg *config.Config, cred config.CredentialConfig) string {
 		return googleCfg.Scope
 	}
 	return ""
+}
+
+func notionConfigVersion(notionCfg config.NotionOAuthConfig) string {
+	if notionCfg.NotionVersion != "" {
+		return notionCfg.NotionVersion
+	}
+	return notionVersion
 }
 
 func queryDefault(r *http.Request, key, fallback string) string {
@@ -752,8 +1293,8 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
 </head>
 <body>
   <h1>scia OAuth</h1>
-  {{if .Options}}
-    {{range .Options}}
+  {{if or .GoogleOptions .NotionOptions}}
+    {{range .GoogleOptions}}
       <div class="item">
         <div><strong>{{.CredentialID}}</strong>{{if .User}} for user <code>{{.User}}</code>{{end}}</div>
         <p class="muted"><code>{{.Scope}}</code></p>
@@ -761,8 +1302,15 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
         <a class="button" href="/oauth/google/start?credential={{.CredentialID}}{{if .User}}&amp;user={{.User}}{{end}}">Authorize with Google</a>
       </div>
     {{end}}
+    {{range .NotionOptions}}
+      <div class="item">
+        <div><strong>{{.CredentialID}}</strong>{{if .User}} for user <code>{{.User}}</code>{{end}}</div>
+        <p class="muted">{{.Source}}</p>
+        <a class="button" href="/oauth/notion/start?credential={{.CredentialID}}{{if .User}}&amp;user={{.User}}{{end}}">Authorize with Notion</a>
+      </div>
+    {{end}}
   {{else}}
-    <p class="muted">No Google OAuth client is configured.</p>
+    <p class="muted">No OAuth client is configured.</p>
   {{end}}
 </body>
 </html>`))
@@ -780,11 +1328,11 @@ var callbackTemplate = template.Must(template.New("callback").Parse(`<!doctype h
   </style>
 </head>
 <body>
-  <h1>Google OAuth Complete</h1>
+  <h1>{{.Provider}} OAuth Complete</h1>
   {{if .User}}<p>User: <code>{{.User}}</code></p>{{end}}
   <p>Credential: <code>{{.CredentialID}}</code></p>
   <textarea readonly>refresh_token: "{{.RefreshToken}}"</textarea>
   {{if .Stored}}<p>The refresh token was stored in the configured scia secret store.</p>{{end}}
-  <p>You can also copy this value into <code>params.refresh_token</code>. Access token expires in {{.ExpiresIn}} seconds.</p>
+  <p>You can also copy this value into <code>params.refresh_token</code>{{if .ExpiresIn}}. Access token expires in {{.ExpiresIn}} seconds{{end}}.</p>
 </body>
 </html>`))
