@@ -105,13 +105,30 @@ type IntegrationConfig struct {
 }
 
 type OAuthConfig struct {
-	Listen      string                          `yaml:"listen"`
-	RedirectURL string                          `yaml:"redirectUrl"`
-	BrokerToken string                          `yaml:"brokerToken"`
-	Google      GoogleOAuthConfig               `yaml:"google"`
-	Notion      NotionOAuthConfig               `yaml:"notion"`
-	Todoist     TodoistOAuthConfig              `yaml:"todoist"`
-	Namespaces  map[string]OAuthNamespaceConfig `yaml:"namespaces"`
+	Listen       string                                    `yaml:"listen"`
+	RedirectURL  string                                    `yaml:"redirectUrl"`
+	BrokerToken  string                                    `yaml:"brokerToken"`
+	Integrations map[string]OAuthIntegrationMetadataConfig `yaml:"integrations"`
+	Google       GoogleOAuthConfig                         `yaml:"google"`
+	Notion       NotionOAuthConfig                         `yaml:"notion"`
+	Todoist      TodoistOAuthConfig                        `yaml:"todoist"`
+	Namespaces   map[string]OAuthNamespaceConfig           `yaml:"namespaces"`
+}
+
+type OAuthIntegrationMetadataConfig struct {
+	Name        string                        `yaml:"name"`
+	IconURL     string                        `yaml:"iconUrl"`
+	Description string                        `yaml:"description"`
+	Released    *bool                         `yaml:"released"`
+	Setup       map[string]string             `yaml:"setup"`
+	Scopes      []OAuthIntegrationScopeConfig `yaml:"scopes"`
+}
+
+type OAuthIntegrationScopeConfig struct {
+	Value       string `yaml:"value"`
+	Label       string `yaml:"label"`
+	Description string `yaml:"description"`
+	Enabled     *bool  `yaml:"enabled"`
 }
 
 type GoogleOAuthConfig struct {
