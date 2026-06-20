@@ -1694,7 +1694,7 @@ func integrationScopes(metadata config.OAuthIntegrationMetadataConfig, configure
 			}
 			scopes = append(scopes, frontendIntegrationScope{
 				ID:      integrationScopeID(scope, i),
-				Name:    integrationScopeName(scope),
+				Name:    integrationScopeName(scope, i),
 				Desc:    firstNonEmpty(scope.Desc, scope.Description),
 				Enabled: enabled,
 			})
@@ -1702,10 +1702,10 @@ func integrationScopes(metadata config.OAuthIntegrationMetadataConfig, configure
 		return scopes
 	}
 	scopes := make([]frontendIntegrationScope, 0, len(configuredScopes))
-	for i, scope := range configuredScopes {
+	for i := range configuredScopes {
 		scopes = append(scopes, frontendIntegrationScope{
 			ID:      fmt.Sprintf("scope-%d", i+1),
-			Name:    scope,
+			Name:    fmt.Sprintf("Scope %d", i+1),
 			Enabled: true,
 		})
 	}
@@ -1760,7 +1760,7 @@ func integrationScopeID(scope config.OAuthIntegrationScopeConfig, index int) str
 	if scope.ID != "" {
 		return scope.ID
 	}
-	if name := integrationScopeName(scope); name != "" {
+	if name := firstNonEmpty(scope.Name, scope.Label, scope.ID); name != "" {
 		if id := slugifyScopeID(name); id != "" {
 			return id
 		}
@@ -1768,8 +1768,8 @@ func integrationScopeID(scope config.OAuthIntegrationScopeConfig, index int) str
 	return fmt.Sprintf("scope-%d", index+1)
 }
 
-func integrationScopeName(scope config.OAuthIntegrationScopeConfig) string {
-	return firstNonEmpty(scope.Name, scope.Label, scope.Value)
+func integrationScopeName(scope config.OAuthIntegrationScopeConfig, index int) string {
+	return firstNonEmpty(scope.Name, scope.Label, scope.ID, fmt.Sprintf("Scope %d", index+1))
 }
 
 func slugifyScopeID(value string) string {

@@ -179,7 +179,7 @@ func TestFrontendIntegrationsReturnsNamespacedOAuthIntegrations(t *testing.T) {
 	if got.Setup["callback_url"] != "https://service-a.example.com/oauth/todoist/callback" {
 		t.Fatalf("unexpected setup: %#v", got.Setup)
 	}
-	if len(got.Scopes) != 2 || got.Scopes[0].ID != "scope-1" || got.Scopes[0].Name != "data:read" || got.Scopes[1].ID != "scope-2" || got.Scopes[1].Name != "data:read_write" {
+	if len(got.Scopes) != 2 || got.Scopes[0].ID != "scope-1" || got.Scopes[0].Name != "Scope 1" || got.Scopes[1].ID != "scope-2" || got.Scopes[1].Name != "Scope 2" {
 		t.Fatalf("unexpected scopes: %#v", got.Scopes)
 	}
 }
