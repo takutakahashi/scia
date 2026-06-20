@@ -210,10 +210,10 @@ Frontend integration metadata:
 
 - `GET /api/integrations` returns configured OAuth integrations as JSON for a frontend.
 - The response is generated from the current config on every request, so config reloads are reflected without frontend changes.
-- Secrets are not returned. The response includes provider IDs, display metadata, setup URLs such as callback/auth/token/revoke URLs, start endpoints, and scope enabled state.
+- Secrets and raw OAuth scope values are not returned. The response includes provider IDs, display metadata, setup URLs such as callback/auth/token/revoke URLs, start endpoints, and scope display metadata.
 - `server.oauth.integrations.<provider-or-credential-id>.released: false` can be used to configure an integration before exposing it in the frontend.
-- `scopes[].enabled` means the scope is selected by default. Frontends can pass a `scope` query parameter to OAuth `start` or `authorization-url` endpoints to authorize a different subset.
-- When integration metadata scopes are configured, requested scopes must match `scopes[].value`; unknown scopes are rejected with `400 Bad Request`.
+- `scopes[].enabled` means the scope is selected by default. Frontends can pass a `scope` query parameter containing `scopes[].id` values to OAuth `start` or `authorization-url` endpoints to authorize a different subset.
+- When integration metadata scopes are configured, requested scopes must match `scopes[].id`; unknown scopes are rejected with `400 Bad Request`. Raw `value` strings are accepted for backward compatibility but do not need to be exposed to frontends.
 
 Example:
 
@@ -229,13 +229,15 @@ server:
         setup:
           callback_url: "https://scia.example.com/oauth/google/callback"
         scopes:
-          - value: "https://www.googleapis.com/auth/calendar"
-            label: "Calendar read/write"
-            description: "Read, create, and update events."
+          - id: "calendar-write"
+            value: "https://www.googleapis.com/auth/calendar"
+            name: "Calendar read/write"
+            desc: "Read, create, and update events."
             enabled: true
-          - value: "https://www.googleapis.com/auth/calendar.readonly"
-            label: "Calendar read-only"
-            description: "Read events without writing changes."
+          - id: "calendar-read"
+            value: "https://www.googleapis.com/auth/calendar.readonly"
+            name: "Calendar read-only"
+            desc: "Read events without writing changes."
             enabled: false
 ```
 

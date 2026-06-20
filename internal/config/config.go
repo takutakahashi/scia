@@ -125,7 +125,10 @@ type OAuthIntegrationMetadataConfig struct {
 }
 
 type OAuthIntegrationScopeConfig struct {
+	ID          string `yaml:"id"`
 	Value       string `yaml:"value"`
+	Name        string `yaml:"name"`
+	Desc        string `yaml:"desc"`
 	Label       string `yaml:"label"`
 	Description string `yaml:"description"`
 	Enabled     *bool  `yaml:"enabled"`

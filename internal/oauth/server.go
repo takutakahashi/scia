@@ -89,10 +89,10 @@ type frontendIntegration struct {
 }
 
 type frontendIntegrationScope struct {
-	Value       string `json:"value"`
-	Label       string `json:"label,omitempty"`
-	Description string `json:"description,omitempty"`
-	Enabled     bool   `json:"enabled"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Desc    string `json:"desc,omitempty"`
+	Enabled bool   `json:"enabled"`
 }
 
 func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logger) *Server {
@@ -1682,7 +1682,7 @@ func integrationScopes(metadata config.OAuthIntegrationMetadataConfig, configure
 	}
 	if len(metadata.Scopes) > 0 {
 		scopes := make([]frontendIntegrationScope, 0, len(metadata.Scopes))
-		for _, scope := range metadata.Scopes {
+		for i, scope := range metadata.Scopes {
 			if scope.Value == "" {
 				continue
 			}
@@ -1693,17 +1693,21 @@ func integrationScopes(metadata config.OAuthIntegrationMetadataConfig, configure
 				enabled = true
 			}
 			scopes = append(scopes, frontendIntegrationScope{
-				Value:       scope.Value,
-				Label:       scope.Label,
-				Description: scope.Description,
-				Enabled:     enabled,
+				ID:      integrationScopeID(scope, i),
+				Name:    integrationScopeName(scope),
+				Desc:    firstNonEmpty(scope.Desc, scope.Description),
+				Enabled: enabled,
 			})
 		}
 		return scopes
 	}
 	scopes := make([]frontendIntegrationScope, 0, len(configuredScopes))
-	for _, scope := range configuredScopes {
-		scopes = append(scopes, frontendIntegrationScope{Value: scope, Enabled: true})
+	for i, scope := range configuredScopes {
+		scopes = append(scopes, frontendIntegrationScope{
+			ID:      fmt.Sprintf("scope-%d", i+1),
+			Name:    scope,
+			Enabled: true,
+		})
 	}
 	return scopes
 }
@@ -1720,32 +1724,69 @@ func oauthScopeFromRequest(cfg *config.Config, credentialID, provider, requested
 		return fallback, nil
 	}
 
-	allowed := make(map[string]struct{}, len(metadata.Scopes))
+	allowed := make(map[string]string, len(metadata.Scopes)*2)
 	var selected []string
-	for _, scope := range metadata.Scopes {
+	for i, scope := range metadata.Scopes {
 		if scope.Value == "" {
 			continue
 		}
-		allowed[scope.Value] = struct{}{}
+		allowed[integrationScopeID(scope, i)] = scope.Value
+		allowed[scope.Value] = scope.Value
 		if requested == "" && scopeDefaultEnabled(scope, configured) {
 			selected = append(selected, scope.Value)
 		}
 	}
 	if requested != "" {
-		selected = splitScopeValues(requested)
-		if len(selected) == 0 {
+		requestedScopes := splitScopeValues(requested)
+		if len(requestedScopes) == 0 {
 			return "", fmt.Errorf("scope must include at least one value")
 		}
-		for _, scope := range selected {
-			if _, ok := allowed[scope]; !ok {
+		selected = make([]string, 0, len(requestedScopes))
+		for _, scope := range requestedScopes {
+			value, ok := allowed[scope]
+			if !ok {
 				return "", fmt.Errorf("scope %q is not allowed for %s", scope, credentialID)
 			}
+			selected = append(selected, value)
 		}
 	}
 	if len(selected) == 0 {
 		return "", fmt.Errorf("no scopes are enabled for %s", credentialID)
 	}
 	return strings.Join(selected, oauthScopeSeparator(provider)), nil
+}
+
+func integrationScopeID(scope config.OAuthIntegrationScopeConfig, index int) string {
+	if scope.ID != "" {
+		return scope.ID
+	}
+	if name := integrationScopeName(scope); name != "" {
+		if id := slugifyScopeID(name); id != "" {
+			return id
+		}
+	}
+	return fmt.Sprintf("scope-%d", index+1)
+}
+
+func integrationScopeName(scope config.OAuthIntegrationScopeConfig) string {
+	return firstNonEmpty(scope.Name, scope.Label, scope.Value)
+}
+
+func slugifyScopeID(value string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(value) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func scopeDefaultEnabled(scope config.OAuthIntegrationScopeConfig, configured string) bool {

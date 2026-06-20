@@ -60,14 +60,16 @@ func TestFrontendIntegrationsReturnsConfiguredOAuthIntegrations(t *testing.T) {
 						},
 						Scopes: []config.OAuthIntegrationScopeConfig{
 							{
-								Value:       "https://www.googleapis.com/auth/calendar",
-								Label:       "Calendar write",
-								Description: "Read and write calendars.",
-								Enabled:     &calendarScopeEnabled,
+								Value:   "https://www.googleapis.com/auth/calendar",
+								ID:      "calendar-write",
+								Name:    "Calendar write",
+								Desc:    "Read and write calendars.",
+								Enabled: &calendarScopeEnabled,
 							},
 							{
 								Value:   "https://www.googleapis.com/auth/drive",
-								Label:   "Drive",
+								ID:      "drive",
+								Name:    "Drive",
 								Enabled: &driveScopeEnabled,
 							},
 						},
@@ -123,10 +125,10 @@ func TestFrontendIntegrationsReturnsConfiguredOAuthIntegrations(t *testing.T) {
 	if len(got.Scopes) != 2 {
 		t.Fatalf("unexpected scopes: %#v", got.Scopes)
 	}
-	if got.Scopes[0].Value != "https://www.googleapis.com/auth/calendar" || !got.Scopes[0].Enabled {
+	if got.Scopes[0].ID != "calendar-write" || got.Scopes[0].Name != "Calendar write" || got.Scopes[0].Desc != "Read and write calendars." || !got.Scopes[0].Enabled {
 		t.Fatalf("unexpected first scope: %#v", got.Scopes[0])
 	}
-	if got.Scopes[1].Value != "https://www.googleapis.com/auth/drive" || got.Scopes[1].Enabled {
+	if got.Scopes[1].ID != "drive" || got.Scopes[1].Name != "Drive" || got.Scopes[1].Enabled {
 		t.Fatalf("unexpected second scope: %#v", got.Scopes[1])
 	}
 }
@@ -177,7 +179,7 @@ func TestFrontendIntegrationsReturnsNamespacedOAuthIntegrations(t *testing.T) {
 	if got.Setup["callback_url"] != "https://service-a.example.com/oauth/todoist/callback" {
 		t.Fatalf("unexpected setup: %#v", got.Setup)
 	}
-	if len(got.Scopes) != 2 || got.Scopes[0].Value != "data:read" || got.Scopes[1].Value != "data:read_write" {
+	if len(got.Scopes) != 2 || got.Scopes[0].ID != "scope-1" || got.Scopes[0].Name != "data:read" || got.Scopes[1].ID != "scope-2" || got.Scopes[1].Name != "data:read_write" {
 		t.Fatalf("unexpected scopes: %#v", got.Scopes)
 	}
 }
@@ -370,8 +372,8 @@ func TestGoogleOAuthStartUsesEnabledMetadataScopesByDefault(t *testing.T) {
 				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
 					"google-calendar": {
 						Scopes: []config.OAuthIntegrationScopeConfig{
-							{Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
-							{Value: "https://www.googleapis.com/auth/calendar", Enabled: &writeScopeEnabled},
+							{ID: "calendar-read", Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
+							{ID: "calendar-write", Value: "https://www.googleapis.com/auth/calendar", Enabled: &writeScopeEnabled},
 						},
 					},
 				},
@@ -411,8 +413,8 @@ func TestGoogleOAuthStartAcceptsAllowedMetadataScopeSelection(t *testing.T) {
 				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
 					"google-calendar": {
 						Scopes: []config.OAuthIntegrationScopeConfig{
-							{Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
-							{Value: "https://www.googleapis.com/auth/calendar", Enabled: &writeScopeEnabled},
+							{ID: "calendar-read", Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
+							{ID: "calendar-write", Value: "https://www.googleapis.com/auth/calendar", Enabled: &writeScopeEnabled},
 						},
 					},
 				},
@@ -425,7 +427,7 @@ func TestGoogleOAuthStartAcceptsAllowedMetadataScopeSelection(t *testing.T) {
 		},
 	})
 	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
-	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar", nil)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar&scope=calendar-read%20calendar-write", nil)
 	rec := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rec, req)

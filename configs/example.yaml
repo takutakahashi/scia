@@ -21,13 +21,15 @@ server:
         setup:
           callback_url: "http://localhost:8081/oauth/google/callback"
         scopes:
-          - value: "https://www.googleapis.com/auth/calendar"
-            label: "Calendar read/write"
-            description: "Read, create, and update events."
+          - id: "calendar-write"
+            value: "https://www.googleapis.com/auth/calendar"
+            name: "Calendar read/write"
+            desc: "Read, create, and update events."
             enabled: true
-          - value: "https://www.googleapis.com/auth/calendar.readonly"
-            label: "Calendar read-only"
-            description: "Read events without writing changes."
+          - id: "calendar-read"
+            value: "https://www.googleapis.com/auth/calendar.readonly"
+            name: "Calendar read-only"
+            desc: "Read events without writing changes."
             enabled: false
       notion-workspace:
         name: "Notion"
