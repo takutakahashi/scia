@@ -596,6 +596,46 @@ func TestTodoistOAuthStartRedirectsToTodoist(t *testing.T) {
 	}
 }
 
+func TestSlackOAuthStartRedirectsToSlack(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Slack: config.SlackOAuthConfig{
+					CredentialID: "slack",
+					ClientID:     "slack-client-id",
+					ClientSecret: "slack-client-secret",
+					Scope:        "users:read chat:write",
+					RedirectURL:  "http://localhost:8081/oauth/slack/callback",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/slack/start?credential=slack", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.HasPrefix(location, slackAuthURL+"?") {
+		t.Fatalf("unexpected redirect: %s", location)
+	}
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	assertQueryValue(t, query, "client_id", "slack-client-id")
+	assertQueryValue(t, query, "scope", "users:read chat:write")
+	assertQueryValue(t, query, "redirect_uri", "http://localhost:8081/oauth/slack/callback")
+	if query.Get("state") == "" {
+		t.Fatal("missing state")
+	}
+}
+
 func TestGoogleOAuthCallbackShowsRefreshToken(t *testing.T) {
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
@@ -840,6 +880,56 @@ func TestTodoistOAuthCallbackStoresLegacyAccessToken(t *testing.T) {
 	}
 	if got, ok, err := secretStore.Get(context.Background(), "todoist", "access_token"); err != nil || !ok || got != "legacy-access-token" {
 		t.Fatalf("access token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestSlackOAuthCallbackStoresRefreshToken(t *testing.T) {
+	ok := true
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "code", "auth-code")
+		assertFormValue(t, r, "client_id", "slack-client-id")
+		assertFormValue(t, r, "client_secret", "slack-client-secret")
+		assertFormValue(t, r, "redirect_uri", "http://localhost:8081/oauth/slack/callback")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":            ok,
+			"access_token":  "slack-access-token",
+			"refresh_token": "slack-refresh-token",
+			"token_type":    "user",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Slack: config.SlackOAuthConfig{
+					CredentialID: "slack",
+					ClientID:     "slack-client-id",
+					ClientSecret: "slack-client-secret",
+					TokenURL:     tokenEndpoint.URL,
+					RedirectURL:  "http://localhost:8081/oauth/slack/callback",
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	srv := NewServer(store, secretStore, slog.Default())
+	state := "test-state"
+	srv.states.Store(state, stateInfo{CredentialID: "slack", RedirectURI: "http://localhost:8081/oauth/slack/callback", CreatedAt: time.Now()})
+	req := httptest.NewRequest(http.MethodGet, "/oauth/slack/callback?state="+state+"&code=auth-code", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "slack", "refresh_token"); err != nil || !ok || got != "slack-refresh-token" {
+		t.Fatalf("refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
 	}
 }
 
@@ -1313,6 +1403,68 @@ func TestNamespaceTodoistAccessTokenUsesStoredAccessToken(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "legacy-access-token") {
 		t.Fatalf("token response did not include stored access token: %s", rec.Body.String())
+	}
+}
+
+func TestNamespaceSlackAccessTokenUsesStoredRefreshTokenAndStoresRotatedRefreshToken(t *testing.T) {
+	ok := true
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "refresh_token", "stored-refresh-token")
+		assertFormValue(t, r, "client_id", "secret-client-id")
+		assertFormValue(t, r, "client_secret", "secret-client-secret")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":            ok,
+			"access_token":  "stored-access-token",
+			"refresh_token": "rotated-refresh-token",
+			"token_type":    "user",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Slack: config.SlackOAuthConfig{
+							ClientIDSecretRef: "service-a.slack.client-id",
+							ClientSecretRef:   "service-a.slack.client-secret",
+							RefreshTokenURL:   tokenEndpoint.URL,
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	for key, value := range map[string]string{
+		"client-id":     "secret-client-id",
+		"client-secret": "secret-client-secret",
+		"refresh_token": "stored-refresh-token",
+	} {
+		if err := secretStore.Put(context.Background(), "service-a.slack", key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/slack/access-token", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "stored-access-token") {
+		t.Fatalf("token response was not proxied: %s", rec.Body.String())
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "service-a.slack", "refresh_token"); err != nil || !ok || got != "rotated-refresh-token" {
+		t.Fatalf("rotated refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
 	}
 }
 

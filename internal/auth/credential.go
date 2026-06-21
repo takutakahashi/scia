@@ -85,6 +85,12 @@ func (i *Injector) applyOne(ctx context.Context, r *http.Request, cfg *config.Co
 			return err
 		}
 		r.Header.Set("Authorization", "Bearer "+token)
+	case "slack-user-oauth-token":
+		token, err := i.slackUserToken(ctx, cfg, cred)
+		if err != nil {
+			return err
+		}
+		r.Header.Set("Authorization", "Bearer "+token)
 	default:
 		return fmt.Errorf("unsupported credential type %q", cred.Type)
 	}
@@ -388,6 +394,110 @@ func (i *Injector) todoistRefreshToken(ctx context.Context, cfg *config.Config, 
 	return token, nil
 }
 
+func (i *Injector) slackUserToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	if value, ok := i.cache.Load(cred.ID); ok {
+		token := value.(cachedToken)
+		if time.Until(token.expiresAt) > 30*time.Second {
+			return token.accessToken, nil
+		}
+	}
+
+	lockValue, _ := i.locks.LoadOrStore(cred.ID, &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if value, ok := i.cache.Load(cred.ID); ok {
+		token := value.(cachedToken)
+		if time.Until(token.expiresAt) > 30*time.Second {
+			return token.accessToken, nil
+		}
+	}
+
+	if accessToken, err := i.secretValue(ctx, cfg, cred, "access_token"); err != nil {
+		return "", err
+	} else if accessToken != "" {
+		expiresIn := time.Duration(315360000) * time.Second
+		i.cache.Store(cred.ID, cachedToken{accessToken: accessToken, expiresAt: time.Now().Add(expiresIn)})
+		return accessToken, nil
+	}
+
+	refreshToken, err := i.secretValue(ctx, cfg, cred, "refresh_token")
+	if err != nil {
+		return "", err
+	}
+	if refreshToken == "" {
+		return "", fmt.Errorf("credential %q requires refresh_token or access_token", cred.ID)
+	}
+
+	tokenBrokerURL := config.HeaderValueFromEnv(cred.Params["token_broker_url"])
+	if tokenBrokerURL != "" {
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", refreshToken)
+		if scope := cred.Params["scope"]; scope != "" {
+			form.Set("scope", scope)
+		}
+		token, rotatedRefreshToken, err := i.formTokenWithRefresh(ctx, cred.ID, tokenBrokerURL, form, config.HeaderValueFromEnv(cred.Params["token_broker_token"]))
+		if err != nil {
+			return "", err
+		}
+		if rotatedRefreshToken != "" {
+			if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+				return "", err
+			}
+		}
+		return token, nil
+	}
+
+	slackCfg, hasSlackCfg := config.SlackOAuthConfigForCredential(cfg, cred.ID)
+	tokenURL := cred.Params["refresh_token_url"]
+	if tokenURL == "" && hasSlackCfg {
+		tokenURL = slackCfg.RefreshTokenURL
+	}
+	if tokenURL == "" && hasSlackCfg {
+		tokenURL = slackCfg.TokenURL
+	}
+	if tokenURL == "" {
+		tokenURL = "https://slack.com/api/oauth.v2.access"
+	}
+	clientID := config.HeaderValueFromEnv(cred.Params["client_id"])
+	if clientID == "" && hasSlackCfg {
+		var err error
+		clientID, err = i.slackClientValue(ctx, slackCfg.ClientID, slackCfg.ClientIDSecretRef)
+		if err != nil {
+			return "", err
+		}
+	}
+	clientSecret := config.HeaderValueFromEnv(cred.Params["client_secret"])
+	if clientSecret == "" && hasSlackCfg {
+		var err error
+		clientSecret, err = i.slackClientValue(ctx, slackCfg.ClientSecret, slackCfg.ClientSecretRef)
+		if err != nil {
+			return "", err
+		}
+	}
+	if clientID == "" || clientSecret == "" {
+		return "", fmt.Errorf("credential %q requires client_id, client_secret, and refresh_token, or access_token", cred.ID)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("refresh_token", refreshToken)
+	token, rotatedRefreshToken, err := i.formTokenWithRefresh(ctx, cred.ID, tokenURL, form, "")
+	if err != nil {
+		return "", err
+	}
+	if rotatedRefreshToken != "" {
+		if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+			return "", err
+		}
+	}
+	return token, nil
+}
+
 func (i *Injector) googleClientValue(ctx context.Context, literal, secretRef string) (string, error) {
 	if value := config.HeaderValueFromEnv(literal); value != "" {
 		return value, nil
@@ -399,6 +509,16 @@ func (i *Injector) googleClientValue(ctx context.Context, literal, secretRef str
 }
 
 func (i *Injector) todoistClientValue(ctx context.Context, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, i.secrets, secretRef)
+}
+
+func (i *Injector) slackClientValue(ctx context.Context, literal, secretRef string) (string, error) {
 	if value := config.HeaderValueFromEnv(literal); value != "" {
 		return value, nil
 	}
@@ -496,7 +616,7 @@ func (i *Injector) formTokenWithRefresh(ctx context.Context, credentialID, token
 	if token.AccessToken == "" {
 		return "", "", errors.New("token endpoint response did not include access_token")
 	}
-	if token.TokenType != "" && !strings.EqualFold(token.TokenType, "bearer") {
+	if !supportedTokenType(token.TokenType) {
 		return "", "", fmt.Errorf("unsupported token_type %q", token.TokenType)
 	}
 	expiresIn := time.Duration(token.ExpiresIn) * time.Second
@@ -545,7 +665,7 @@ func (i *Injector) notionJSONToken(ctx context.Context, credentialID, tokenURL, 
 	if token.AccessToken == "" {
 		return "", "", errors.New("token endpoint response did not include access_token")
 	}
-	if token.TokenType != "" && !strings.EqualFold(token.TokenType, "bearer") {
+	if !supportedTokenType(token.TokenType) {
 		return "", "", fmt.Errorf("unsupported token_type %q", token.TokenType)
 	}
 	expiresIn := time.Duration(token.ExpiresIn) * time.Second
@@ -578,7 +698,7 @@ func (i *Injector) decodeAndCacheToken(credentialID string, resp *http.Response)
 	if body.AccessToken == "" {
 		return "", errors.New("token endpoint response did not include access_token")
 	}
-	if body.TokenType != "" && !strings.EqualFold(body.TokenType, "bearer") {
+	if !supportedTokenType(body.TokenType) {
 		return "", fmt.Errorf("unsupported token_type %q", body.TokenType)
 	}
 	expiresIn := time.Duration(body.ExpiresIn) * time.Second
@@ -587,4 +707,8 @@ func (i *Injector) decodeAndCacheToken(credentialID string, resp *http.Response)
 	}
 	i.cache.Store(credentialID, cachedToken{accessToken: body.AccessToken, expiresAt: time.Now().Add(expiresIn)})
 	return body.AccessToken, nil
+}
+
+func supportedTokenType(tokenType string) bool {
+	return tokenType == "" || strings.EqualFold(tokenType, "bearer") || strings.EqualFold(tokenType, "user")
 }
