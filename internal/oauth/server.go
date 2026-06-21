@@ -968,7 +968,7 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 		return
 	}
 	state := req.State
-	if state == "" && redirect {
+	if state == "" {
 		generated, err := randomState()
 		if err != nil {
 			http.Error(w, "failed to create state", http.StatusInternalServerError)
@@ -987,13 +987,13 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 		q.Set("state", state)
 	}
 	location := authURL + "?" + q.Encode()
+	s.states.Store(state, stateInfo{
+		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+		CredentialID: credentialID,
+		RedirectURI:  redirectURI,
+		CreatedAt:    time.Now(),
+	})
 	if redirect {
-		s.states.Store(state, stateInfo{
-			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
-			CredentialID: credentialID,
-			RedirectURI:  redirectURI,
-			CreatedAt:    time.Now(),
-		})
 		http.Redirect(w, r, location, http.StatusFound)
 		return
 	}
@@ -1033,7 +1033,7 @@ func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.
 		redirectURI = s.providerRedirectURL(r, "notion")
 	}
 	state := req.State
-	if state == "" && redirect {
+	if state == "" {
 		generated, err := randomState()
 		if err != nil {
 			http.Error(w, "failed to create state", http.StatusInternalServerError)
@@ -1050,12 +1050,12 @@ func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.
 		q.Set("state", state)
 	}
 	location := authURL + "?" + q.Encode()
+	s.states.Store(state, stateInfo{
+		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+		CredentialID: credentialID,
+		CreatedAt:    time.Now(),
+	})
 	if redirect {
-		s.states.Store(state, stateInfo{
-			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
-			CredentialID: credentialID,
-			CreatedAt:    time.Now(),
-		})
 		http.Redirect(w, r, location, http.StatusFound)
 		return
 	}
@@ -1092,7 +1092,7 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 		return
 	}
 	state := req.State
-	if state == "" && redirect {
+	if state == "" {
 		generated, err := randomState()
 		if err != nil {
 			http.Error(w, "failed to create state", http.StatusInternalServerError)
@@ -1115,12 +1115,12 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 		q.Set("state", state)
 	}
 	location := authURL + "?" + q.Encode()
+	s.states.Store(state, stateInfo{
+		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+		CredentialID: credentialID,
+		CreatedAt:    time.Now(),
+	})
 	if redirect {
-		s.states.Store(state, stateInfo{
-			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
-			CredentialID: credentialID,
-			CreatedAt:    time.Now(),
-		})
 		http.Redirect(w, r, location, http.StatusFound)
 		return
 	}

@@ -938,6 +938,13 @@ func TestNamespaceGoogleAuthorizationURLPostAcceptsScopeIDs(t *testing.T) {
 	query := parsed.Query()
 	assertQueryValue(t, query, "redirect_uri", "https://app.example.com/api/oauth/google/callback")
 	assertQueryValue(t, query, "scope", "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks")
+	state := query.Get("state")
+	if state == "" {
+		t.Fatalf("state was not generated")
+	}
+	if _, ok := srv.states.Load(state); !ok {
+		t.Fatalf("state was not stored")
+	}
 	if body["scope"] != "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks" {
 		t.Fatalf("unexpected response scope: %#v", body)
 	}
