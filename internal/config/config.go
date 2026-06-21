@@ -97,7 +97,9 @@ type BackendProxyConfig struct {
 }
 
 type IntegrationsConfig struct {
-	Google IntegrationConfig `yaml:"google"`
+	Google  IntegrationConfig `yaml:"google"`
+	Notion  IntegrationConfig `yaml:"notion"`
+	Todoist IntegrationConfig `yaml:"todoist"`
 }
 
 type IntegrationConfig struct {
