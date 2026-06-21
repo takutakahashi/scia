@@ -142,7 +142,7 @@ func (h *Handler) serveTunnelConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstream, err := h.dialRawTunnelUpstream(r.Context(), r.Host)
+	upstream, upstreamReader, err := h.dialRawTunnelUpstream(r.Context(), r.Host)
 	if err != nil {
 		_ = client.Close()
 		h.logger.Error("tunnel upstream failed", "error", err, "host", r.Host)
@@ -153,7 +153,7 @@ func (h *Handler) serveTunnelConnect(w http.ResponseWriter, r *http.Request) {
 		_ = upstream.Close()
 		return
 	}
-	_ = pipeBidirectional(client, rw.Reader, upstream, bufio.NewReader(upstream))
+	_ = pipeBidirectional(client, rw.Reader, upstream, upstreamReader)
 }
 
 func (h *Handler) serveMITMConnect(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +344,8 @@ func cloneWebSocketRequest(r *http.Request) *http.Request {
 func (h *Handler) dialWebSocketUpstream(r *http.Request, connectHost string) (net.Conn, error) {
 	var tcp net.Conn
 	var err error
-	tcp, err = h.dialRawTunnelUpstream(r.Context(), connectHost)
+	upstreamReader := (*bufio.Reader)(nil)
+	tcp, upstreamReader, err = h.dialRawTunnelUpstream(r.Context(), connectHost)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +359,7 @@ func (h *Handler) dialWebSocketUpstream(r *http.Request, connectHost string) (ne
 	}
 	tlsConfig.NextProtos = []string{"http/1.1"}
 
-	tlsConn := tls.Client(tcp, tlsConfig)
+	tlsConn := tls.Client(&bufferedConn{Conn: tcp, reader: upstreamReader}, tlsConfig)
 	if err := tlsConn.HandshakeContext(r.Context()); err != nil {
 		_ = tcp.Close()
 		return nil, fmt.Errorf("upstream tls handshake: %w", err)
@@ -366,18 +367,22 @@ func (h *Handler) dialWebSocketUpstream(r *http.Request, connectHost string) (ne
 	return tlsConn, nil
 }
 
-func (h *Handler) dialRawTunnelUpstream(ctx context.Context, connectHost string) (net.Conn, error) {
+func (h *Handler) dialRawTunnelUpstream(ctx context.Context, connectHost string) (net.Conn, *bufio.Reader, error) {
 	rawProxy := config.HeaderValueFromEnv(h.store.Get().Server.BackendProxy.URL)
 	if rawProxy == "" {
-		return (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, "tcp", connectHost)
+		conn, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, "tcp", connectHost)
+		if err != nil {
+			return nil, nil, err
+		}
+		return conn, bufio.NewReader(conn), nil
 	}
 	return h.dialBackendProxyTunnel(ctx, rawProxy, connectHost)
 }
 
-func (h *Handler) dialBackendProxyTunnel(ctx context.Context, rawProxy, connectHost string) (net.Conn, error) {
+func (h *Handler) dialBackendProxyTunnel(ctx context.Context, rawProxy, connectHost string) (net.Conn, *bufio.Reader, error) {
 	proxyURL, err := url.Parse(rawProxy)
 	if err != nil {
-		return nil, fmt.Errorf("parse backend proxy url: %w", err)
+		return nil, nil, fmt.Errorf("parse backend proxy url: %w", err)
 	}
 	proxyAddr := proxyURL.Host
 	if !strings.Contains(proxyAddr, ":") {
@@ -389,32 +394,42 @@ func (h *Handler) dialBackendProxyTunnel(ctx context.Context, rawProxy, connectH
 	}
 	tcp, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
-		return nil, fmt.Errorf("dial backend proxy: %w", err)
+		return nil, nil, fmt.Errorf("dial backend proxy: %w", err)
 	}
 	var conn net.Conn = tcp
 	if proxyURL.Scheme == "https" {
 		tlsConn := tls.Client(tcp, &tls.Config{ServerName: stripPort(proxyURL.Host)})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = tcp.Close()
-			return nil, fmt.Errorf("backend proxy tls handshake: %w", err)
+			return nil, nil, fmt.Errorf("backend proxy tls handshake: %w", err)
 		}
 		conn = tlsConn
 	}
 	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", connectHost, connectHost); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("write backend proxy connect: %w", err)
+		return nil, nil, fmt.Errorf("write backend proxy connect: %w", err)
 	}
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("read backend proxy connect response: %w", err)
+		return nil, nil, fmt.Errorf("read backend proxy connect response: %w", err)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_ = conn.Close()
-		return nil, fmt.Errorf("backend proxy connect failed: %s", resp.Status)
+		return nil, nil, fmt.Errorf("backend proxy connect failed: %s", resp.Status)
 	}
-	return conn, nil
+	return conn, reader, nil
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
 }
 
 func mitmHostAllowed(patterns []string, host string) bool {
@@ -544,19 +559,37 @@ func pipeBidirectional(client net.Conn, clientReader *bufio.Reader, upstream net
 	errCh := make(chan error, 2)
 	go func() {
 		_, err := io.Copy(upstream, clientReader)
+		closeWrite(upstream)
 		errCh <- err
 	}()
 	go func() {
 		_, err := io.Copy(client, upstreamReader)
+		closeWrite(client)
 		errCh <- err
 	}()
-	err := <-errCh
+
+	var firstErr error
+	for i := 0; i < 2; i++ {
+		err := <-errCh
+		if firstErr == nil && err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
+			firstErr = err
+		}
+	}
 	_ = client.Close()
 	_ = upstream.Close()
-	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
-		return nil
+	return firstErr
+}
+
+type closeWriter interface {
+	CloseWrite() error
+}
+
+func closeWrite(conn net.Conn) {
+	if cw, ok := conn.(closeWriter); ok {
+		_ = cw.CloseWrite()
+		return
 	}
-	return err
+	_ = conn.Close()
 }
 
 func (h *Handler) authorizeDecision(w http.ResponseWriter, r *http.Request, decision policy.Decision, target string) bool {
