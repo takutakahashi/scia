@@ -594,6 +594,70 @@ func TestTodoistRefreshTokenUsesStoredAccessToken(t *testing.T) {
 	}
 }
 
+func TestSlackUserTokenInjectsAccessTokenAndStoresRotatedRefreshToken(t *testing.T) {
+	var tokenRequests int
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenRequests++
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "client_id", "client-id")
+		assertFormValue(t, r, "client_secret", "client-secret")
+		assertFormValue(t, r, "refresh_token", "refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":            true,
+			"access_token":  "slack-access-token",
+			"refresh_token": "rotated-refresh-token",
+			"token_type":    "user",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	secretStore := newMemorySecretStore()
+	cfg := &config.Config{
+		Credentials: []config.CredentialConfig{
+			{
+				ID:   "slack",
+				Type: "slack-user-oauth-token",
+				Params: map[string]string{
+					"refresh_token_url": tokenEndpoint.URL,
+					"client_id":         "client-id",
+					"client_secret":     "client-secret",
+					"refresh_token":     "refresh-token",
+				},
+			},
+		},
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://slack.com/api/users.info", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	injector := NewInjector(secretStore)
+	if err := injector.Apply(context.Background(), req, cfg, []string{"slack"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer slack-access-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "slack", "refresh_token"); err != nil || !ok || got != "rotated-refresh-token" {
+		t.Fatalf("rotated refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+
+	secondReq, err := http.NewRequest(http.MethodGet, "https://slack.com/api/users.info", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := injector.Apply(context.Background(), secondReq, cfg, []string{"slack"}); err != nil {
+		t.Fatal(err)
+	}
+	if tokenRequests != 1 {
+		t.Fatalf("expected token response to be cached, got %d tokenRequests", tokenRequests)
+	}
+}
+
 func TestTodoistRefreshTokenSerializesConcurrentRefreshes(t *testing.T) {
 	var mu sync.Mutex
 	var tokenRequests int

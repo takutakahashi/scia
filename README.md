@@ -7,7 +7,7 @@ SaaS credential injector for agents.
 ## Features
 
 - Forward proxy for HTTP and HTTPS requests with credential injection.
-- Credential types: bearer token, basic auth, static header, OAuth2 client credentials, Google OAuth refresh tokens, Notion OAuth refresh tokens, and Todoist OAuth refresh tokens.
+- Credential types: bearer token, basic auth, static header, OAuth2 client credentials, Google OAuth refresh tokens, Notion OAuth refresh tokens, Todoist OAuth refresh tokens, and Slack OAuth user tokens.
 - Policy rules by host, method, and path with `allow`, `deny`, or `approval` actions.
 - Blocking approval flow exposed through local admin endpoints.
 - Reloadable configuration through a provider interface. The first adapter is YAML from the filesystem; database and AWS Secrets Manager providers can be added behind the same `config.Provider` interface.
@@ -133,6 +133,28 @@ For Todoist credentials, request-time injection uses a stored `access_token`
 when present, otherwise refreshes with a stored `refresh_token` and stores any
 rotated refresh token returned by Todoist.
 
+Slack apps use the same helper UI for user-centric OAuth. Configure the Slack
+app redirect URI to match `server.oauth.slack.redirectUrl`, for example:
+
+```yaml
+server:
+  oauth:
+    slack:
+      credentialId: slack
+      clientId: "env:SLACK_OAUTH_CLIENT_ID"
+      clientSecret: "env:SLACK_OAUTH_CLIENT_SECRET"
+      scope: "users:read chat:write"
+      redirectUrl: "http://localhost:8081/oauth/slack/callback"
+```
+
+Open `http://localhost:8081/` and choose the Slack credential. `scia` sends the
+authorization request to Slack's user-token authorization endpoint, exchanges
+the returned code at `https://slack.com/api/oauth.v2.user.access`, and stores a
+returned `refresh_token` when token rotation is enabled. If Slack returns only a
+long-lived user `access_token`, that token is stored instead. Request-time
+injection uses a stored `access_token` when present, otherwise refreshes with the
+stored `refresh_token` at `https://slack.com/api/oauth.v2.access`.
+
 The SQLite store is local persistence, not encryption. Keep the database path on a protected volume and restrict filesystem access to the `scia` process.
 
 ## Namespaced OAuth broker
@@ -160,6 +182,10 @@ server:
           clientIdSecretRef: "secret:service-a.todoist.client-id"
           clientSecretRef: "secret:service-a.todoist.client-secret"
           scope: "data:read_write"
+        slack:
+          clientIdSecretRef: "secret:service-a.slack.client-id"
+          clientSecretRef: "secret:service-a.slack.client-secret"
+          scope: "users:read chat:write"
 ```
 
 `server.mode` is exclusive:
@@ -205,6 +231,14 @@ Todoist broker endpoints:
 - `POST /oauth/{namespace}/todoist/token` forwards a refresh-token or authorization-code request to Todoist with the configured client ID and client secret injected by scia.
 - `POST /oauth/{namespace}/todoist/access-token` returns a stored Todoist legacy access token, or exchanges the stored refresh token for a new access token and stores any rotated refresh token returned by Todoist.
 - `POST /oauth/{namespace}/todoist/revoke` forwards a revoke request to Todoist.
+
+Slack broker endpoints:
+
+- `GET /oauth/{namespace}/slack/authorization-url?state=...` returns a generated Slack user-token authorization URL.
+- `GET /oauth/{namespace}/slack/start` redirects to the generated Slack authorization URL.
+- `POST /oauth/{namespace}/slack/token` forwards a refresh-token or authorization-code request to Slack with the configured client ID and client secret injected by scia.
+- `POST /oauth/{namespace}/slack/access-token` returns a stored Slack legacy access token, or exchanges the stored refresh token for a new access token and stores any rotated refresh token returned by Slack.
+- `POST /oauth/{namespace}/slack/revoke` forwards a revoke request to Slack.
 
 Frontend integration metadata:
 
@@ -282,6 +316,11 @@ credentials:
     type: todoist-oauth-refresh-token
     params:
       token_broker_url: "http://scia-oauth:8081/oauth/service-a/todoist/token"
+      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
+  - id: service-a.slack
+    type: slack-user-oauth-token
+    params:
+      token_broker_url: "http://scia-oauth:8081/oauth/service-a/slack/token"
       token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
 ```
 

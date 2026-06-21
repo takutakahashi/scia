@@ -100,6 +100,7 @@ type IntegrationsConfig struct {
 	Google  IntegrationConfig `yaml:"google"`
 	Notion  IntegrationConfig `yaml:"notion"`
 	Todoist IntegrationConfig `yaml:"todoist"`
+	Slack   IntegrationConfig `yaml:"slack"`
 }
 
 type IntegrationConfig struct {
@@ -114,6 +115,7 @@ type OAuthConfig struct {
 	Google       GoogleOAuthConfig                         `yaml:"google"`
 	Notion       NotionOAuthConfig                         `yaml:"notion"`
 	Todoist      TodoistOAuthConfig                        `yaml:"todoist"`
+	Slack        SlackOAuthConfig                          `yaml:"slack"`
 	Namespaces   map[string]OAuthNamespaceConfig           `yaml:"namespaces"`
 }
 
@@ -178,10 +180,25 @@ type TodoistOAuthConfig struct {
 	RedirectURL       string `yaml:"redirectUrl"`
 }
 
+type SlackOAuthConfig struct {
+	CredentialID      string `yaml:"credentialId"`
+	ClientID          string `yaml:"clientId"`
+	ClientIDSecretRef string `yaml:"clientIdSecretRef"`
+	ClientSecret      string `yaml:"clientSecret"`
+	ClientSecretRef   string `yaml:"clientSecretRef"`
+	Scope             string `yaml:"scope"`
+	AuthURL           string `yaml:"authUrl"`
+	TokenURL          string `yaml:"tokenUrl"`
+	RefreshTokenURL   string `yaml:"refreshTokenUrl"`
+	RevokeURL         string `yaml:"revokeUrl"`
+	RedirectURL       string `yaml:"redirectUrl"`
+}
+
 type OAuthNamespaceConfig struct {
 	Google  GoogleOAuthConfig  `yaml:"google"`
 	Notion  NotionOAuthConfig  `yaml:"notion"`
 	Todoist TodoistOAuthConfig `yaml:"todoist"`
+	Slack   SlackOAuthConfig   `yaml:"slack"`
 }
 
 type SecretsConfig struct {
@@ -296,7 +313,7 @@ func (c *Config) Validate() error {
 		}
 		seenCreds[cred.ID] = struct{}{}
 		switch cred.Type {
-		case "bearer", "basic", "static-header", "oauth2-client-credentials", "google-oauth-refresh-token", "notion-oauth-refresh-token", "todoist-oauth-refresh-token":
+		case "bearer", "basic", "static-header", "oauth2-client-credentials", "google-oauth-refresh-token", "notion-oauth-refresh-token", "todoist-oauth-refresh-token", "slack-user-oauth-token":
 		default:
 			return fmt.Errorf("credential %q has unsupported type %q", cred.ID, cred.Type)
 		}
@@ -313,6 +330,9 @@ func (c *Config) Validate() error {
 	if c.Server.OAuth.Todoist.HasClientConfig() {
 		seenCreds[c.TodoistOAuthCredentialID()] = struct{}{}
 	}
+	if c.Server.OAuth.Slack.HasClientConfig() {
+		seenCreds[c.SlackOAuthCredentialID()] = struct{}{}
+	}
 	for namespace, ns := range c.Server.OAuth.Namespaces {
 		if namespace == "" {
 			return fmt.Errorf("server.oauth.namespaces cannot include an empty namespace")
@@ -328,6 +348,9 @@ func (c *Config) Validate() error {
 		}
 		if ns.Todoist.HasClientConfig() {
 			seenCreds[NamespaceTodoistCredentialID(namespace)] = struct{}{}
+		}
+		if ns.Slack.HasClientConfig() {
+			seenCreds[NamespaceSlackCredentialID(namespace)] = struct{}{}
 		}
 	}
 	for i, rule := range c.Rules {
@@ -363,6 +386,9 @@ func CredentialByID(cfg *Config, id string) (CredentialConfig, bool) {
 	if cfg.Server.OAuth.Todoist.HasClientConfig() && id == cfg.TodoistOAuthCredentialID() {
 		return CredentialConfig{ID: id, Type: "todoist-oauth-refresh-token", Params: map[string]string{}}, true
 	}
+	if cfg.Server.OAuth.Slack.HasClientConfig() && id == cfg.SlackOAuthCredentialID() {
+		return CredentialConfig{ID: id, Type: "slack-user-oauth-token", Params: map[string]string{}}, true
+	}
 	if namespace, ok := GoogleCredentialNamespace(id); ok {
 		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Google.HasClientConfig() {
 			return CredentialConfig{ID: id, Type: "google-oauth-refresh-token", Params: map[string]string{}}, true
@@ -376,6 +402,11 @@ func CredentialByID(cfg *Config, id string) (CredentialConfig, bool) {
 	if namespace, ok := TodoistCredentialNamespace(id); ok {
 		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Todoist.HasClientConfig() {
 			return CredentialConfig{ID: id, Type: "todoist-oauth-refresh-token", Params: map[string]string{}}, true
+		}
+	}
+	if namespace, ok := SlackCredentialNamespace(id); ok {
+		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Slack.HasClientConfig() {
+			return CredentialConfig{ID: id, Type: "slack-user-oauth-token", Params: map[string]string{}}, true
 		}
 	}
 	return CredentialConfig{}, false
@@ -402,6 +433,13 @@ func (c *Config) TodoistOAuthCredentialID() string {
 	return "todoist"
 }
 
+func (c *Config) SlackOAuthCredentialID() string {
+	if c.Server.OAuth.Slack.CredentialID != "" {
+		return c.Server.OAuth.Slack.CredentialID
+	}
+	return "slack"
+}
+
 func (g GoogleOAuthConfig) HasClientConfig() bool {
 	return (g.ClientID != "" || g.ClientIDSecretRef != "") && (g.ClientSecret != "" || g.ClientSecretRef != "")
 }
@@ -412,6 +450,10 @@ func (n NotionOAuthConfig) HasClientConfig() bool {
 
 func (t TodoistOAuthConfig) HasClientConfig() bool {
 	return (t.ClientID != "" || t.ClientIDSecretRef != "") && (t.ClientSecret != "" || t.ClientSecretRef != "")
+}
+
+func (s SlackOAuthConfig) HasClientConfig() bool {
+	return (s.ClientID != "" || s.ClientIDSecretRef != "") && (s.ClientSecret != "" || s.ClientSecretRef != "")
 }
 
 func GoogleCredentialNamespace(id string) (string, bool) {
@@ -438,6 +480,14 @@ func TodoistCredentialNamespace(id string) (string, bool) {
 	return namespace, true
 }
 
+func SlackCredentialNamespace(id string) (string, bool) {
+	namespace, provider, ok := strings.Cut(id, ".")
+	if !ok || namespace == "" || provider != "slack" {
+		return "", false
+	}
+	return namespace, true
+}
+
 func NamespaceGoogleCredentialID(namespace string) string {
 	return namespace + ".google"
 }
@@ -448,6 +498,10 @@ func NamespaceNotionCredentialID(namespace string) string {
 
 func NamespaceTodoistCredentialID(namespace string) string {
 	return namespace + ".todoist"
+}
+
+func NamespaceSlackCredentialID(namespace string) string {
+	return namespace + ".slack"
 }
 
 func GoogleOAuthConfigForCredential(cfg *Config, credentialID string) (GoogleOAuthConfig, bool) {
@@ -496,6 +550,22 @@ func TodoistOAuthConfigForCredential(cfg *Config, credentialID string) (TodoistO
 		}
 	}
 	return TodoistOAuthConfig{}, false
+}
+
+func SlackOAuthConfigForCredential(cfg *Config, credentialID string) (SlackOAuthConfig, bool) {
+	if credentialID == "" || credentialID == cfg.SlackOAuthCredentialID() {
+		if cfg.Server.OAuth.Slack.HasClientConfig() {
+			return cfg.Server.OAuth.Slack, true
+		}
+		return SlackOAuthConfig{}, false
+	}
+	if namespace, ok := SlackCredentialNamespace(credentialID); ok {
+		ns, exists := cfg.Server.OAuth.Namespaces[namespace]
+		if exists && ns.Slack.HasClientConfig() {
+			return ns.Slack, true
+		}
+	}
+	return SlackOAuthConfig{}, false
 }
 
 func SecretRefParts(ref string) (string, string, error) {
