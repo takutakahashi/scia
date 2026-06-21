@@ -118,6 +118,30 @@ func TestValidateAllowsNamespacedTodoistCredentialReference(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsNamespacedGitHubCredentialReference(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			OAuth: OAuthConfig{
+				Namespaces: map[string]OAuthNamespaceConfig{
+					"service-a": {
+						GitHub: GitHubOAuthConfig{
+							ClientIDSecretRef: "service-a.github.client-id",
+							ClientSecretRef:   "service-a.github.client-secret",
+						},
+					},
+				},
+			},
+		},
+		Rules: []RuleConfig{
+			{Name: "github", Action: "allow", Credentials: []string{"service-a.github"}},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateRequiresUsersForKubernetesMode(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{
