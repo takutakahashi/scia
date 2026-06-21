@@ -21,6 +21,7 @@ type Injector struct {
 	client  *http.Client
 	secrets secrets.Store
 	cache   sync.Map
+	locks   sync.Map
 }
 
 func NewInjector(secretStore secrets.Store) *Injector {
@@ -289,6 +290,18 @@ func (i *Injector) googleRefreshToken(ctx context.Context, cfg *config.Config, c
 }
 
 func (i *Injector) todoistRefreshToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	if value, ok := i.cache.Load(cred.ID); ok {
+		token := value.(cachedToken)
+		if time.Until(token.expiresAt) > 30*time.Second {
+			return token.accessToken, nil
+		}
+	}
+
+	lockValue, _ := i.locks.LoadOrStore(cred.ID, &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if value, ok := i.cache.Load(cred.ID); ok {
 		token := value.(cachedToken)
 		if time.Until(token.expiresAt) > 30*time.Second {

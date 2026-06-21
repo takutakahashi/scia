@@ -199,6 +199,67 @@ rules:
 	}
 }
 
+func TestMITMConnectUsesTodoistIntegrationHosts(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer todoist-token" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL := mustParseURL(t, upstream.URL)
+	proxyServer, cfgPath := newTestProxyWithPath(t, fmt.Sprintf(`
+server:
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  integrations:
+    todoist:
+      hosts: ["%s"]
+credentials:
+  - id: todoist-token
+    type: bearer
+    value: todoist-token
+rules:
+  - name: inject-todoist
+    hosts: ["%s"]
+    methods: ["GET"]
+    paths: ["/api/v1/tasks"]
+    action: allow
+    credentials: ["todoist-token"]
+`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem"), upstreamURL.Hostname(), upstreamURL.Hostname()))
+	defer proxyServer.Close()
+	proxyServer.Config.Handler.(*Handler).transport = upstream.Client().Transport.(*http.Transport).Clone()
+
+	cfg := loadTestConfig(t, cfgPath)
+	certPEM, err := os.ReadFile(cfg.Server.MITM.CACertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(certPEM) {
+		t.Fatal("failed to append scia ca")
+	}
+	proxyURL := mustParseURL(t, proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+		TLSClientConfig: &tls.Config{
+			RootCAs: roots,
+		},
+	}}
+
+	resp, err := client.Get("https://" + upstreamURL.Host + "/api/v1/tasks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(body))
+	}
+}
+
 func TestMITMConnectForcesHTTP1Upstream(t *testing.T) {
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ProtoMajor != 1 {

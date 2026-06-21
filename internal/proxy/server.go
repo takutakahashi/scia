@@ -445,7 +445,15 @@ func integrationMITMHosts(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
 	}
-	return cfg.Server.Integrations.Google.Hosts
+	hosts := make([]string, 0,
+		len(cfg.Server.Integrations.Google.Hosts)+
+			len(cfg.Server.Integrations.Notion.Hosts)+
+			len(cfg.Server.Integrations.Todoist.Hosts),
+	)
+	hosts = append(hosts, cfg.Server.Integrations.Google.Hosts...)
+	hosts = append(hosts, cfg.Server.Integrations.Notion.Hosts...)
+	hosts = append(hosts, cfg.Server.Integrations.Todoist.Hosts...)
+	return hosts
 }
 
 func isProxySelfTarget(listenAddr, targetHost, scheme string) bool {

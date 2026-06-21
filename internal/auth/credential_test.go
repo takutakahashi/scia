@@ -3,8 +3,10 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/takutakahashi/scia/internal/config"
@@ -592,6 +594,81 @@ func TestTodoistRefreshTokenUsesStoredAccessToken(t *testing.T) {
 	}
 }
 
+func TestTodoistRefreshTokenSerializesConcurrentRefreshes(t *testing.T) {
+	var mu sync.Mutex
+	var tokenRequests int
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		tokenRequests++
+		mu.Unlock()
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "refresh_token", "refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "todoist-access-token",
+			"refresh_token": "rotated-refresh-token",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "todoist", "refresh_token", "refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Credentials: []config.CredentialConfig{
+			{
+				ID:   "todoist",
+				Type: "todoist-oauth-refresh-token",
+				Params: map[string]string{
+					"token_url":     tokenEndpoint.URL,
+					"client_id":     "client-id",
+					"client_secret": "client-secret",
+				},
+			},
+		},
+	}
+	injector := NewInjector(secretStore)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 5)
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodGet, "https://api.todoist.com/api/v1/tasks", nil)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if err := injector.Apply(context.Background(), req, cfg, []string{"todoist"}); err != nil {
+				errs <- err
+				return
+			}
+			if got := req.Header.Get("Authorization"); got != "Bearer todoist-access-token" {
+				errs <- fmt.Errorf("unexpected authorization header: %q", got)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mu.Lock()
+	gotRequests := tokenRequests
+	mu.Unlock()
+	if gotRequests != 1 {
+		t.Fatalf("expected one token request, got %d", gotRequests)
+	}
+}
+
 func TestTodoistRefreshTokenUsesNamespacedTodoistClientSecretRefs(t *testing.T) {
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
@@ -670,6 +747,7 @@ func assertFormValue(t *testing.T, r *http.Request, key, want string) {
 }
 
 type memorySecretStore struct {
+	mu     sync.Mutex
 	values map[string]string
 }
 
@@ -678,11 +756,15 @@ func newMemorySecretStore() *memorySecretStore {
 }
 
 func (s *memorySecretStore) Get(_ context.Context, credentialID, key string) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	value, ok := s.values[credentialID+":"+key]
 	return value, ok, nil
 }
 
 func (s *memorySecretStore) Put(_ context.Context, credentialID, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.values[credentialID+":"+key] = value
 	return nil
 }
