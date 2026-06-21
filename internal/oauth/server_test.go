@@ -890,6 +890,59 @@ func TestNamespaceGoogleAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	}
 }
 
+func TestNamespaceGoogleAuthorizationURLPostAcceptsScopeIDs(t *testing.T) {
+	readScopeEnabled := true
+	writeScopeEnabled := false
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
+					"service-a.google": {
+						Scopes: []config.OAuthIntegrationScopeConfig{
+							{ID: "calendar-read", Value: "https://www.googleapis.com/auth/calendar.readonly", Group: "calendar", Enabled: &readScopeEnabled},
+							{ID: "calendar-write", Value: "https://www.googleapis.com/auth/calendar", Group: "calendar", Enabled: &writeScopeEnabled},
+							{ID: "tasks-write", Value: "https://www.googleapis.com/auth/tasks", Group: "tasks", Enabled: &writeScopeEnabled},
+						},
+					},
+				},
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Google: config.GoogleOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+							RedirectURL:  "https://service-a.example.com/oauth/callback",
+						},
+					},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/google/authorization-url", strings.NewReader(`{"scope_ids":["calendar-write","tasks-write"],"redirect_uri":"https://app.example.com/api/oauth/google/callback"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(body["authorization_url"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	assertQueryValue(t, query, "redirect_uri", "https://app.example.com/api/oauth/google/callback")
+	assertQueryValue(t, query, "scope", "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks")
+	if body["scope"] != "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks" {
+		t.Fatalf("unexpected response scope: %#v", body)
+	}
+}
+
 func TestNamespaceTodoistAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{

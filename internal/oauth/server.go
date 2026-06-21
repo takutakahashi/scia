@@ -768,7 +768,7 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) namespaceGoogleOAuth(w http.ResponseWriter, r *http.Request, namespace, credentialID, action string, googleCfg config.GoogleOAuthConfig) {
 	switch action {
 	case "authorization-url":
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -805,7 +805,7 @@ func (s *Server) namespaceGoogleOAuth(w http.ResponseWriter, r *http.Request, na
 func (s *Server) namespaceNotionOAuth(w http.ResponseWriter, r *http.Request, namespace, credentialID, action string, notionCfg config.NotionOAuthConfig) {
 	switch action {
 	case "authorization-url":
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -842,7 +842,7 @@ func (s *Server) namespaceNotionOAuth(w http.ResponseWriter, r *http.Request, na
 func (s *Server) namespaceTodoistOAuth(w http.ResponseWriter, r *http.Request, namespace, credentialID, action string, todoistCfg config.TodoistOAuthConfig) {
 	switch action {
 	case "authorization-url":
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -906,7 +906,42 @@ func (s *Server) authorizeBrokerRequest(w http.ResponseWriter, r *http.Request, 
 	return true
 }
 
+type authorizationURLRequest struct {
+	RedirectURI string   `json:"redirect_uri"`
+	Scope       string   `json:"scope"`
+	ScopeIDs    []string `json:"scope_ids"`
+	State       string   `json:"state"`
+	AccessType  string   `json:"access_type"`
+	Prompt      string   `json:"prompt"`
+}
+
+func parseAuthorizationURLRequest(r *http.Request, provider string) (authorizationURLRequest, error) {
+	if r.Method == http.MethodPost {
+		var req authorizationURLRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			return authorizationURLRequest{}, fmt.Errorf("invalid json request: %w", err)
+		}
+		if len(req.ScopeIDs) > 0 {
+			req.Scope = strings.Join(req.ScopeIDs, oauthScopeSeparator(provider))
+		}
+		return req, nil
+	}
+	query := r.URL.Query()
+	return authorizationURLRequest{
+		RedirectURI: query.Get("redirect_uri"),
+		Scope:       query.Get("scope"),
+		State:       query.Get("state"),
+		AccessType:  query.Get("access_type"),
+		Prompt:      query.Get("prompt"),
+	}, nil
+}
+
 func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, googleCfg config.GoogleOAuthConfig, redirect bool) {
+	req, err := parseAuthorizationURLRequest(r, "google")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	clientID, err := s.googleClientValue(r.Context(), googleCfg.ClientID, googleCfg.ClientIDSecretRef)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -920,19 +955,19 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 	if authURL == "" {
 		authURL = googleAuthURL
 	}
-	redirectURI := r.URL.Query().Get("redirect_uri")
+	redirectURI := req.RedirectURI
 	if redirectURI == "" {
 		redirectURI = googleCfg.RedirectURL
 	}
 	if redirectURI == "" {
 		redirectURI = s.redirectURL(r)
 	}
-	scope, err := oauthScopeFromRequest(s.store.Get(), credentialID, "google", r.URL.Query().Get("scope"), googleCfg.Scope, "openid email profile")
+	scope, err := oauthScopeFromRequest(s.store.Get(), credentialID, "google", req.Scope, googleCfg.Scope, "openid email profile")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	state := r.URL.Query().Get("state")
+	state := req.State
 	if state == "" && redirect {
 		generated, err := randomState()
 		if err != nil {
@@ -946,8 +981,8 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 	q.Set("redirect_uri", redirectURI)
 	q.Set("response_type", "code")
 	q.Set("scope", scope)
-	q.Set("access_type", queryDefault(r, "access_type", "offline"))
-	q.Set("prompt", queryDefault(r, "prompt", "consent"))
+	q.Set("access_type", firstNonEmpty(req.AccessType, "offline"))
+	q.Set("prompt", firstNonEmpty(req.Prompt, "consent"))
 	if state != "" {
 		q.Set("state", state)
 	}
@@ -972,6 +1007,11 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, notionCfg config.NotionOAuthConfig, redirect bool) {
+	req, err := parseAuthorizationURLRequest(r, "notion")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	clientID, err := s.notionClientValue(r.Context(), notionCfg.ClientID, notionCfg.ClientIDSecretRef)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -985,14 +1025,14 @@ func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.
 	if authURL == "" {
 		authURL = notionAuthURL
 	}
-	redirectURI := r.URL.Query().Get("redirect_uri")
+	redirectURI := req.RedirectURI
 	if redirectURI == "" {
 		redirectURI = notionCfg.RedirectURL
 	}
 	if redirectURI == "" {
 		redirectURI = s.providerRedirectURL(r, "notion")
 	}
-	state := r.URL.Query().Get("state")
+	state := req.State
 	if state == "" && redirect {
 		generated, err := randomState()
 		if err != nil {
@@ -1028,6 +1068,11 @@ func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, todoistCfg config.TodoistOAuthConfig, redirect bool) {
+	req, err := parseAuthorizationURLRequest(r, "todoist")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	clientID, err := s.todoistClientValue(r.Context(), todoistCfg.ClientID, todoistCfg.ClientIDSecretRef)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1041,12 +1086,12 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 	if authURL == "" {
 		authURL = todoistAuthURL
 	}
-	scope, err := oauthScopeFromRequest(s.store.Get(), credentialID, "todoist", r.URL.Query().Get("scope"), todoistCfg.Scope, "data:read")
+	scope, err := oauthScopeFromRequest(s.store.Get(), credentialID, "todoist", req.Scope, todoistCfg.Scope, "data:read")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	state := r.URL.Query().Get("state")
+	state := req.State
 	if state == "" && redirect {
 		generated, err := randomState()
 		if err != nil {
@@ -1057,7 +1102,7 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 	}
 	q := url.Values{}
 	q.Set("client_id", clientID)
-	redirectURI := r.URL.Query().Get("redirect_uri")
+	redirectURI := req.RedirectURI
 	if redirectURI == "" {
 		redirectURI = todoistCfg.RedirectURL
 	}
