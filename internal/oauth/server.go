@@ -45,6 +45,7 @@ type Server struct {
 type stateInfo struct {
 	User         string
 	CredentialID string
+	RedirectURI  string
 	CreatedAt    time.Time
 }
 
@@ -89,10 +90,13 @@ type frontendIntegration struct {
 }
 
 type frontendIntegrationScope struct {
-	Value       string `json:"value"`
-	Label       string `json:"label,omitempty"`
-	Description string `json:"description,omitempty"`
-	Enabled     bool   `json:"enabled"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Desc      string `json:"desc,omitempty"`
+	Group     string `json:"group,omitempty"`
+	GroupName string `json:"group_name,omitempty"`
+	GroupDesc string `json:"group_desc,omitempty"`
+	Enabled   bool   `json:"enabled"`
 }
 
 func NewServer(store *config.Store, secretStore secrets.Store, logger *slog.Logger) *Server {
@@ -198,10 +202,14 @@ func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create state", http.StatusInternalServerError)
 		return
 	}
-	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, CreatedAt: time.Now()})
+	redirectURI := r.URL.Query().Get("redirect_uri")
+	if redirectURI == "" {
+		redirectURI = s.redirectURL(r)
+	}
+	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, RedirectURI: redirectURI, CreatedAt: time.Now()})
 	q := url.Values{}
 	q.Set("client_id", clientID)
-	q.Set("redirect_uri", s.redirectURL(r))
+	q.Set("redirect_uri", redirectURI)
 	q.Set("response_type", "code")
 	q.Set("scope", scope)
 	q.Set("access_type", "offline")
@@ -237,7 +245,7 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credential disappeared", http.StatusBadRequest)
 		return
 	}
-	token, err := s.exchangeCode(r.Context(), r, cred, code)
+	token, err := s.exchangeCode(r.Context(), r, cred, code, info.RedirectURI)
 	if err != nil {
 		s.logger.Error("google oauth code exchange failed", "error", err)
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
@@ -524,7 +532,7 @@ type tokenResponse struct {
 	ErrorDesc    string `json:"error_description"`
 }
 
-func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.CredentialConfig, code string) (tokenResponse, error) {
+func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.CredentialConfig, code, redirectURI string) (tokenResponse, error) {
 	cfg := s.store.Get()
 	tokenURL := cred.Params["token_url"]
 	googleCfg, hasGoogleCfg := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
@@ -547,7 +555,10 @@ func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.
 	form.Set("code", code)
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSecret)
-	form.Set("redirect_uri", s.redirectURL(r))
+	if redirectURI == "" {
+		redirectURI = s.redirectURL(r)
+	}
+	form.Set("redirect_uri", redirectURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return tokenResponse{}, err
@@ -757,7 +768,7 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) namespaceGoogleOAuth(w http.ResponseWriter, r *http.Request, namespace, credentialID, action string, googleCfg config.GoogleOAuthConfig) {
 	switch action {
 	case "authorization-url":
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -794,7 +805,7 @@ func (s *Server) namespaceGoogleOAuth(w http.ResponseWriter, r *http.Request, na
 func (s *Server) namespaceNotionOAuth(w http.ResponseWriter, r *http.Request, namespace, credentialID, action string, notionCfg config.NotionOAuthConfig) {
 	switch action {
 	case "authorization-url":
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -831,7 +842,7 @@ func (s *Server) namespaceNotionOAuth(w http.ResponseWriter, r *http.Request, na
 func (s *Server) namespaceTodoistOAuth(w http.ResponseWriter, r *http.Request, namespace, credentialID, action string, todoistCfg config.TodoistOAuthConfig) {
 	switch action {
 	case "authorization-url":
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -895,7 +906,42 @@ func (s *Server) authorizeBrokerRequest(w http.ResponseWriter, r *http.Request, 
 	return true
 }
 
+type authorizationURLRequest struct {
+	RedirectURI string   `json:"redirect_uri"`
+	Scope       string   `json:"scope"`
+	ScopeIDs    []string `json:"scope_ids"`
+	State       string   `json:"state"`
+	AccessType  string   `json:"access_type"`
+	Prompt      string   `json:"prompt"`
+}
+
+func parseAuthorizationURLRequest(r *http.Request, provider string) (authorizationURLRequest, error) {
+	if r.Method == http.MethodPost {
+		var req authorizationURLRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			return authorizationURLRequest{}, fmt.Errorf("invalid json request: %w", err)
+		}
+		if len(req.ScopeIDs) > 0 {
+			req.Scope = strings.Join(req.ScopeIDs, oauthScopeSeparator(provider))
+		}
+		return req, nil
+	}
+	query := r.URL.Query()
+	return authorizationURLRequest{
+		RedirectURI: query.Get("redirect_uri"),
+		Scope:       query.Get("scope"),
+		State:       query.Get("state"),
+		AccessType:  query.Get("access_type"),
+		Prompt:      query.Get("prompt"),
+	}, nil
+}
+
 func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, googleCfg config.GoogleOAuthConfig, redirect bool) {
+	req, err := parseAuthorizationURLRequest(r, "google")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	clientID, err := s.googleClientValue(r.Context(), googleCfg.ClientID, googleCfg.ClientIDSecretRef)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -909,20 +955,20 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 	if authURL == "" {
 		authURL = googleAuthURL
 	}
-	redirectURI := r.URL.Query().Get("redirect_uri")
+	redirectURI := req.RedirectURI
 	if redirectURI == "" {
 		redirectURI = googleCfg.RedirectURL
 	}
 	if redirectURI == "" {
 		redirectURI = s.redirectURL(r)
 	}
-	scope, err := oauthScopeFromRequest(s.store.Get(), credentialID, "google", r.URL.Query().Get("scope"), googleCfg.Scope, "openid email profile")
+	scope, err := oauthScopeFromRequest(s.store.Get(), credentialID, "google", req.Scope, googleCfg.Scope, "openid email profile")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	state := r.URL.Query().Get("state")
-	if state == "" && redirect {
+	state := req.State
+	if state == "" {
 		generated, err := randomState()
 		if err != nil {
 			http.Error(w, "failed to create state", http.StatusInternalServerError)
@@ -935,18 +981,19 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 	q.Set("redirect_uri", redirectURI)
 	q.Set("response_type", "code")
 	q.Set("scope", scope)
-	q.Set("access_type", queryDefault(r, "access_type", "offline"))
-	q.Set("prompt", queryDefault(r, "prompt", "consent"))
+	q.Set("access_type", firstNonEmpty(req.AccessType, "offline"))
+	q.Set("prompt", firstNonEmpty(req.Prompt, "consent"))
 	if state != "" {
 		q.Set("state", state)
 	}
 	location := authURL + "?" + q.Encode()
+	s.states.Store(state, stateInfo{
+		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+		CredentialID: credentialID,
+		RedirectURI:  redirectURI,
+		CreatedAt:    time.Now(),
+	})
 	if redirect {
-		s.states.Store(state, stateInfo{
-			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
-			CredentialID: credentialID,
-			CreatedAt:    time.Now(),
-		})
 		http.Redirect(w, r, location, http.StatusFound)
 		return
 	}
@@ -960,6 +1007,11 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, notionCfg config.NotionOAuthConfig, redirect bool) {
+	req, err := parseAuthorizationURLRequest(r, "notion")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	clientID, err := s.notionClientValue(r.Context(), notionCfg.ClientID, notionCfg.ClientIDSecretRef)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -973,15 +1025,15 @@ func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.
 	if authURL == "" {
 		authURL = notionAuthURL
 	}
-	redirectURI := r.URL.Query().Get("redirect_uri")
+	redirectURI := req.RedirectURI
 	if redirectURI == "" {
 		redirectURI = notionCfg.RedirectURL
 	}
 	if redirectURI == "" {
 		redirectURI = s.providerRedirectURL(r, "notion")
 	}
-	state := r.URL.Query().Get("state")
-	if state == "" && redirect {
+	state := req.State
+	if state == "" {
 		generated, err := randomState()
 		if err != nil {
 			http.Error(w, "failed to create state", http.StatusInternalServerError)
@@ -998,12 +1050,12 @@ func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.
 		q.Set("state", state)
 	}
 	location := authURL + "?" + q.Encode()
+	s.states.Store(state, stateInfo{
+		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+		CredentialID: credentialID,
+		CreatedAt:    time.Now(),
+	})
 	if redirect {
-		s.states.Store(state, stateInfo{
-			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
-			CredentialID: credentialID,
-			CreatedAt:    time.Now(),
-		})
 		http.Redirect(w, r, location, http.StatusFound)
 		return
 	}
@@ -1016,6 +1068,11 @@ func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http.Request, namespace, credentialID string, todoistCfg config.TodoistOAuthConfig, redirect bool) {
+	req, err := parseAuthorizationURLRequest(r, "todoist")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	clientID, err := s.todoistClientValue(r.Context(), todoistCfg.ClientID, todoistCfg.ClientIDSecretRef)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1029,13 +1086,13 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 	if authURL == "" {
 		authURL = todoistAuthURL
 	}
-	scope, err := oauthScopeFromRequest(s.store.Get(), credentialID, "todoist", r.URL.Query().Get("scope"), todoistCfg.Scope, "data:read")
+	scope, err := oauthScopeFromRequest(s.store.Get(), credentialID, "todoist", req.Scope, todoistCfg.Scope, "data:read")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	state := r.URL.Query().Get("state")
-	if state == "" && redirect {
+	state := req.State
+	if state == "" {
 		generated, err := randomState()
 		if err != nil {
 			http.Error(w, "failed to create state", http.StatusInternalServerError)
@@ -1045,7 +1102,7 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 	}
 	q := url.Values{}
 	q.Set("client_id", clientID)
-	redirectURI := r.URL.Query().Get("redirect_uri")
+	redirectURI := req.RedirectURI
 	if redirectURI == "" {
 		redirectURI = todoistCfg.RedirectURL
 	}
@@ -1058,12 +1115,12 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 		q.Set("state", state)
 	}
 	location := authURL + "?" + q.Encode()
+	s.states.Store(state, stateInfo{
+		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+		CredentialID: credentialID,
+		CreatedAt:    time.Now(),
+	})
 	if redirect {
-		s.states.Store(state, stateInfo{
-			User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
-			CredentialID: credentialID,
-			CreatedAt:    time.Now(),
-		})
 		http.Redirect(w, r, location, http.StatusFound)
 		return
 	}
@@ -1682,7 +1739,7 @@ func integrationScopes(metadata config.OAuthIntegrationMetadataConfig, configure
 	}
 	if len(metadata.Scopes) > 0 {
 		scopes := make([]frontendIntegrationScope, 0, len(metadata.Scopes))
-		for _, scope := range metadata.Scopes {
+		for i, scope := range metadata.Scopes {
 			if scope.Value == "" {
 				continue
 			}
@@ -1693,17 +1750,24 @@ func integrationScopes(metadata config.OAuthIntegrationMetadataConfig, configure
 				enabled = true
 			}
 			scopes = append(scopes, frontendIntegrationScope{
-				Value:       scope.Value,
-				Label:       scope.Label,
-				Description: scope.Description,
-				Enabled:     enabled,
+				ID:        integrationScopeID(scope, i),
+				Name:      integrationScopeName(scope, i),
+				Desc:      firstNonEmpty(scope.Desc, scope.Description),
+				Group:     scope.Group,
+				GroupName: scope.GroupName,
+				GroupDesc: scope.GroupDesc,
+				Enabled:   enabled,
 			})
 		}
 		return scopes
 	}
 	scopes := make([]frontendIntegrationScope, 0, len(configuredScopes))
-	for _, scope := range configuredScopes {
-		scopes = append(scopes, frontendIntegrationScope{Value: scope, Enabled: true})
+	for i := range configuredScopes {
+		scopes = append(scopes, frontendIntegrationScope{
+			ID:      fmt.Sprintf("scope-%d", i+1),
+			Name:    fmt.Sprintf("Scope %d", i+1),
+			Enabled: true,
+		})
 	}
 	return scopes
 }
@@ -1720,32 +1784,92 @@ func oauthScopeFromRequest(cfg *config.Config, credentialID, provider, requested
 		return fallback, nil
 	}
 
-	allowed := make(map[string]struct{}, len(metadata.Scopes))
+	type allowedScope struct {
+		value string
+		group string
+	}
+	allowed := make(map[string]allowedScope, len(metadata.Scopes)*2)
 	var selected []string
-	for _, scope := range metadata.Scopes {
+	selectedGroups := map[string]string{}
+	for i, scope := range metadata.Scopes {
 		if scope.Value == "" {
 			continue
 		}
-		allowed[scope.Value] = struct{}{}
+		allowedValue := allowedScope{value: scope.Value, group: scope.Group}
+		allowed[integrationScopeID(scope, i)] = allowedValue
+		allowed[scope.Value] = allowedValue
 		if requested == "" && scopeDefaultEnabled(scope, configured) {
+			if err := selectOAuthScopeGroup(selectedGroups, allowedValue.value, allowedValue.group); err != nil {
+				return "", err
+			}
 			selected = append(selected, scope.Value)
 		}
 	}
 	if requested != "" {
-		selected = splitScopeValues(requested)
-		if len(selected) == 0 {
+		requestedScopes := splitScopeValues(requested)
+		if len(requestedScopes) == 0 {
 			return "", fmt.Errorf("scope must include at least one value")
 		}
-		for _, scope := range selected {
-			if _, ok := allowed[scope]; !ok {
+		selected = make([]string, 0, len(requestedScopes))
+		for _, scope := range requestedScopes {
+			allowedValue, ok := allowed[scope]
+			if !ok {
 				return "", fmt.Errorf("scope %q is not allowed for %s", scope, credentialID)
 			}
+			if err := selectOAuthScopeGroup(selectedGroups, allowedValue.value, allowedValue.group); err != nil {
+				return "", err
+			}
+			selected = append(selected, allowedValue.value)
 		}
 	}
 	if len(selected) == 0 {
 		return "", fmt.Errorf("no scopes are enabled for %s", credentialID)
 	}
 	return strings.Join(selected, oauthScopeSeparator(provider)), nil
+}
+
+func selectOAuthScopeGroup(selectedGroups map[string]string, value, group string) error {
+	if group == "" {
+		return nil
+	}
+	if selected, ok := selectedGroups[group]; ok && selected != value {
+		return fmt.Errorf("scope group %q can include only one selected scope", group)
+	}
+	selectedGroups[group] = value
+	return nil
+}
+
+func integrationScopeID(scope config.OAuthIntegrationScopeConfig, index int) string {
+	if scope.ID != "" {
+		return scope.ID
+	}
+	if name := firstNonEmpty(scope.Name, scope.Label, scope.ID); name != "" {
+		if id := slugifyScopeID(name); id != "" {
+			return id
+		}
+	}
+	return fmt.Sprintf("scope-%d", index+1)
+}
+
+func integrationScopeName(scope config.OAuthIntegrationScopeConfig, index int) string {
+	return firstNonEmpty(scope.Name, scope.Label, scope.ID, fmt.Sprintf("Scope %d", index+1))
+}
+
+func slugifyScopeID(value string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(value) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func scopeDefaultEnabled(scope config.OAuthIntegrationScopeConfig, configured string) bool {

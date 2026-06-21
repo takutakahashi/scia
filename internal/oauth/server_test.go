@@ -60,14 +60,19 @@ func TestFrontendIntegrationsReturnsConfiguredOAuthIntegrations(t *testing.T) {
 						},
 						Scopes: []config.OAuthIntegrationScopeConfig{
 							{
-								Value:       "https://www.googleapis.com/auth/calendar",
-								Label:       "Calendar write",
-								Description: "Read and write calendars.",
-								Enabled:     &calendarScopeEnabled,
+								Value:     "https://www.googleapis.com/auth/calendar",
+								ID:        "calendar-write",
+								Name:      "Calendar write",
+								Desc:      "Read and write calendars.",
+								Group:     "calendar",
+								GroupName: "Calendar access",
+								GroupDesc: "Choose how much calendar access to grant.",
+								Enabled:   &calendarScopeEnabled,
 							},
 							{
 								Value:   "https://www.googleapis.com/auth/drive",
-								Label:   "Drive",
+								ID:      "drive",
+								Name:    "Drive",
 								Enabled: &driveScopeEnabled,
 							},
 						},
@@ -123,10 +128,10 @@ func TestFrontendIntegrationsReturnsConfiguredOAuthIntegrations(t *testing.T) {
 	if len(got.Scopes) != 2 {
 		t.Fatalf("unexpected scopes: %#v", got.Scopes)
 	}
-	if got.Scopes[0].Value != "https://www.googleapis.com/auth/calendar" || !got.Scopes[0].Enabled {
+	if got.Scopes[0].ID != "calendar-write" || got.Scopes[0].Name != "Calendar write" || got.Scopes[0].Desc != "Read and write calendars." || got.Scopes[0].Group != "calendar" || got.Scopes[0].GroupName != "Calendar access" || got.Scopes[0].GroupDesc != "Choose how much calendar access to grant." || !got.Scopes[0].Enabled {
 		t.Fatalf("unexpected first scope: %#v", got.Scopes[0])
 	}
-	if got.Scopes[1].Value != "https://www.googleapis.com/auth/drive" || got.Scopes[1].Enabled {
+	if got.Scopes[1].ID != "drive" || got.Scopes[1].Name != "Drive" || got.Scopes[1].Enabled {
 		t.Fatalf("unexpected second scope: %#v", got.Scopes[1])
 	}
 }
@@ -177,7 +182,7 @@ func TestFrontendIntegrationsReturnsNamespacedOAuthIntegrations(t *testing.T) {
 	if got.Setup["callback_url"] != "https://service-a.example.com/oauth/todoist/callback" {
 		t.Fatalf("unexpected setup: %#v", got.Setup)
 	}
-	if len(got.Scopes) != 2 || got.Scopes[0].Value != "data:read" || got.Scopes[1].Value != "data:read_write" {
+	if len(got.Scopes) != 2 || got.Scopes[0].ID != "scope-1" || got.Scopes[0].Name != "Scope 1" || got.Scopes[1].ID != "scope-2" || got.Scopes[1].Name != "Scope 2" {
 		t.Fatalf("unexpected scopes: %#v", got.Scopes)
 	}
 }
@@ -370,8 +375,8 @@ func TestGoogleOAuthStartUsesEnabledMetadataScopesByDefault(t *testing.T) {
 				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
 					"google-calendar": {
 						Scopes: []config.OAuthIntegrationScopeConfig{
-							{Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
-							{Value: "https://www.googleapis.com/auth/calendar", Enabled: &writeScopeEnabled},
+							{ID: "calendar-read", Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
+							{ID: "calendar-write", Value: "https://www.googleapis.com/auth/calendar", Enabled: &writeScopeEnabled},
 						},
 					},
 				},
@@ -411,8 +416,8 @@ func TestGoogleOAuthStartAcceptsAllowedMetadataScopeSelection(t *testing.T) {
 				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
 					"google-calendar": {
 						Scopes: []config.OAuthIntegrationScopeConfig{
-							{Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
-							{Value: "https://www.googleapis.com/auth/calendar", Enabled: &writeScopeEnabled},
+							{ID: "calendar-read", Value: "https://www.googleapis.com/auth/calendar.readonly", Enabled: &readScopeEnabled},
+							{ID: "calendar-write", Value: "https://www.googleapis.com/auth/calendar", Enabled: &writeScopeEnabled},
 						},
 					},
 				},
@@ -425,7 +430,7 @@ func TestGoogleOAuthStartAcceptsAllowedMetadataScopeSelection(t *testing.T) {
 		},
 	})
 	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
-	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar", nil)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar&scope=calendar-read%20calendar-write", nil)
 	rec := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rec, req)
@@ -439,6 +444,43 @@ func TestGoogleOAuthStartAcceptsAllowedMetadataScopeSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertQueryValue(t, parsed.Query(), "scope", "https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar")
+}
+
+func TestGoogleOAuthStartRejectsMultipleMetadataScopesInSameGroup(t *testing.T) {
+	readScopeEnabled := true
+	writeScopeEnabled := false
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				RedirectURL: "http://localhost:8081/oauth/google/callback",
+				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
+					"google-calendar": {
+						Scopes: []config.OAuthIntegrationScopeConfig{
+							{ID: "calendar-read", Value: "https://www.googleapis.com/auth/calendar.readonly", Group: "calendar", Enabled: &readScopeEnabled},
+							{ID: "calendar-write", Value: "https://www.googleapis.com/auth/calendar", Group: "calendar", Enabled: &writeScopeEnabled},
+						},
+					},
+				},
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "config-client-id",
+					ClientSecret: "config-client-secret",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar&scope=calendar-read%20calendar-write", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "can include only one selected scope") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
 }
 
 func TestGoogleOAuthStartRejectsUnknownMetadataScopeSelection(t *testing.T) {
@@ -845,6 +887,66 @@ func TestNamespaceGoogleAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	assertQueryValue(t, query, "state", "state-1")
 	if strings.Contains(body["authorization_url"], "client-secret") {
 		t.Fatalf("authorization URL leaked client secret: %s", body["authorization_url"])
+	}
+}
+
+func TestNamespaceGoogleAuthorizationURLPostAcceptsScopeIDs(t *testing.T) {
+	readScopeEnabled := true
+	writeScopeEnabled := false
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
+					"service-a.google": {
+						Scopes: []config.OAuthIntegrationScopeConfig{
+							{ID: "calendar-read", Value: "https://www.googleapis.com/auth/calendar.readonly", Group: "calendar", Enabled: &readScopeEnabled},
+							{ID: "calendar-write", Value: "https://www.googleapis.com/auth/calendar", Group: "calendar", Enabled: &writeScopeEnabled},
+							{ID: "tasks-write", Value: "https://www.googleapis.com/auth/tasks", Group: "tasks", Enabled: &writeScopeEnabled},
+						},
+					},
+				},
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						Google: config.GoogleOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+							RedirectURL:  "https://service-a.example.com/oauth/callback",
+						},
+					},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/google/authorization-url", strings.NewReader(`{"scope_ids":["calendar-write","tasks-write"],"redirect_uri":"https://app.example.com/api/oauth/google/callback"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(body["authorization_url"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	assertQueryValue(t, query, "redirect_uri", "https://app.example.com/api/oauth/google/callback")
+	assertQueryValue(t, query, "scope", "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks")
+	state := query.Get("state")
+	if state == "" {
+		t.Fatalf("state was not generated")
+	}
+	if _, ok := srv.states.Load(state); !ok {
+		t.Fatalf("state was not stored")
+	}
+	if body["scope"] != "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks" {
+		t.Fatalf("unexpected response scope: %#v", body)
 	}
 }
 
