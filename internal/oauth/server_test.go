@@ -636,6 +636,46 @@ func TestSlackOAuthStartRedirectsToSlack(t *testing.T) {
 	}
 }
 
+func TestGitHubOAuthStartRedirectsToGitHub(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				GitHub: config.GitHubOAuthConfig{
+					CredentialID: "github",
+					ClientID:     "github-client-id",
+					ClientSecret: "github-client-secret",
+					Scope:        "repo read:user",
+					RedirectURL:  "http://localhost:8081/oauth/github/callback",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/github/start?credential=github", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.HasPrefix(location, githubAuthURL+"?") {
+		t.Fatalf("unexpected redirect: %s", location)
+	}
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	assertQueryValue(t, query, "client_id", "github-client-id")
+	assertQueryValue(t, query, "scope", "repo read:user")
+	assertQueryValue(t, query, "redirect_uri", "http://localhost:8081/oauth/github/callback")
+	if query.Get("state") == "" {
+		t.Fatal("missing state")
+	}
+}
+
 func TestGoogleOAuthCallbackShowsRefreshToken(t *testing.T) {
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
@@ -930,6 +970,55 @@ func TestSlackOAuthCallbackStoresRefreshToken(t *testing.T) {
 	}
 	if got, ok, err := secretStore.Get(context.Background(), "slack", "refresh_token"); err != nil || !ok || got != "slack-refresh-token" {
 		t.Fatalf("refresh token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestGitHubOAuthCallbackStoresAccessToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept"); got != "application/json" {
+			t.Fatalf("unexpected accept header: %q", got)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "code", "auth-code")
+		assertFormValue(t, r, "client_id", "github-client-id")
+		assertFormValue(t, r, "client_secret", "github-client-secret")
+		assertFormValue(t, r, "redirect_uri", "http://localhost:8081/oauth/github/callback")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "github-access-token",
+			"token_type":   "bearer",
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				GitHub: config.GitHubOAuthConfig{
+					CredentialID: "github",
+					ClientID:     "github-client-id",
+					ClientSecret: "github-client-secret",
+					TokenURL:     tokenEndpoint.URL,
+					RedirectURL:  "http://localhost:8081/oauth/github/callback",
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	srv := NewServer(store, secretStore, slog.Default())
+	state := "test-state"
+	srv.states.Store(state, stateInfo{CredentialID: "github", RedirectURI: "http://localhost:8081/oauth/github/callback", CreatedAt: time.Now()})
+	req := httptest.NewRequest(http.MethodGet, "/oauth/github/callback?state="+state+"&code=auth-code", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "github", "access_token"); err != nil || !ok || got != "github-access-token" {
+		t.Fatalf("access token not stored: got=%q ok=%v err=%v", got, ok, err)
 	}
 }
 
@@ -1402,6 +1491,39 @@ func TestNamespaceTodoistAccessTokenUsesStoredAccessToken(t *testing.T) {
 		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), "legacy-access-token") {
+		t.Fatalf("token response did not include stored access token: %s", rec.Body.String())
+	}
+}
+
+func TestNamespaceGitHubAccessTokenUsesStoredAccessToken(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"service-a": {
+						GitHub: config.GitHubOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "service-a.github", "access_token", "stored-github-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/service-a/github/access-token", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "stored-github-access-token") {
 		t.Fatalf("token response did not include stored access token: %s", rec.Body.String())
 	}
 }

@@ -91,6 +91,12 @@ func (i *Injector) applyOne(ctx context.Context, r *http.Request, cfg *config.Co
 			return err
 		}
 		r.Header.Set("Authorization", "Bearer "+token)
+	case "github-oauth-token":
+		token, err := i.githubOAuthToken(ctx, cfg, cred)
+		if err != nil {
+			return err
+		}
+		r.Header.Set("Authorization", "Bearer "+token)
 	default:
 		return fmt.Errorf("unsupported credential type %q", cred.Type)
 	}
@@ -498,6 +504,107 @@ func (i *Injector) slackUserToken(ctx context.Context, cfg *config.Config, cred 
 	return token, nil
 }
 
+func (i *Injector) githubOAuthToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig) (string, error) {
+	if value, ok := i.cache.Load(cred.ID); ok {
+		token := value.(cachedToken)
+		if time.Until(token.expiresAt) > 30*time.Second {
+			return token.accessToken, nil
+		}
+	}
+
+	lockValue, _ := i.locks.LoadOrStore(cred.ID, &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if value, ok := i.cache.Load(cred.ID); ok {
+		token := value.(cachedToken)
+		if time.Until(token.expiresAt) > 30*time.Second {
+			return token.accessToken, nil
+		}
+	}
+
+	if accessToken, err := i.secretValue(ctx, cfg, cred, "access_token"); err != nil {
+		return "", err
+	} else if accessToken != "" {
+		expiresIn := time.Duration(315360000) * time.Second
+		i.cache.Store(cred.ID, cachedToken{accessToken: accessToken, expiresAt: time.Now().Add(expiresIn)})
+		return accessToken, nil
+	}
+
+	refreshToken, err := i.secretValue(ctx, cfg, cred, "refresh_token")
+	if err != nil {
+		return "", err
+	}
+	if refreshToken == "" {
+		return "", fmt.Errorf("credential %q requires refresh_token or access_token", cred.ID)
+	}
+
+	tokenBrokerURL := config.HeaderValueFromEnv(cred.Params["token_broker_url"])
+	if tokenBrokerURL != "" {
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", refreshToken)
+		if scope := cred.Params["scope"]; scope != "" {
+			form.Set("scope", scope)
+		}
+		token, rotatedRefreshToken, err := i.formTokenWithRefresh(ctx, cred.ID, tokenBrokerURL, form, config.HeaderValueFromEnv(cred.Params["token_broker_token"]))
+		if err != nil {
+			return "", err
+		}
+		if rotatedRefreshToken != "" {
+			if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+				return "", err
+			}
+		}
+		return token, nil
+	}
+
+	githubCfg, hasGitHubCfg := config.GitHubOAuthConfigForCredential(cfg, cred.ID)
+	tokenURL := cred.Params["token_url"]
+	if tokenURL == "" && hasGitHubCfg {
+		tokenURL = githubCfg.TokenURL
+	}
+	if tokenURL == "" {
+		tokenURL = "https://github.com/login/oauth/access_token"
+	}
+	clientID := config.HeaderValueFromEnv(cred.Params["client_id"])
+	if clientID == "" && hasGitHubCfg {
+		var err error
+		clientID, err = i.githubClientValue(ctx, githubCfg.ClientID, githubCfg.ClientIDSecretRef)
+		if err != nil {
+			return "", err
+		}
+	}
+	clientSecret := config.HeaderValueFromEnv(cred.Params["client_secret"])
+	if clientSecret == "" && hasGitHubCfg {
+		var err error
+		clientSecret, err = i.githubClientValue(ctx, githubCfg.ClientSecret, githubCfg.ClientSecretRef)
+		if err != nil {
+			return "", err
+		}
+	}
+	if clientID == "" || clientSecret == "" {
+		return "", fmt.Errorf("credential %q requires client_id, client_secret, and refresh_token, or access_token", cred.ID)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("refresh_token", refreshToken)
+	token, rotatedRefreshToken, err := i.formTokenWithRefresh(ctx, cred.ID, tokenURL, form, "")
+	if err != nil {
+		return "", err
+	}
+	if rotatedRefreshToken != "" {
+		if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+			return "", err
+		}
+	}
+	return token, nil
+}
+
 func (i *Injector) googleClientValue(ctx context.Context, literal, secretRef string) (string, error) {
 	if value := config.HeaderValueFromEnv(literal); value != "" {
 		return value, nil
@@ -519,6 +626,16 @@ func (i *Injector) todoistClientValue(ctx context.Context, literal, secretRef st
 }
 
 func (i *Injector) slackClientValue(ctx context.Context, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, i.secrets, secretRef)
+}
+
+func (i *Injector) githubClientValue(ctx context.Context, literal, secretRef string) (string, error) {
 	if value := config.HeaderValueFromEnv(literal); value != "" {
 		return value, nil
 	}

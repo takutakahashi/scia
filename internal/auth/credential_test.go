@@ -594,6 +594,29 @@ func TestTodoistRefreshTokenUsesStoredAccessToken(t *testing.T) {
 	}
 }
 
+func TestGitHubOAuthTokenUsesStoredAccessToken(t *testing.T) {
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "github", "access_token", "github-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Credentials: []config.CredentialConfig{
+			{ID: "github", Type: "github-oauth-token", Params: map[string]string{}},
+		},
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewInjector(secretStore).Apply(context.Background(), req, cfg, []string{"github"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer github-access-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+}
+
 func TestSlackUserTokenInjectsAccessTokenAndStoresRotatedRefreshToken(t *testing.T) {
 	var tokenRequests int
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

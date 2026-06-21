@@ -155,6 +155,25 @@ long-lived user `access_token`, that token is stored instead. Request-time
 injection uses a stored `access_token` when present, otherwise refreshes with the
 stored `refresh_token` at `https://slack.com/api/oauth.v2.access`.
 
+GitHub OAuth Apps use the same helper UI. Configure the GitHub OAuth App
+callback URL to match `server.oauth.github.redirectUrl`, for example:
+
+```yaml
+server:
+  oauth:
+    github:
+      credentialId: github
+      clientId: "env:GITHUB_OAUTH_CLIENT_ID"
+      clientSecret: "env:GITHUB_OAUTH_CLIENT_SECRET"
+      scope: "repo read:user"
+      redirectUrl: "http://localhost:8081/oauth/github/callback"
+```
+
+Open `http://localhost:8081/` and choose the GitHub credential. `scia` sends
+the authorization request to `https://github.com/login/oauth/authorize`,
+exchanges the returned code at `https://github.com/login/oauth/access_token`,
+and stores the returned `access_token`.
+
 The SQLite store is local persistence, not encryption. Keep the database path on a protected volume and restrict filesystem access to the `scia` process.
 
 ## Namespaced OAuth broker
@@ -240,6 +259,14 @@ Slack broker endpoints:
 - `POST /oauth/{namespace}/slack/access-token` returns a stored Slack legacy access token, or exchanges the stored refresh token for a new access token and stores any rotated refresh token returned by Slack.
 - `POST /oauth/{namespace}/slack/revoke` forwards a revoke request to Slack.
 
+GitHub broker endpoints:
+
+- `GET /oauth/{namespace}/github/authorization-url?state=...` returns a generated GitHub authorization URL.
+- `GET /oauth/{namespace}/github/start` redirects to the generated GitHub authorization URL.
+- `POST /oauth/{namespace}/github/token` forwards an authorization-code or refresh-token request to GitHub with the configured client ID and client secret injected by scia.
+- `POST /oauth/{namespace}/github/access-token` returns a stored GitHub access token, or exchanges the stored refresh token for a new access token and stores any rotated refresh token returned by GitHub.
+- `POST /oauth/{namespace}/github/revoke` deletes the app authorization grant for a GitHub OAuth token.
+
 Frontend integration metadata:
 
 - `GET /api/integrations` returns configured OAuth integrations as JSON for a frontend.
@@ -321,6 +348,11 @@ credentials:
     type: slack-user-oauth-token
     params:
       token_broker_url: "http://scia-oauth:8081/oauth/service-a/slack/token"
+      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
+  - id: service-a.github
+    type: github-oauth-token
+    params:
+      token_broker_url: "http://scia-oauth:8081/oauth/service-a/github/token"
       token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
 ```
 
