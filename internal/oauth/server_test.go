@@ -297,8 +297,9 @@ func TestGoogleOAuthStartRedirectsToGoogle(t *testing.T) {
 				ID:   "google",
 				Type: "google-oauth-refresh-token",
 				Params: map[string]string{
-					"client_id": "client-id",
-					"scope":     "https://www.googleapis.com/auth/calendar",
+					"client_id":     "client-id",
+					"client_secret": "client-secret",
+					"scope":         "https://www.googleapis.com/auth/calendar",
 				},
 			},
 		},
@@ -863,6 +864,9 @@ func TestNamespaceGoogleAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	if err := secretStore.Put(context.Background(), "service-a.google", "client-id", "secret-client-id"); err != nil {
 		t.Fatal(err)
 	}
+	if err := secretStore.Put(context.Background(), "service-a.google", "client-secret", "secret-client-secret"); err != nil {
+		t.Fatal(err)
+	}
 	srv := NewServer(store, secretStore, slog.Default())
 	req := httptest.NewRequest(http.MethodGet, "/oauth/service-a/google/authorization-url?state=state-1", nil)
 	rec := httptest.NewRecorder()
@@ -884,7 +888,18 @@ func TestNamespaceGoogleAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	assertQueryValue(t, query, "client_id", "secret-client-id")
 	assertQueryValue(t, query, "redirect_uri", "https://service-a.example.com/oauth/callback")
 	assertQueryValue(t, query, "scope", "https://www.googleapis.com/auth/calendar")
-	assertQueryValue(t, query, "state", "state-1")
+	state := query.Get("state")
+	if state == "" || state == "state-1" {
+		t.Fatalf("expected generated signed state, got %q", state)
+	}
+	otherServer := NewServer(store, secretStore, slog.Default())
+	info, ok, err := otherServer.consumeState(context.Background(), state, "google")
+	if err != nil || !ok {
+		t.Fatalf("signed state was not accepted by another server: ok=%v err=%v", ok, err)
+	}
+	if info.CredentialID != "service-a.google" {
+		t.Fatalf("unexpected state credential: %q", info.CredentialID)
+	}
 	if strings.Contains(body["authorization_url"], "client-secret") {
 		t.Fatalf("authorization URL leaked client secret: %s", body["authorization_url"])
 	}
@@ -942,8 +957,13 @@ func TestNamespaceGoogleAuthorizationURLPostAcceptsScopeIDs(t *testing.T) {
 	if state == "" {
 		t.Fatalf("state was not generated")
 	}
-	if _, ok := srv.states.Load(state); !ok {
-		t.Fatalf("state was not stored")
+	otherServer := NewServer(store, secrets.NoopStore{}, slog.Default())
+	info, ok, err := otherServer.consumeState(context.Background(), state, "google")
+	if err != nil || !ok {
+		t.Fatalf("signed state was not accepted by another server: ok=%v err=%v", ok, err)
+	}
+	if info.CredentialID != "service-a.google" || info.RedirectURI != "https://app.example.com/api/oauth/google/callback" {
+		t.Fatalf("unexpected state info: %#v", info)
 	}
 	if body["scope"] != "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks" {
 		t.Fatalf("unexpected response scope: %#v", body)
@@ -970,6 +990,9 @@ func TestNamespaceTodoistAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	if err := secretStore.Put(context.Background(), "service-a.todoist", "client-id", "secret-client-id"); err != nil {
 		t.Fatal(err)
 	}
+	if err := secretStore.Put(context.Background(), "service-a.todoist", "client-secret", "secret-client-secret"); err != nil {
+		t.Fatal(err)
+	}
 	srv := NewServer(store, secretStore, slog.Default())
 	req := httptest.NewRequest(http.MethodGet, "/oauth/service-a/todoist/authorization-url?state=state-1", nil)
 	rec := httptest.NewRecorder()
@@ -990,7 +1013,18 @@ func TestNamespaceTodoistAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	query := parsed.Query()
 	assertQueryValue(t, query, "client_id", "secret-client-id")
 	assertQueryValue(t, query, "scope", "data:read_write")
-	assertQueryValue(t, query, "state", "state-1")
+	state := query.Get("state")
+	if state == "" || state == "state-1" {
+		t.Fatalf("expected generated signed state, got %q", state)
+	}
+	otherServer := NewServer(store, secretStore, slog.Default())
+	info, ok, err := otherServer.consumeState(context.Background(), state, "todoist")
+	if err != nil || !ok {
+		t.Fatalf("signed state was not accepted by another server: ok=%v err=%v", ok, err)
+	}
+	if info.CredentialID != "service-a.todoist" {
+		t.Fatalf("unexpected state credential: %q", info.CredentialID)
+	}
 	if strings.Contains(body["authorization_url"], "client-secret") {
 		t.Fatalf("authorization URL leaked client secret: %s", body["authorization_url"])
 	}
@@ -1016,6 +1050,9 @@ func TestNamespaceNotionAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	if err := secretStore.Put(context.Background(), "service-a.notion", "client-id", "secret-client-id"); err != nil {
 		t.Fatal(err)
 	}
+	if err := secretStore.Put(context.Background(), "service-a.notion", "client-secret", "secret-client-secret"); err != nil {
+		t.Fatal(err)
+	}
 	srv := NewServer(store, secretStore, slog.Default())
 	req := httptest.NewRequest(http.MethodGet, "/oauth/service-a/notion/authorization-url?state=state-1", nil)
 	rec := httptest.NewRecorder()
@@ -1037,7 +1074,18 @@ func TestNamespaceNotionAuthorizationURLUsesSecretRefClientID(t *testing.T) {
 	assertQueryValue(t, query, "client_id", "secret-client-id")
 	assertQueryValue(t, query, "redirect_uri", "https://service-a.example.com/oauth/notion/callback")
 	assertQueryValue(t, query, "owner", "user")
-	assertQueryValue(t, query, "state", "state-1")
+	state := query.Get("state")
+	if state == "" || state == "state-1" {
+		t.Fatalf("expected generated signed state, got %q", state)
+	}
+	otherServer := NewServer(store, secretStore, slog.Default())
+	info, ok, err := otherServer.consumeState(context.Background(), state, "notion")
+	if err != nil || !ok {
+		t.Fatalf("signed state was not accepted by another server: ok=%v err=%v", ok, err)
+	}
+	if info.CredentialID != "service-a.notion" {
+		t.Fatalf("unexpected state credential: %q", info.CredentialID)
+	}
 	if strings.Contains(body["authorization_url"], "client-secret") {
 		t.Fatalf("authorization URL leaked client secret: %s", body["authorization_url"])
 	}

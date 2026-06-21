@@ -3,7 +3,9 @@ package oauth
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -47,6 +49,16 @@ type stateInfo struct {
 	CredentialID string
 	RedirectURI  string
 	CreatedAt    time.Time
+}
+
+type signedStatePayload struct {
+	Version      int    `json:"v"`
+	Provider     string `json:"provider"`
+	User         string `json:"user,omitempty"`
+	CredentialID string `json:"credential_id"`
+	RedirectURI  string `json:"redirect_uri,omitempty"`
+	CreatedAt    int64  `json:"created_at"`
+	Nonce        string `json:"nonce"`
 }
 
 type googleOption struct {
@@ -197,16 +209,15 @@ func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	state, err := randomState()
-	if err != nil {
-		http.Error(w, "failed to create state", http.StatusInternalServerError)
-		return
-	}
 	redirectURI := r.URL.Query().Get("redirect_uri")
 	if redirectURI == "" {
 		redirectURI = s.redirectURL(r)
 	}
-	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, RedirectURI: redirectURI, CreatedAt: time.Now()})
+	state, err := s.createState(r.Context(), "google", stateInfo{User: userID, CredentialID: credentialID, RedirectURI: redirectURI})
+	if err != nil {
+		http.Error(w, "failed to create state", http.StatusInternalServerError)
+		return
+	}
 	q := url.Values{}
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", redirectURI)
@@ -224,12 +235,15 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := r.URL.Query().Get("state")
-	rawInfo, ok := s.states.LoadAndDelete(state)
+	info, ok, err := s.consumeState(r.Context(), state, "google")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if !ok {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
 	}
-	info := rawInfo.(stateInfo)
 	if time.Since(info.CreatedAt) > 10*time.Minute {
 		http.Error(w, "state expired", http.StatusBadRequest)
 		return
@@ -309,12 +323,11 @@ func (s *Server) startNotion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credential is missing client_id", http.StatusBadRequest)
 		return
 	}
-	state, err := randomState()
+	state, err := s.createState(r.Context(), "notion", stateInfo{User: userID, CredentialID: credentialID})
 	if err != nil {
 		http.Error(w, "failed to create state", http.StatusInternalServerError)
 		return
 	}
-	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, CreatedAt: time.Now()})
 	authURL := notionAuthURL
 	if notionCfg, ok := config.NotionOAuthConfigForCredential(cfg, cred.ID); ok && notionCfg.AuthURL != "" {
 		authURL = notionCfg.AuthURL
@@ -334,12 +347,15 @@ func (s *Server) notionCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := r.URL.Query().Get("state")
-	rawInfo, ok := s.states.LoadAndDelete(state)
+	info, ok, err := s.consumeState(r.Context(), state, "notion")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if !ok {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
 	}
-	info := rawInfo.(stateInfo)
 	if time.Since(info.CreatedAt) > 10*time.Minute {
 		http.Error(w, "state expired", http.StatusBadRequest)
 		return
@@ -424,12 +440,11 @@ func (s *Server) startTodoist(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	state, err := randomState()
+	state, err := s.createState(r.Context(), "todoist", stateInfo{User: userID, CredentialID: credentialID})
 	if err != nil {
 		http.Error(w, "failed to create state", http.StatusInternalServerError)
 		return
 	}
-	s.states.Store(state, stateInfo{User: userID, CredentialID: credentialID, CreatedAt: time.Now()})
 	authURL := todoistAuthURL
 	redirectURI := ""
 	if todoistCfg, ok := config.TodoistOAuthConfigForCredential(cfg, cred.ID); ok && todoistCfg.AuthURL != "" {
@@ -455,12 +470,15 @@ func (s *Server) todoistCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := r.URL.Query().Get("state")
-	rawInfo, ok := s.states.LoadAndDelete(state)
+	info, ok, err := s.consumeState(r.Context(), state, "todoist")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if !ok {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
 	}
-	info := rawInfo.(stateInfo)
 	if time.Since(info.CreatedAt) > 10*time.Minute {
 		http.Error(w, "state expired", http.StatusBadRequest)
 		return
@@ -967,14 +985,14 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	state := req.State
-	if state == "" {
-		generated, err := randomState()
-		if err != nil {
-			http.Error(w, "failed to create state", http.StatusInternalServerError)
-			return
-		}
-		state = generated
+	state, err := s.createState(r.Context(), "google", stateInfo{
+		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+		CredentialID: credentialID,
+		RedirectURI:  redirectURI,
+	})
+	if err != nil {
+		http.Error(w, "failed to create state", http.StatusInternalServerError)
+		return
 	}
 	q := url.Values{}
 	q.Set("client_id", clientID)
@@ -987,12 +1005,6 @@ func (s *Server) namespaceGoogleAuthorizationURL(w http.ResponseWriter, r *http.
 		q.Set("state", state)
 	}
 	location := authURL + "?" + q.Encode()
-	s.states.Store(state, stateInfo{
-		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
-		CredentialID: credentialID,
-		RedirectURI:  redirectURI,
-		CreatedAt:    time.Now(),
-	})
 	if redirect {
 		http.Redirect(w, r, location, http.StatusFound)
 		return
@@ -1032,14 +1044,13 @@ func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.
 	if redirectURI == "" {
 		redirectURI = s.providerRedirectURL(r, "notion")
 	}
-	state := req.State
-	if state == "" {
-		generated, err := randomState()
-		if err != nil {
-			http.Error(w, "failed to create state", http.StatusInternalServerError)
-			return
-		}
-		state = generated
+	state, err := s.createState(r.Context(), "notion", stateInfo{
+		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+		CredentialID: credentialID,
+	})
+	if err != nil {
+		http.Error(w, "failed to create state", http.StatusInternalServerError)
+		return
 	}
 	q := url.Values{}
 	q.Set("client_id", clientID)
@@ -1050,11 +1061,6 @@ func (s *Server) namespaceNotionAuthorizationURL(w http.ResponseWriter, r *http.
 		q.Set("state", state)
 	}
 	location := authURL + "?" + q.Encode()
-	s.states.Store(state, stateInfo{
-		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
-		CredentialID: credentialID,
-		CreatedAt:    time.Now(),
-	})
 	if redirect {
 		http.Redirect(w, r, location, http.StatusFound)
 		return
@@ -1091,14 +1097,13 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	state := req.State
-	if state == "" {
-		generated, err := randomState()
-		if err != nil {
-			http.Error(w, "failed to create state", http.StatusInternalServerError)
-			return
-		}
-		state = generated
+	state, err := s.createState(r.Context(), "todoist", stateInfo{
+		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
+		CredentialID: credentialID,
+	})
+	if err != nil {
+		http.Error(w, "failed to create state", http.StatusInternalServerError)
+		return
 	}
 	q := url.Values{}
 	q.Set("client_id", clientID)
@@ -1115,11 +1120,6 @@ func (s *Server) namespaceTodoistAuthorizationURL(w http.ResponseWriter, r *http
 		q.Set("state", state)
 	}
 	location := authURL + "?" + q.Encode()
-	s.states.Store(state, stateInfo{
-		User:         s.namespaceStorageID(s.store.Get(), namespace, credentialID),
-		CredentialID: credentialID,
-		CreatedAt:    time.Now(),
-	})
 	if redirect {
 		http.Redirect(w, r, location, http.StatusFound)
 		return
@@ -2097,6 +2097,134 @@ func (s *Server) namespaceStorageID(cfg *config.Config, namespace, credentialID 
 		return namespace
 	}
 	return credentialID
+}
+
+func (s *Server) createState(ctx context.Context, provider string, info stateInfo) (string, error) {
+	if info.CreatedAt.IsZero() {
+		info.CreatedAt = time.Now()
+	}
+	nonce, err := randomState()
+	if err != nil {
+		return "", err
+	}
+	payload := signedStatePayload{
+		Version:      1,
+		Provider:     provider,
+		User:         info.User,
+		CredentialID: info.CredentialID,
+		RedirectURI:  info.RedirectURI,
+		CreatedAt:    info.CreatedAt.Unix(),
+		Nonce:        nonce,
+	}
+	key, err := s.stateSigningKey(ctx, s.store.Get(), provider, info.CredentialID)
+	if err != nil {
+		return "", err
+	}
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sig := signState(rawPayload, []byte(key))
+	return base64.RawURLEncoding.EncodeToString(rawPayload) + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+func (s *Server) consumeState(ctx context.Context, state, provider string) (stateInfo, bool, error) {
+	if state == "" {
+		return stateInfo{}, false, nil
+	}
+	parts := strings.Split(state, ".")
+	if len(parts) == 2 {
+		rawPayload, err := base64.RawURLEncoding.DecodeString(parts[0])
+		if err != nil {
+			return stateInfo{}, false, nil
+		}
+		gotSig, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return stateInfo{}, false, nil
+		}
+		var payload signedStatePayload
+		if err := json.Unmarshal(rawPayload, &payload); err != nil {
+			return stateInfo{}, false, nil
+		}
+		if payload.Version != 1 || payload.Provider != provider || payload.CredentialID == "" || payload.Nonce == "" {
+			return stateInfo{}, false, nil
+		}
+		key, err := s.stateSigningKey(ctx, s.store.Get(), provider, payload.CredentialID)
+		if err != nil {
+			return stateInfo{}, false, err
+		}
+		if !hmac.Equal(gotSig, signState(rawPayload, []byte(key))) {
+			return stateInfo{}, false, nil
+		}
+		return stateInfo{
+			User:         payload.User,
+			CredentialID: payload.CredentialID,
+			RedirectURI:  payload.RedirectURI,
+			CreatedAt:    time.Unix(payload.CreatedAt, 0),
+		}, true, nil
+	}
+
+	rawInfo, ok := s.states.LoadAndDelete(state)
+	if !ok {
+		return stateInfo{}, false, nil
+	}
+	info, ok := rawInfo.(stateInfo)
+	if !ok {
+		return stateInfo{}, false, nil
+	}
+	return info, true, nil
+}
+
+func signState(payload, key []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(payload)
+	return mac.Sum(nil)
+}
+
+func (s *Server) stateSigningKey(ctx context.Context, cfg *config.Config, provider, credentialID string) (string, error) {
+	switch provider {
+	case "google":
+		cred, ok := s.googleCredential(cfg, credentialID)
+		if !ok {
+			return "", fmt.Errorf("unknown google credential")
+		}
+		secret, err := s.googleClientSecret(ctx, cfg, cred)
+		if err != nil {
+			return "", err
+		}
+		if secret == "" {
+			return "", fmt.Errorf("google credential is missing client_secret")
+		}
+		return secret, nil
+	case "notion":
+		cred, ok := s.notionCredential(cfg, credentialID)
+		if !ok {
+			return "", fmt.Errorf("unknown notion credential")
+		}
+		secret, err := s.notionClientSecret(ctx, cfg, cred)
+		if err != nil {
+			return "", err
+		}
+		if secret == "" {
+			return "", fmt.Errorf("notion credential is missing client_secret")
+		}
+		return secret, nil
+	case "todoist":
+		cred, ok := s.todoistCredential(cfg, credentialID)
+		if !ok {
+			return "", fmt.Errorf("unknown todoist credential")
+		}
+		secret, err := s.todoistClientSecret(ctx, cfg, cred)
+		if err != nil {
+			return "", err
+		}
+		if secret == "" {
+			return "", fmt.Errorf("todoist credential is missing client_secret")
+		}
+		return secret, nil
+	default:
+		return "", fmt.Errorf("unknown provider %q", provider)
+	}
 }
 
 func (s *Server) googleCredential(cfg *config.Config, credentialID string) (config.CredentialConfig, bool) {
