@@ -68,6 +68,11 @@ ON CONFLICT(credential_id, key) DO UPDATE SET
 	return err
 }
 
+func (s *SQLiteStore) Delete(ctx context.Context, credentialID, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM secrets WHERE credential_id = ? AND key = ?`, credentialID, key)
+	return err
+}
+
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }

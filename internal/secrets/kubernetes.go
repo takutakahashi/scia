@@ -115,6 +115,26 @@ func (s *KubernetesStore) Put(ctx context.Context, userID, key, value string) er
 	return err
 }
 
+func (s *KubernetesStore) Delete(ctx context.Context, userID, key string) error {
+	secretName, err := s.secretName(userID)
+	if err != nil {
+		return err
+	}
+	existing, err := s.client.CoreV1().Secrets(s.namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if existing.Data == nil {
+		return nil
+	}
+	delete(existing.Data, key)
+	_, err = s.client.CoreV1().Secrets(s.namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	return err
+}
+
 func (s *KubernetesStore) Close() error {
 	return nil
 }

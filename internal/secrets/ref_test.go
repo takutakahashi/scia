@@ -55,6 +55,11 @@ func (s mapStore) Put(_ context.Context, credentialID, key, value string) error 
 	return nil
 }
 
+func (s mapStore) Delete(_ context.Context, credentialID, key string) error {
+	delete(s.values, credentialID+":"+key)
+	return nil
+}
+
 func (s mapStore) Close() error {
 	return nil
 }
