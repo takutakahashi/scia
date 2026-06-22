@@ -292,7 +292,8 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
-	if err := s.secrets.Put(r.Context(), s.storageUserID(cfg, info), "refresh_token", token.RefreshToken); err != nil {
+	storageID := s.storageUserID(cfg, info)
+	if err := s.secrets.Put(r.Context(), storageID, s.storageTokenKey(cfg, storageID, info.CredentialID, "refresh_token"), token.RefreshToken); err != nil {
 		s.logger.Error("failed to store google refresh token", "error", err, "credential", info.CredentialID, "user", info.User)
 		http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
 		return
@@ -404,7 +405,8 @@ func (s *Server) notionCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
-	if err := s.secrets.Put(r.Context(), s.storageUserID(cfg, info), "refresh_token", token.RefreshToken); err != nil {
+	storageID := s.storageUserID(cfg, info)
+	if err := s.secrets.Put(r.Context(), storageID, s.storageTokenKey(cfg, storageID, info.CredentialID, "refresh_token"), token.RefreshToken); err != nil {
 		s.logger.Error("failed to store notion refresh token", "error", err, "credential", info.CredentialID, "user", info.User)
 		http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
 		return
@@ -538,7 +540,7 @@ func (s *Server) todoistCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token response did not include refresh_token or access_token", http.StatusBadGateway)
 		return
 	}
-	if err := s.secrets.Put(r.Context(), storageID, storedTokenKind, storedTokenValue); err != nil {
+	if err := s.secrets.Put(r.Context(), storageID, s.storageTokenKey(cfg, storageID, info.CredentialID, storedTokenKind), storedTokenValue); err != nil {
 		s.logger.Error("failed to store todoist token", "error", err, "credential", info.CredentialID, "user", info.User, "token_kind", storedTokenKind)
 		http.Error(w, "failed to store token", http.StatusInternalServerError)
 		return
@@ -672,7 +674,7 @@ func (s *Server) slackCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token response did not include refresh_token or access_token", http.StatusBadGateway)
 		return
 	}
-	if err := s.secrets.Put(r.Context(), storageID, storedTokenKind, storedTokenValue); err != nil {
+	if err := s.secrets.Put(r.Context(), storageID, s.storageTokenKey(cfg, storageID, info.CredentialID, storedTokenKind), storedTokenValue); err != nil {
 		s.logger.Error("failed to store slack token", "error", err, "credential", info.CredentialID, "user", info.User, "token_kind", storedTokenKind)
 		http.Error(w, "failed to store token", http.StatusInternalServerError)
 		return
@@ -806,7 +808,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token response did not include refresh_token or access_token", http.StatusBadGateway)
 		return
 	}
-	if err := s.secrets.Put(r.Context(), storageID, storedTokenKind, storedTokenValue); err != nil {
+	if err := s.secrets.Put(r.Context(), storageID, s.storageTokenKey(cfg, storageID, info.CredentialID, storedTokenKind), storedTokenValue); err != nil {
 		s.logger.Error("failed to store github token", "error", err, "credential", info.CredentialID, "user", info.User, "token_kind", storedTokenKind)
 		http.Error(w, "failed to store token", http.StatusInternalServerError)
 		return
@@ -1935,7 +1937,7 @@ func (s *Server) namespaceSlackToken(w http.ResponseWriter, r *http.Request, sla
 			tokenURL = slackTokenURL
 		}
 	}
-	s.forwardSlackForm(w, r, tokenURL, upstream, "")
+	s.forwardSlackForm(w, r, tokenURL, upstream, "", "")
 }
 
 func (s *Server) namespaceGitHubToken(w http.ResponseWriter, r *http.Request, githubCfg config.GitHubOAuthConfig) {
@@ -1986,13 +1988,13 @@ func (s *Server) namespaceGitHubToken(w http.ResponseWriter, r *http.Request, gi
 	if tokenURL == "" {
 		tokenURL = githubTokenURL
 	}
-	s.forwardGitHubForm(w, r, tokenURL, upstream, "")
+	s.forwardGitHubForm(w, r, tokenURL, upstream, "", "")
 }
 
 func (s *Server) namespaceGoogleAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string, googleCfg config.GoogleOAuthConfig) {
 	cfg := s.store.Get()
 	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
-	refreshToken, ok, err := s.secrets.Get(r.Context(), storageID, "refresh_token")
+	refreshToken, ok, err := s.getStoredToken(r.Context(), cfg, storageID, credentialID, "refresh_token")
 	if err != nil {
 		s.logger.Error("failed to load google refresh token", "error", err, "credential", credentialID, "storage", storageID)
 		http.Error(w, "failed to load refresh token", http.StatusInternalServerError)
@@ -2025,7 +2027,7 @@ func (s *Server) namespaceGoogleAccessToken(w http.ResponseWriter, r *http.Reque
 func (s *Server) namespaceTodoistAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string, todoistCfg config.TodoistOAuthConfig) {
 	cfg := s.store.Get()
 	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
-	accessToken, ok, err := s.secrets.Get(r.Context(), storageID, "access_token")
+	accessToken, ok, err := s.getStoredToken(r.Context(), cfg, storageID, credentialID, "access_token")
 	if err != nil {
 		s.logger.Error("failed to load todoist access token", "error", err, "credential", credentialID, "storage", storageID)
 		http.Error(w, "failed to load access token", http.StatusInternalServerError)
@@ -2039,7 +2041,7 @@ func (s *Server) namespaceTodoistAccessToken(w http.ResponseWriter, r *http.Requ
 		})
 		return
 	}
-	refreshToken, ok, err := s.secrets.Get(r.Context(), storageID, "refresh_token")
+	refreshToken, ok, err := s.getStoredToken(r.Context(), cfg, storageID, credentialID, "refresh_token")
 	if err != nil {
 		s.logger.Error("failed to load todoist refresh token", "error", err, "credential", credentialID, "storage", storageID)
 		http.Error(w, "failed to load refresh token", http.StatusInternalServerError)
@@ -2066,13 +2068,13 @@ func (s *Server) namespaceTodoistAccessToken(w http.ResponseWriter, r *http.Requ
 	if tokenURL == "" {
 		tokenURL = todoistTokenURL
 	}
-	s.forwardTodoistForm(w, r, tokenURL, upstream, storageID)
+	s.forwardTodoistForm(w, r, tokenURL, upstream, storageID, s.storageTokenKey(cfg, storageID, credentialID, "refresh_token"))
 }
 
 func (s *Server) namespaceSlackAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string, slackCfg config.SlackOAuthConfig) {
 	cfg := s.store.Get()
 	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
-	accessToken, ok, err := s.secrets.Get(r.Context(), storageID, "access_token")
+	accessToken, ok, err := s.getStoredToken(r.Context(), cfg, storageID, credentialID, "access_token")
 	if err != nil {
 		s.logger.Error("failed to load slack access token", "error", err, "credential", credentialID, "storage", storageID)
 		http.Error(w, "failed to load access token", http.StatusInternalServerError)
@@ -2086,7 +2088,7 @@ func (s *Server) namespaceSlackAccessToken(w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
-	refreshToken, ok, err := s.secrets.Get(r.Context(), storageID, "refresh_token")
+	refreshToken, ok, err := s.getStoredToken(r.Context(), cfg, storageID, credentialID, "refresh_token")
 	if err != nil {
 		s.logger.Error("failed to load slack refresh token", "error", err, "credential", credentialID, "storage", storageID)
 		http.Error(w, "failed to load refresh token", http.StatusInternalServerError)
@@ -2116,13 +2118,13 @@ func (s *Server) namespaceSlackAccessToken(w http.ResponseWriter, r *http.Reques
 	if tokenURL == "" {
 		tokenURL = slackRefreshTokenURL
 	}
-	s.forwardSlackForm(w, r, tokenURL, upstream, storageID)
+	s.forwardSlackForm(w, r, tokenURL, upstream, storageID, s.storageTokenKey(cfg, storageID, credentialID, "refresh_token"))
 }
 
 func (s *Server) namespaceGitHubAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string, githubCfg config.GitHubOAuthConfig) {
 	cfg := s.store.Get()
 	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
-	accessToken, ok, err := s.secrets.Get(r.Context(), storageID, "access_token")
+	accessToken, ok, err := s.getStoredToken(r.Context(), cfg, storageID, credentialID, "access_token")
 	if err != nil {
 		s.logger.Error("failed to load github access token", "error", err, "credential", credentialID, "storage", storageID)
 		http.Error(w, "failed to load access token", http.StatusInternalServerError)
@@ -2136,7 +2138,7 @@ func (s *Server) namespaceGitHubAccessToken(w http.ResponseWriter, r *http.Reque
 		})
 		return
 	}
-	refreshToken, ok, err := s.secrets.Get(r.Context(), storageID, "refresh_token")
+	refreshToken, ok, err := s.getStoredToken(r.Context(), cfg, storageID, credentialID, "refresh_token")
 	if err != nil {
 		s.logger.Error("failed to load github refresh token", "error", err, "credential", credentialID, "storage", storageID)
 		http.Error(w, "failed to load refresh token", http.StatusInternalServerError)
@@ -2163,7 +2165,7 @@ func (s *Server) namespaceGitHubAccessToken(w http.ResponseWriter, r *http.Reque
 	if tokenURL == "" {
 		tokenURL = githubTokenURL
 	}
-	s.forwardGitHubForm(w, r, tokenURL, upstream, storageID)
+	s.forwardGitHubForm(w, r, tokenURL, upstream, storageID, s.storageTokenKey(cfg, storageID, credentialID, "refresh_token"))
 }
 
 func (s *Server) namespaceNotionToken(w http.ResponseWriter, r *http.Request, notionCfg config.NotionOAuthConfig) {
@@ -2205,7 +2207,7 @@ func (s *Server) namespaceNotionToken(w http.ResponseWriter, r *http.Request, no
 func (s *Server) namespaceNotionAccessToken(w http.ResponseWriter, r *http.Request, namespace, credentialID string, notionCfg config.NotionOAuthConfig) {
 	cfg := s.store.Get()
 	storageID := s.namespaceStorageID(cfg, namespace, credentialID)
-	refreshToken, ok, err := s.secrets.Get(r.Context(), storageID, "refresh_token")
+	refreshToken, ok, err := s.getStoredToken(r.Context(), cfg, storageID, credentialID, "refresh_token")
 	if err != nil {
 		s.logger.Error("failed to load notion refresh token", "error", err, "credential", credentialID, "storage", storageID)
 		http.Error(w, "failed to load refresh token", http.StatusInternalServerError)
@@ -2222,7 +2224,7 @@ func (s *Server) namespaceNotionAccessToken(w http.ResponseWriter, r *http.Reque
 	s.forwardNotionJSON(w, r, tokenURL, notionCfg, map[string]string{
 		"grant_type":    "refresh_token",
 		"refresh_token": refreshToken,
-	}, storageID)
+	}, storageID, s.storageTokenKey(cfg, storageID, credentialID, "refresh_token"))
 }
 
 func (s *Server) namespaceGoogleRevoke(w http.ResponseWriter, r *http.Request, googleCfg config.GoogleOAuthConfig) {
@@ -2360,7 +2362,7 @@ func (s *Server) forwardForm(w http.ResponseWriter, r *http.Request, endpoint st
 	_, _ = io.Copy(w, resp.Body)
 }
 
-func (s *Server) forwardTodoistForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values, storageID string) {
+func (s *Server) forwardTodoistForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values, storageID, refreshTokenKey string) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewBufferString(form.Encode()))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2387,7 +2389,7 @@ func (s *Server) forwardTodoistForm(w http.ResponseWriter, r *http.Request, endp
 		return
 	}
 	if token.RefreshToken != "" {
-		if err := s.secrets.Put(r.Context(), storageID, "refresh_token", token.RefreshToken); err != nil {
+		if err := s.secrets.Put(r.Context(), storageID, firstNonEmpty(refreshTokenKey, "refresh_token"), token.RefreshToken); err != nil {
 			s.logger.Error("failed to store rotated todoist refresh token", "error", err, "storage", storageID)
 			http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
 			return
@@ -2397,7 +2399,7 @@ func (s *Server) forwardTodoistForm(w http.ResponseWriter, r *http.Request, endp
 	_ = json.NewEncoder(w).Encode(token)
 }
 
-func (s *Server) forwardSlackForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values, storageID string) {
+func (s *Server) forwardSlackForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values, storageID, refreshTokenKey string) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewBufferString(form.Encode()))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2430,7 +2432,7 @@ func (s *Server) forwardSlackForm(w http.ResponseWriter, r *http.Request, endpoi
 		return
 	}
 	if storageID != "" && token.RefreshToken != "" {
-		if err := s.secrets.Put(r.Context(), storageID, "refresh_token", token.RefreshToken); err != nil {
+		if err := s.secrets.Put(r.Context(), storageID, firstNonEmpty(refreshTokenKey, "refresh_token"), token.RefreshToken); err != nil {
 			s.logger.Error("failed to store rotated slack refresh token", "error", err, "storage", storageID)
 			http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
 			return
@@ -2440,7 +2442,7 @@ func (s *Server) forwardSlackForm(w http.ResponseWriter, r *http.Request, endpoi
 	_ = json.NewEncoder(w).Encode(token)
 }
 
-func (s *Server) forwardGitHubForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values, storageID string) {
+func (s *Server) forwardGitHubForm(w http.ResponseWriter, r *http.Request, endpoint string, form url.Values, storageID, refreshTokenKey string) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewBufferString(form.Encode()))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2468,7 +2470,7 @@ func (s *Server) forwardGitHubForm(w http.ResponseWriter, r *http.Request, endpo
 		return
 	}
 	if storageID != "" && token.RefreshToken != "" {
-		if err := s.secrets.Put(r.Context(), storageID, "refresh_token", token.RefreshToken); err != nil {
+		if err := s.secrets.Put(r.Context(), storageID, firstNonEmpty(refreshTokenKey, "refresh_token"), token.RefreshToken); err != nil {
 			s.logger.Error("failed to store rotated github refresh token", "error", err, "storage", storageID)
 			http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
 			return
@@ -2535,7 +2537,7 @@ func (s *Server) forwardGitHubRevoke(w http.ResponseWriter, r *http.Request, end
 	_, _ = io.Copy(w, resp.Body)
 }
 
-func (s *Server) forwardNotionJSON(w http.ResponseWriter, r *http.Request, endpoint string, notionCfg config.NotionOAuthConfig, body map[string]string, storageID string) {
+func (s *Server) forwardNotionJSON(w http.ResponseWriter, r *http.Request, endpoint string, notionCfg config.NotionOAuthConfig, body map[string]string, storageID string, refreshTokenKey ...string) {
 	clientID, clientSecret, err := s.notionClientPair(r.Context(), notionCfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -2575,7 +2577,7 @@ func (s *Server) forwardNotionJSON(w http.ResponseWriter, r *http.Request, endpo
 		return
 	}
 	if token.RefreshToken != "" {
-		if err := s.secrets.Put(r.Context(), storageID, "refresh_token", token.RefreshToken); err != nil {
+		if err := s.secrets.Put(r.Context(), storageID, firstNonEmpty(append(refreshTokenKey, "refresh_token")...), token.RefreshToken); err != nil {
 			s.logger.Error("failed to store rotated notion refresh token", "error", err, "storage", storageID)
 			http.Error(w, "failed to store refresh token", http.StatusInternalServerError)
 			return
@@ -3275,6 +3277,25 @@ func (s *Server) namespaceStorageID(cfg *config.Config, namespace, credentialID 
 		return namespace
 	}
 	return credentialID
+}
+
+func (s *Server) storageTokenKey(cfg *config.Config, storageID, credentialID, key string) string {
+	if cfg.Server.Secrets.Mode == "kubernetes" && cfg.HasUser(storageID) && credentialID != "" {
+		return credentialID + "." + key
+	}
+	return key
+}
+
+func (s *Server) getStoredToken(ctx context.Context, cfg *config.Config, storageID, credentialID, key string) (string, bool, error) {
+	storageKey := s.storageTokenKey(cfg, storageID, credentialID, key)
+	value, ok, err := s.secrets.Get(ctx, storageID, storageKey)
+	if err != nil || ok || storageKey == key {
+		return value, ok, err
+	}
+	if key == "refresh_token" && strings.HasSuffix(credentialID, ".google") {
+		return s.secrets.Get(ctx, storageID, key)
+	}
+	return "", false, nil
 }
 
 func (s *Server) createState(ctx context.Context, provider string, info stateInfo) (string, error) {

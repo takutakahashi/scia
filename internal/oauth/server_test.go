@@ -1707,7 +1707,7 @@ func TestNamespaceGoogleAccessTokenUsesKubernetesUserSecret(t *testing.T) {
 		},
 	})
 	secretStore := newMemorySecretStore()
-	if err := secretStore.Put(context.Background(), "alice", "refresh_token", "user-refresh-token"); err != nil {
+	if err := secretStore.Put(context.Background(), "alice", "alice.google.refresh_token", "user-refresh-token"); err != nil {
 		t.Fatal(err)
 	}
 	srv := NewServer(store, secretStore, slog.Default())
@@ -1790,7 +1790,7 @@ func TestGoogleOAuthCallbackStoresRefreshTokenForKubernetesUser(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
 	}
-	if got, ok, err := secretStore.Get(context.Background(), "alice", "refresh_token"); err != nil || !ok || got != "k8s-refresh-token" {
+	if got, ok, err := secretStore.Get(context.Background(), "alice", "google-calendar.refresh_token"); err != nil || !ok || got != "k8s-refresh-token" {
 		t.Fatalf("refresh token not stored for user: got=%q ok=%v err=%v", got, ok, err)
 	}
 }
