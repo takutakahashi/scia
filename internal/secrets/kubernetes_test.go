@@ -69,3 +69,42 @@ func TestKubernetesStoreRejectsUnknownUser(t *testing.T) {
 		t.Fatal("expected unknown user error")
 	}
 }
+
+func TestKubernetesStoreDynamicUserCreatesSecret(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	store, err := NewKubernetesStore(client, "scia", nil, KubernetesStoreOptions{
+		DynamicUsers:                true,
+		DynamicUserSecretNamePrefix: "scia-oauth-",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put(ctx, "bob", "refresh_token", "token"); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := store.Get(ctx, "bob", "refresh_token")
+	if err != nil || !ok || got != "token" {
+		t.Fatalf("unexpected get result: got=%q ok=%v err=%v", got, ok, err)
+	}
+	secret, err := client.CoreV1().Secrets("scia").Get(ctx, "scia-oauth-bob", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(secret.Data["refresh_token"]) != "token" {
+		t.Fatalf("unexpected secret data: %q", secret.Data["refresh_token"])
+	}
+}
+
+func TestKubernetesStoreRejectsInvalidDynamicUser(t *testing.T) {
+	store, err := NewKubernetesStore(fake.NewSimpleClientset(), "scia", nil, KubernetesStoreOptions{
+		DynamicUsers: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), "Bob", "refresh_token", "token"); err == nil {
+		t.Fatal("expected invalid dynamic user error")
+	}
+}

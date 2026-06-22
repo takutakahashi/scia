@@ -224,7 +224,9 @@ type SecretsConfig struct {
 }
 
 type KubernetesSecretsConfig struct {
-	Namespace string `yaml:"namespace"`
+	Namespace                   string `yaml:"namespace"`
+	DynamicUsers                bool   `yaml:"dynamicUsers"`
+	DynamicUserSecretNamePrefix string `yaml:"dynamicUserSecretNamePrefix"`
 }
 
 type CredentialConfig struct {
@@ -295,8 +297,14 @@ func (c *Config) Validate() error {
 		if c.Server.Secrets.Kubernetes.Namespace == "" {
 			c.Server.Secrets.Kubernetes.Namespace = "default"
 		}
-		if len(c.Server.Users) == 0 {
+		if c.Server.Secrets.Kubernetes.DynamicUserSecretNamePrefix == "" {
+			c.Server.Secrets.Kubernetes.DynamicUserSecretNamePrefix = "scia-oauth-"
+		}
+		if !c.Server.Secrets.Kubernetes.DynamicUsers && len(c.Server.Users) == 0 {
 			return fmt.Errorf("server.users is required when server.secrets.mode is kubernetes")
+		}
+		if c.Server.Secrets.Kubernetes.DynamicUsers && !validSecretNamePrefix(c.Server.Secrets.Kubernetes.DynamicUserSecretNamePrefix) {
+			return fmt.Errorf("server.secrets.kubernetes.dynamicUserSecretNamePrefix must contain only lowercase letters, numbers, and hyphens, and start with a letter or number")
 		}
 		for userID, user := range c.Server.Users {
 			if userID == "" {
@@ -689,8 +697,22 @@ func (c *Config) UserSecretNames() map[string]string {
 }
 
 func (c *Config) HasUser(userID string) bool {
+	if _, ok := c.Server.Users[userID]; ok {
+		return true
+	}
+	return c.Server.Secrets.Mode == "kubernetes" && c.Server.Secrets.Kubernetes.DynamicUsers && ValidDynamicUserID(userID)
+}
+
+func (c *Config) HasConfiguredUser(userID string) bool {
 	_, ok := c.Server.Users[userID]
 	return ok
+}
+
+func (c *Config) HasDynamicUser(userID string) bool {
+	if c.HasConfiguredUser(userID) {
+		return false
+	}
+	return c.Server.Secrets.Mode == "kubernetes" && c.Server.Secrets.Kubernetes.DynamicUsers && ValidDynamicUserID(userID)
 }
 
 func CredentialUserID(cfg *Config, cred CredentialConfig) string {
@@ -701,4 +723,40 @@ func CredentialUserID(cfg *Config, cred CredentialConfig) string {
 		return user
 	}
 	return cred.ID
+}
+
+func ValidDynamicUserID(userID string) bool {
+	if userID == "" || len(userID) > 63 {
+		return false
+	}
+	for i, r := range userID {
+		isLower := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		isHyphen := r == '-'
+		if !isLower && !isDigit && !isHyphen {
+			return false
+		}
+		if (i == 0 || i == len(userID)-1) && isHyphen {
+			return false
+		}
+	}
+	return true
+}
+
+func validSecretNamePrefix(prefix string) bool {
+	if prefix == "" || len(prefix) >= 253 {
+		return false
+	}
+	for i, r := range prefix {
+		isLower := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		isHyphen := r == '-'
+		if !isLower && !isDigit && !isHyphen {
+			return false
+		}
+		if i == 0 && isHyphen {
+			return false
+		}
+	}
+	return true
 }

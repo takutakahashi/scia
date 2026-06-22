@@ -20,7 +20,10 @@ func NewFromConfig(ctx context.Context, cfg *config.Config) (Store, error) {
 		if err != nil {
 			return nil, fmt.Errorf("kubernetes client config: %w", err)
 		}
-		return NewKubernetesStoreFromRESTConfig(restConfig, cfg.Server.Secrets.Kubernetes.Namespace, cfg.UserSecretNames())
+		return NewKubernetesStoreFromRESTConfig(restConfig, cfg.Server.Secrets.Kubernetes.Namespace, cfg.UserSecretNames(), KubernetesStoreOptions{
+			DynamicUsers:                cfg.Server.Secrets.Kubernetes.DynamicUsers,
+			DynamicUserSecretNamePrefix: cfg.Server.Secrets.Kubernetes.DynamicUserSecretNamePrefix,
+		})
 	default:
 		return nil, fmt.Errorf("unsupported secrets mode %q", mode)
 	}

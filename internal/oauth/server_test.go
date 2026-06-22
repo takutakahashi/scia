@@ -1866,6 +1866,101 @@ func TestGoogleOAuthStartRequiresUserInKubernetesMode(t *testing.T) {
 	}
 }
 
+func TestGoogleOAuthStartAllowsDynamicUserInKubernetesMode(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Secrets: config.SecretsConfig{
+				Mode: "kubernetes",
+				Kubernetes: config.KubernetesSecretsConfig{
+					DynamicUsers: true,
+				},
+			},
+			OAuth: config.OAuthConfig{
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "client-id",
+					ClientSecret: "client-secret",
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar&user=bob&user_token=token-1", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok, err := secretStore.Get(context.Background(), "bob", dynamicUserTokenSecretKey); err != nil || !ok || got != "token-1" {
+		t.Fatalf("dynamic user token not stored: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestGoogleOAuthStartRequiresDynamicUserToken(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Secrets: config.SecretsConfig{
+				Mode: "kubernetes",
+				Kubernetes: config.KubernetesSecretsConfig{
+					DynamicUsers: true,
+				},
+			},
+			OAuth: config.OAuthConfig{
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "client-id",
+					ClientSecret: "client-secret",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, newMemorySecretStore(), slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar&user=bob", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGoogleOAuthStartRejectsMismatchedDynamicUserToken(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Secrets: config.SecretsConfig{
+				Mode: "kubernetes",
+				Kubernetes: config.KubernetesSecretsConfig{
+					DynamicUsers: true,
+				},
+			},
+			OAuth: config.OAuthConfig{
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "client-id",
+					ClientSecret: "client-secret",
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "bob", dynamicUserTokenSecretKey, "token-1"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?credential=google-calendar&user=bob&user_token=token-2", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func newOAuthTestStore(t *testing.T, cfg *config.Config) *config.Store {
 	t.Helper()
 	store, err := config.NewStore(context.Background(), staticProvider{cfg: cfg}, slog.Default())
