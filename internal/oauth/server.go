@@ -42,6 +42,7 @@ const slackRevokeURL = "https://slack.com/api/auth.revoke"
 const githubAuthURL = "https://github.com/login/oauth/authorize"
 const githubTokenURL = "https://github.com/login/oauth/access_token"
 const githubRevokeURL = "https://api.github.com/applications"
+const dynamicUserTokenSecretKey = "_scia_user_token"
 
 type Server struct {
 	store   *config.Store
@@ -216,6 +217,9 @@ func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown user", http.StatusBadRequest)
 			return
 		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, userID) {
+			return
+		}
 	}
 	cred, ok := s.googleCredential(cfg, credentialID)
 	if !ok {
@@ -336,6 +340,9 @@ func (s *Server) startNotion(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown user", http.StatusBadRequest)
 			return
 		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, userID) {
+			return
+		}
 	}
 	cred, ok := s.notionCredential(cfg, credentialID)
 	if !ok {
@@ -447,6 +454,9 @@ func (s *Server) startTodoist(w http.ResponseWriter, r *http.Request) {
 		}
 		if !cfg.HasUser(userID) {
 			http.Error(w, "unknown user", http.StatusBadRequest)
+			return
+		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, userID) {
 			return
 		}
 	}
@@ -583,6 +593,9 @@ func (s *Server) startSlack(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown user", http.StatusBadRequest)
 			return
 		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, userID) {
+			return
+		}
 	}
 	cred, ok := s.slackCredential(cfg, credentialID)
 	if !ok {
@@ -715,6 +728,9 @@ func (s *Server) startGitHub(w http.ResponseWriter, r *http.Request) {
 		}
 		if !cfg.HasUser(userID) {
 			http.Error(w, "unknown user", http.StatusBadRequest)
+			return
+		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, userID) {
 			return
 		}
 	}
@@ -1179,12 +1195,18 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown google namespace", http.StatusNotFound)
 			return
 		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, namespace) {
+			return
+		}
 		s.namespaceGoogleOAuth(w, r, namespace, credentialID, action, googleCfg)
 	case "notion":
 		credentialID := config.NamespaceNotionCredentialID(namespace)
 		notionCfg, ok := config.NotionOAuthConfigForCredential(cfg, credentialID)
 		if !ok {
 			http.Error(w, "unknown notion namespace", http.StatusNotFound)
+			return
+		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, namespace) {
 			return
 		}
 		s.namespaceNotionOAuth(w, r, namespace, credentialID, action, notionCfg)
@@ -1195,6 +1217,9 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown todoist namespace", http.StatusNotFound)
 			return
 		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, namespace) {
+			return
+		}
 		s.namespaceTodoistOAuth(w, r, namespace, credentialID, action, todoistCfg)
 	case "slack":
 		credentialID := config.NamespaceSlackCredentialID(namespace)
@@ -1203,12 +1228,18 @@ func (s *Server) namespaceOAuth(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown slack namespace", http.StatusNotFound)
 			return
 		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, namespace) {
+			return
+		}
 		s.namespaceSlackOAuth(w, r, namespace, credentialID, action, slackCfg)
 	case "github":
 		credentialID := config.NamespaceGitHubCredentialID(namespace)
 		githubCfg, ok := config.GitHubOAuthConfigForCredential(cfg, credentialID)
 		if !ok {
 			http.Error(w, "unknown github namespace", http.StatusNotFound)
+			return
+		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, namespace) {
 			return
 		}
 		s.namespaceGitHubOAuth(w, r, namespace, credentialID, action, githubCfg)
@@ -1430,6 +1461,43 @@ func (s *Server) authorizeBrokerRequest(w http.ResponseWriter, r *http.Request, 
 		return false
 	}
 	return true
+}
+
+func (s *Server) authorizeDynamicUserRequest(w http.ResponseWriter, r *http.Request, cfg *config.Config, userID string) bool {
+	if !cfg.HasDynamicUser(userID) {
+		return true
+	}
+	token := dynamicUserTokenFromRequest(r)
+	if token == "" {
+		http.Error(w, "dynamic user token is required", http.StatusUnauthorized)
+		return false
+	}
+	stored, ok, err := s.secrets.Get(r.Context(), userID, dynamicUserTokenSecretKey)
+	if err != nil {
+		s.logger.Error("failed to read dynamic user token", "error", err, "user", userID)
+		http.Error(w, "failed to authorize dynamic user", http.StatusInternalServerError)
+		return false
+	}
+	if !ok {
+		if err := s.secrets.Put(r.Context(), userID, dynamicUserTokenSecretKey, token); err != nil {
+			s.logger.Error("failed to store dynamic user token", "error", err, "user", userID)
+			http.Error(w, "failed to authorize dynamic user", http.StatusInternalServerError)
+			return false
+		}
+		return true
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(stored)) != 1 {
+		http.Error(w, "invalid dynamic user token", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func dynamicUserTokenFromRequest(r *http.Request) string {
+	if token := strings.TrimSpace(r.Header.Get("X-Scia-User-Token")); token != "" {
+		return token
+	}
+	return strings.TrimSpace(r.URL.Query().Get("user_token"))
 }
 
 type authorizationURLRequest struct {

@@ -703,6 +703,18 @@ func (c *Config) HasUser(userID string) bool {
 	return c.Server.Secrets.Mode == "kubernetes" && c.Server.Secrets.Kubernetes.DynamicUsers && ValidDynamicUserID(userID)
 }
 
+func (c *Config) HasConfiguredUser(userID string) bool {
+	_, ok := c.Server.Users[userID]
+	return ok
+}
+
+func (c *Config) HasDynamicUser(userID string) bool {
+	if c.HasConfiguredUser(userID) {
+		return false
+	}
+	return c.Server.Secrets.Mode == "kubernetes" && c.Server.Secrets.Kubernetes.DynamicUsers && ValidDynamicUserID(userID)
+}
+
 func CredentialUserID(cfg *Config, cred CredentialConfig) string {
 	if user := cred.Params["user"]; user != "" {
 		return user

@@ -41,6 +41,12 @@ stores the first token. Dynamic user IDs must be lowercase DNS-label style
 values: lowercase letters, numbers, and hyphens, starting and ending with a
 letter or number.
 
+Dynamic users must also send a per-user token. On the first request for a user,
+`scia` stores that token in the user's Secret. Later requests for the same user
+must send the same token. Browser-based OAuth start URLs can pass it as the
+`user_token` query parameter; API calls can send it as the `X-Scia-User-Token`
+header.
+
 In-cluster, `scia` uses the pod service account. Outside the cluster, it falls back to
 `KUBECONFIG` or the default kubeconfig.
 
@@ -102,7 +108,7 @@ In kubernetes mode, each user gets their own authorize button. After authorizati
 For dynamic users, start authorization with an explicit `user` query parameter:
 
 ```text
-http://localhost:18081/oauth/google/start?credential=google-calendar&user=alice
+http://localhost:18081/oauth/google/start?credential=google-calendar&user=alice&user_token=YOUR_USER_TOKEN
 ```
 
 To let a caller obtain a short-lived Google access token without receiving the
