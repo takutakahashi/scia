@@ -137,7 +137,7 @@ func (i *Injector) notionRefreshToken(ctx context.Context, cfg *config.Config, c
 			return "", "", err
 		}
 		if rotatedRefreshToken != "" {
-			if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+			if err := i.putCredentialSecret(ctx, cfg, cred, "refresh_token", rotatedRefreshToken); err != nil {
 				return "", "", err
 			}
 		}
@@ -170,7 +170,7 @@ func (i *Injector) notionRefreshToken(ctx context.Context, cfg *config.Config, c
 		return "", "", err
 	}
 	if rotatedRefreshToken != "" {
-		if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+		if err := i.putCredentialSecret(ctx, cfg, cred, "refresh_token", rotatedRefreshToken); err != nil {
 			return "", "", err
 		}
 	}
@@ -373,7 +373,7 @@ func (i *Injector) todoistRefreshToken(ctx context.Context, cfg *config.Config, 
 			return "", err
 		}
 		if rotatedRefreshToken != "" {
-			if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+			if err := i.putCredentialSecret(ctx, cfg, cred, "refresh_token", rotatedRefreshToken); err != nil {
 				return "", err
 			}
 		}
@@ -393,7 +393,7 @@ func (i *Injector) todoistRefreshToken(ctx context.Context, cfg *config.Config, 
 		return "", err
 	}
 	if rotatedRefreshToken != "" {
-		if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+		if err := i.putCredentialSecret(ctx, cfg, cred, "refresh_token", rotatedRefreshToken); err != nil {
 			return "", err
 		}
 	}
@@ -449,7 +449,7 @@ func (i *Injector) slackUserToken(ctx context.Context, cfg *config.Config, cred 
 			return "", err
 		}
 		if rotatedRefreshToken != "" {
-			if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+			if err := i.putCredentialSecret(ctx, cfg, cred, "refresh_token", rotatedRefreshToken); err != nil {
 				return "", err
 			}
 		}
@@ -497,7 +497,7 @@ func (i *Injector) slackUserToken(ctx context.Context, cfg *config.Config, cred 
 		return "", err
 	}
 	if rotatedRefreshToken != "" {
-		if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+		if err := i.putCredentialSecret(ctx, cfg, cred, "refresh_token", rotatedRefreshToken); err != nil {
 			return "", err
 		}
 	}
@@ -553,7 +553,7 @@ func (i *Injector) githubOAuthToken(ctx context.Context, cfg *config.Config, cre
 			return "", err
 		}
 		if rotatedRefreshToken != "" {
-			if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+			if err := i.putCredentialSecret(ctx, cfg, cred, "refresh_token", rotatedRefreshToken); err != nil {
 				return "", err
 			}
 		}
@@ -598,7 +598,7 @@ func (i *Injector) githubOAuthToken(ctx context.Context, cfg *config.Config, cre
 		return "", err
 	}
 	if rotatedRefreshToken != "" {
-		if err := i.secrets.Put(ctx, config.CredentialUserID(cfg, cred), "refresh_token", rotatedRefreshToken); err != nil {
+		if err := i.putCredentialSecret(ctx, cfg, cred, "refresh_token", rotatedRefreshToken); err != nil {
 			return "", err
 		}
 	}
@@ -660,26 +660,58 @@ func (i *Injector) secretValue(ctx context.Context, cfg *config.Config, cred con
 		return value, nil
 	}
 	userID := config.CredentialUserID(cfg, cred)
-	value, ok, err := i.secrets.Get(ctx, userID, key)
+	storageKey := credentialSecretKey(cfg, cred, userID, key)
+	value, ok, err := i.secrets.Get(ctx, userID, storageKey)
 	if err != nil {
 		return "", err
 	}
 	if ok {
 		return value, nil
+	}
+	if storageKey != key && key == "refresh_token" && strings.HasSuffix(cred.ID, ".google") {
+		value, ok, err := i.secrets.Get(ctx, userID, key)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return value, nil
+		}
 	}
 	return "", nil
 }
 
 func (i *Injector) rotatingSecretValue(ctx context.Context, cfg *config.Config, cred config.CredentialConfig, key string) (string, error) {
 	userID := config.CredentialUserID(cfg, cred)
-	value, ok, err := i.secrets.Get(ctx, userID, key)
+	storageKey := credentialSecretKey(cfg, cred, userID, key)
+	value, ok, err := i.secrets.Get(ctx, userID, storageKey)
 	if err != nil {
 		return "", err
 	}
 	if ok {
 		return value, nil
 	}
+	if storageKey != key && key == "refresh_token" && strings.HasSuffix(cred.ID, ".google") {
+		value, ok, err := i.secrets.Get(ctx, userID, key)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return value, nil
+		}
+	}
 	return config.HeaderValueFromEnv(cred.Params[key]), nil
+}
+
+func credentialSecretKey(cfg *config.Config, cred config.CredentialConfig, userID, key string) string {
+	if cfg.Server.Secrets.Mode == "kubernetes" && cfg.HasUser(userID) && cred.ID != "" {
+		return cred.ID + "." + key
+	}
+	return key
+}
+
+func (i *Injector) putCredentialSecret(ctx context.Context, cfg *config.Config, cred config.CredentialConfig, key, value string) error {
+	userID := config.CredentialUserID(cfg, cred)
+	return i.secrets.Put(ctx, userID, credentialSecretKey(cfg, cred, userID, key), value)
 }
 
 func (i *Injector) formToken(ctx context.Context, credentialID, tokenURL string, form url.Values, bearerToken string) (string, error) {

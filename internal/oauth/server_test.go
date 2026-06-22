@@ -1707,7 +1707,7 @@ func TestNamespaceGoogleAccessTokenUsesKubernetesUserSecret(t *testing.T) {
 		},
 	})
 	secretStore := newMemorySecretStore()
-	if err := secretStore.Put(context.Background(), "alice", "refresh_token", "user-refresh-token"); err != nil {
+	if err := secretStore.Put(context.Background(), "alice", "alice.google.refresh_token", "user-refresh-token"); err != nil {
 		t.Fatal(err)
 	}
 	srv := NewServer(store, secretStore, slog.Default())
@@ -1747,6 +1747,50 @@ func TestNamespaceGoogleAccessTokenRequiresStoredRefreshToken(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNamespaceRevokeWithoutTokenDeletesStoredCredentialTokens(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Secrets: config.SecretsConfig{Mode: "kubernetes"},
+			Users: map[string]config.UserConfig{
+				"alice": {SecretName: "scia-oauth-alice"},
+			},
+			OAuth: config.OAuthConfig{
+				Namespaces: map[string]config.OAuthNamespaceConfig{
+					"alice": {
+						Todoist: config.TodoistOAuthConfig{
+							ClientID:     "client-id",
+							ClientSecret: "client-secret",
+						},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "alice", "alice.todoist.refresh_token", "refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "alice", "alice.todoist.access_token", "access-token"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/alice/todoist/revoke", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok, err := secretStore.Get(context.Background(), "alice", "alice.todoist.refresh_token"); err != nil || ok {
+		t.Fatalf("refresh token still stored: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := secretStore.Get(context.Background(), "alice", "alice.todoist.access_token"); err != nil || ok {
+		t.Fatalf("access token still stored: ok=%v err=%v", ok, err)
 	}
 }
 
@@ -1790,7 +1834,7 @@ func TestGoogleOAuthCallbackStoresRefreshTokenForKubernetesUser(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
 	}
-	if got, ok, err := secretStore.Get(context.Background(), "alice", "refresh_token"); err != nil || !ok || got != "k8s-refresh-token" {
+	if got, ok, err := secretStore.Get(context.Background(), "alice", "google-calendar.refresh_token"); err != nil || !ok || got != "k8s-refresh-token" {
 		t.Fatalf("refresh token not stored for user: got=%q ok=%v err=%v", got, ok, err)
 	}
 }
@@ -1846,6 +1890,11 @@ func (s *memorySecretStore) Get(_ context.Context, credentialID, key string) (st
 
 func (s *memorySecretStore) Put(_ context.Context, credentialID, key, value string) error {
 	s.values[credentialID+":"+key] = value
+	return nil
+}
+
+func (s *memorySecretStore) Delete(_ context.Context, credentialID, key string) error {
+	delete(s.values, credentialID+":"+key)
 	return nil
 }
 

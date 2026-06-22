@@ -856,6 +856,13 @@ func (s *memorySecretStore) Put(_ context.Context, credentialID, key, value stri
 	return nil
 }
 
+func (s *memorySecretStore) Delete(_ context.Context, credentialID, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.values, credentialID+":"+key)
+	return nil
+}
+
 func (s *memorySecretStore) Close() error {
 	return nil
 }
