@@ -155,6 +155,32 @@ func TestValidateRequiresUsersForKubernetesMode(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsDynamicUsersForKubernetesMode(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Secrets: SecretsConfig{
+				Mode: "kubernetes",
+				Kubernetes: KubernetesSecretsConfig{
+					DynamicUsers: true,
+				},
+			},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HasUser("alice") {
+		t.Fatal("expected dynamic user to be accepted")
+	}
+	if cfg.HasUser("Alice") {
+		t.Fatal("expected invalid dynamic user to be rejected")
+	}
+	if cfg.Server.Secrets.Kubernetes.DynamicUserSecretNamePrefix != "scia-oauth-" {
+		t.Fatalf("unexpected dynamic user secret prefix: %q", cfg.Server.Secrets.Kubernetes.DynamicUserSecretNamePrefix)
+	}
+}
+
 func TestCredentialUserID(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{

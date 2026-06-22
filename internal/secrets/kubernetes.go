@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/takutakahashi/scia/internal/config"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,19 +14,33 @@ import (
 )
 
 type KubernetesStore struct {
-	client    kubernetes.Interface
-	namespace string
-	users     map[string]string
+	client                      kubernetes.Interface
+	namespace                   string
+	users                       map[string]string
+	dynamicUsers                bool
+	dynamicUserSecretNamePrefix string
 }
 
-func NewKubernetesStore(client kubernetes.Interface, namespace string, users map[string]string) (*KubernetesStore, error) {
+type KubernetesStoreOptions struct {
+	DynamicUsers                bool
+	DynamicUserSecretNamePrefix string
+}
+
+func NewKubernetesStore(client kubernetes.Interface, namespace string, users map[string]string, options ...KubernetesStoreOptions) (*KubernetesStore, error) {
 	if client == nil {
 		return nil, fmt.Errorf("kubernetes client is required")
 	}
 	if namespace == "" {
 		return nil, fmt.Errorf("kubernetes namespace is required")
 	}
-	if len(users) == 0 {
+	opts := KubernetesStoreOptions{DynamicUserSecretNamePrefix: "scia-oauth-"}
+	if len(options) > 0 {
+		opts = options[0]
+		if opts.DynamicUserSecretNamePrefix == "" {
+			opts.DynamicUserSecretNamePrefix = "scia-oauth-"
+		}
+	}
+	if len(users) == 0 && !opts.DynamicUsers {
 		return nil, fmt.Errorf("at least one user secret mapping is required for kubernetes mode")
 	}
 	copied := make(map[string]string, len(users))
@@ -39,18 +54,20 @@ func NewKubernetesStore(client kubernetes.Interface, namespace string, users map
 		copied[userID] = secretName
 	}
 	return &KubernetesStore{
-		client:    client,
-		namespace: namespace,
-		users:     copied,
+		client:                      client,
+		namespace:                   namespace,
+		users:                       copied,
+		dynamicUsers:                opts.DynamicUsers,
+		dynamicUserSecretNamePrefix: opts.DynamicUserSecretNamePrefix,
 	}, nil
 }
 
-func NewKubernetesStoreFromRESTConfig(restConfig *rest.Config, namespace string, users map[string]string) (*KubernetesStore, error) {
+func NewKubernetesStoreFromRESTConfig(restConfig *rest.Config, namespace string, users map[string]string, options ...KubernetesStoreOptions) (*KubernetesStore, error) {
 	client, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, err
 	}
-	return NewKubernetesStore(client, namespace, users)
+	return NewKubernetesStore(client, namespace, users, options...)
 }
 
 func KubernetesRESTConfig() (*rest.Config, error) {
@@ -141,8 +158,18 @@ func (s *KubernetesStore) Close() error {
 
 func (s *KubernetesStore) secretName(userID string) (string, error) {
 	secretName, ok := s.users[userID]
-	if !ok {
+	if ok {
+		return secretName, nil
+	}
+	if !s.dynamicUsers {
 		return "", fmt.Errorf("unknown user %q", userID)
+	}
+	if !config.ValidDynamicUserID(userID) {
+		return "", fmt.Errorf("invalid dynamic user %q", userID)
+	}
+	secretName = s.dynamicUserSecretNamePrefix + userID
+	if len(secretName) > 253 {
+		return "", fmt.Errorf("dynamic user secret name is too long for user %q", userID)
 	}
 	return secretName, nil
 }

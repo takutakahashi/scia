@@ -22,6 +22,25 @@ server:
       secretName: scia-oauth-bob
 ```
 
+If users should be created dynamically, enable `dynamicUsers` instead of listing
+every user up front:
+
+```yaml
+server:
+  secrets:
+    mode: kubernetes
+    kubernetes:
+      namespace: scia
+      dynamicUsers: true
+      dynamicUserSecretNamePrefix: scia-oauth-
+```
+
+With this mode, a request for user `alice` uses the Secret
+`scia-oauth-alice`. If the Secret does not exist yet, `scia` creates it when it
+stores the first token. Dynamic user IDs must be lowercase DNS-label style
+values: lowercase letters, numbers, and hyphens, starting and ending with a
+letter or number.
+
 In-cluster, `scia` uses the pod service account. Outside the cluster, it falls back to
 `KUBECONFIG` or the default kubeconfig.
 
@@ -79,6 +98,12 @@ http://localhost:18081/
 In kubernetes mode, each user gets their own authorize button. After authorization,
 `scia` stores the Google refresh token in that user's Kubernetes Secret under the
 `refresh_token` key.
+
+For dynamic users, start authorization with an explicit `user` query parameter:
+
+```text
+http://localhost:18081/oauth/google/start?credential=google-calendar&user=alice
+```
 
 To let a caller obtain a short-lived Google access token without receiving the
 refresh token or OAuth client secret, call the namespaced broker endpoint:
