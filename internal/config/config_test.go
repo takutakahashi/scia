@@ -46,6 +46,39 @@ func TestValidateRejectsUnknownServerMode(t *testing.T) {
 	}
 }
 
+func TestValidateExternalSecretsModeRequiresWebhookConfig(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Secrets: SecretsConfig{Mode: "external"},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateExternalSecretsModeAcceptsWebhookConfig(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Secrets: SecretsConfig{
+				Mode: "external",
+				External: ExternalSecretsConfig{
+					Webhook: ExternalSecretsWebhookConfig{
+						URL:       "https://secrets.example.com/hooks/scia",
+						SecretKey: "shared-webhook-key",
+					},
+				},
+			},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateRequiresUsersForKubernetesMode(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{

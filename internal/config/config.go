@@ -211,12 +211,22 @@ type SecretsConfig struct {
 	Mode       string                  `yaml:"mode"`
 	SQLitePath string                  `yaml:"sqlitePath"`
 	Kubernetes KubernetesSecretsConfig `yaml:"kubernetes"`
+	External   ExternalSecretsConfig   `yaml:"external"`
 }
 
 type KubernetesSecretsConfig struct {
 	Namespace                   string `yaml:"namespace"`
 	DynamicUsers                bool   `yaml:"dynamicUsers"`
 	DynamicUserSecretNamePrefix string `yaml:"dynamicUserSecretNamePrefix"`
+}
+
+type ExternalSecretsConfig struct {
+	Webhook ExternalSecretsWebhookConfig `yaml:"webhook"`
+}
+
+type ExternalSecretsWebhookConfig struct {
+	URL       string `yaml:"url"`
+	SecretKey string `yaml:"secretKey"`
 }
 
 type CredentialConfig struct {
@@ -276,9 +286,9 @@ func (c *Config) Validate() error {
 		c.Server.Secrets.Mode = "sqlite"
 	}
 	switch c.Server.Secrets.Mode {
-	case "sqlite", "kubernetes":
+	case "sqlite", "kubernetes", "external":
 	default:
-		return fmt.Errorf("server.secrets.mode must be sqlite or kubernetes")
+		return fmt.Errorf("server.secrets.mode must be sqlite, kubernetes, or external")
 	}
 	if c.Server.Secrets.SQLitePath == "" {
 		c.Server.Secrets.SQLitePath = "data/scia-secrets.db"
@@ -303,6 +313,25 @@ func (c *Config) Validate() error {
 			if user.SecretName == "" {
 				return fmt.Errorf("server.users[%q].secretName is required", userID)
 			}
+		}
+	}
+	if c.Server.Secrets.Mode == "external" {
+		webhookURL := HeaderValueFromEnv(c.Server.Secrets.External.Webhook.URL)
+		if webhookURL == "" {
+			return fmt.Errorf("server.secrets.external.webhook.url is required when server.secrets.mode is external")
+		}
+		parsed, err := url.Parse(webhookURL)
+		if err != nil {
+			return fmt.Errorf("server.secrets.external.webhook.url is invalid: %w", err)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return fmt.Errorf("server.secrets.external.webhook.url must use http or https scheme")
+		}
+		if parsed.Host == "" {
+			return fmt.Errorf("server.secrets.external.webhook.url must include a host")
+		}
+		if HeaderValueFromEnv(c.Server.Secrets.External.Webhook.SecretKey) == "" {
+			return fmt.Errorf("server.secrets.external.webhook.secretKey is required when server.secrets.mode is external")
 		}
 	}
 	if rawBackendProxyURL := HeaderValueFromEnv(c.Server.BackendProxy.URL); rawBackendProxyURL != "" {
