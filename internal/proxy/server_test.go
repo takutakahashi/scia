@@ -787,12 +787,114 @@ rules:
 	}
 }
 
+func TestAdminStoresTokenAtSecretRef(t *testing.T) {
+	secretStore := newProxyMemorySecretStore()
+	proxyServer := newTestProxyWithSecretStore(t, testServerConfig(t, `
+server:
+  adminToken: admin-token
+`), secretStore)
+	defer proxyServer.Close()
+
+	req, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/_scia/secrets", strings.NewReader(`{"ref":"secret:takutakahashi.goal.token","token":"goal-token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer admin-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%q", resp.Status, string(body))
+	}
+
+	got, ok, err := secretStore.Get(context.Background(), "takutakahashi.goal", "token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected token to be stored")
+	}
+	if got != "goal-token" {
+		t.Fatalf("unexpected stored token: %q", got)
+	}
+}
+
+func TestAdminStoreSecretRequiresAdminToken(t *testing.T) {
+	secretStore := newProxyMemorySecretStore()
+	proxyServer := newTestProxyWithSecretStore(t, testServerConfig(t, `
+server:
+  adminToken: admin-token
+`), secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Post(proxyServer.URL+"/_scia/secrets", "application/json", strings.NewReader(`{"ref":"secret:takutakahashi.goal.token","token":"goal-token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if _, ok, err := secretStore.Get(context.Background(), "takutakahashi.goal", "token"); err != nil || ok {
+		t.Fatalf("token should not be stored: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestAdminStoreSecretRequiresToken(t *testing.T) {
+	secretStore := newProxyMemorySecretStore()
+	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Post(proxyServer.URL+"/_scia/secrets", "application/json", strings.NewReader(`{"ref":"secret:takutakahashi.goal.token","token":"   "}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if _, ok, err := secretStore.Get(context.Background(), "takutakahashi.goal", "token"); err != nil || ok {
+		t.Fatalf("token should not be stored: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestAdminStoreSecretRequiresSecretRef(t *testing.T) {
+	secretStore := newProxyMemorySecretStore()
+	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Post(proxyServer.URL+"/_scia/secrets", "application/json", strings.NewReader(`{"ref":"goal-token","token":"goal-token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if _, ok, err := secretStore.Get(context.Background(), "takutakahashi.goal", "token"); err != nil || ok {
+		t.Fatalf("token should not be stored: ok=%v err=%v", ok, err)
+	}
+}
+
 func newTestProxy(t *testing.T, cfg string) *httptest.Server {
 	server, _ := newTestProxyWithPath(t, cfg)
 	return server
 }
 
 func newTestProxyWithPath(t *testing.T, cfg string) (*httptest.Server, string) {
+	return newTestProxyWithPathAndSecretStore(t, cfg, secrets.NoopStore{})
+}
+
+func newTestProxyWithSecretStore(t *testing.T, cfg string, secretStore secrets.Store) *httptest.Server {
+	server, _ := newTestProxyWithPathAndSecretStore(t, cfg, secretStore)
+	return server
+}
+
+func newTestProxyWithPathAndSecretStore(t *testing.T, cfg string, secretStore secrets.Store) (*httptest.Server, string) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -813,11 +915,48 @@ server:
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHandler(store, secrets.NoopStore{}, approval.NewManager(store.Get().Server.ApprovalTimeout.Duration), logger)
+	handler, err := NewHandler(store, secretStore, approval.NewManager(store.Get().Server.ApprovalTimeout.Duration), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return httptest.NewServer(handler), path
+}
+
+func testServerConfig(t *testing.T, cfg string) string {
+	t.Helper()
+	dir := t.TempDir()
+	return strings.Replace(cfg, "server:\n", fmt.Sprintf(`server:
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")), 1)
+}
+
+type proxyMemorySecretStore struct {
+	values map[string]string
+}
+
+func newProxyMemorySecretStore() *proxyMemorySecretStore {
+	return &proxyMemorySecretStore{values: map[string]string{}}
+}
+
+func (s *proxyMemorySecretStore) Get(_ context.Context, credentialID, key string) (string, bool, error) {
+	value, ok := s.values[credentialID+":"+key]
+	return value, ok, nil
+}
+
+func (s *proxyMemorySecretStore) Put(_ context.Context, credentialID, key, value string) error {
+	s.values[credentialID+":"+key] = value
+	return nil
+}
+
+func (s *proxyMemorySecretStore) Delete(_ context.Context, credentialID, key string) error {
+	delete(s.values, credentialID+":"+key)
+	return nil
+}
+
+func (s *proxyMemorySecretStore) Close() error {
+	return nil
 }
 
 func loadTestConfig(t *testing.T, path string) *config.Config {

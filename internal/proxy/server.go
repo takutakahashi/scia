@@ -28,6 +28,7 @@ import (
 
 type Handler struct {
 	store      *config.Store
+	secrets    secrets.Store
 	approval   *approval.Manager
 	injector   *auth.Injector
 	transport  *http.Transport
@@ -44,8 +45,12 @@ func NewHandler(store *config.Store, secretStore secrets.Store, approvals *appro
 	if err != nil {
 		return nil, err
 	}
+	if secretStore == nil {
+		secretStore = secrets.NoopStore{}
+	}
 	handler := &Handler{
 		store:    store,
+		secrets:  secretStore,
 		approval: approvals,
 		injector: auth.NewInjector(secretStore),
 		transport: &http.Transport{
@@ -642,6 +647,8 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(ca.certPEM)
 	case r.Method == http.MethodGet && r.URL.Path == "/_scia/approvals":
 		writeJSON(w, h.approval.List())
+	case r.Method == http.MethodPost && r.URL.Path == "/_scia/secrets":
+		h.storeSecret(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/_scia/approvals/"):
 		id, action, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, "/_scia/approvals/"), "/")
 		if !ok {
@@ -666,6 +673,33 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (h *Handler) storeSecret(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Ref   string `json:"ref"`
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	ref := strings.TrimPrefix(body.Ref, "secret:")
+	credentialID, key, err := secrets.RefParts(ref)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.Token) == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+	if err := h.secrets.Put(r.Context(), credentialID, key, body.Token); err != nil {
+		h.logger.Error("failed to store secret", "error", err)
+		http.Error(w, "failed to store secret", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) currentCA(cfg *config.Config) (*certificateAuthority, error) {

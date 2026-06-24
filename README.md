@@ -53,8 +53,13 @@ Admin endpoints:
 - `GET /_scia/approvals`
 - `POST /_scia/approvals/{id}/approve`
 - `POST /_scia/approvals/{id}/deny`
+- `POST /_scia/secrets`
 
 If `server.adminToken` is set, admin requests must include `Authorization: Bearer <token>`. Config values with the `env:` prefix are read from environment variables.
+
+`POST /_scia/secrets` accepts `{"ref":"secret:namespace.provider.key","token":"..."}`
+and stores the token in the configured secret store at the referenced
+credential/key. The token is not returned in the response.
 
 The OAuth helper UI runs on a separate port, `server.oauth.listen` (`127.0.0.1:8081` by default). Configure the Google OAuth client redirect URI to match `server.oauth.redirectUrl`, for example:
 
