@@ -112,8 +112,7 @@ the authorization request to Todoist, exchanges the returned code at
 long-lived `access_token` instead.
 
 See [docs/todoist-oauth.md](docs/todoist-oauth.md) for the full Todoist setup
-guide, including local helper setup, proxy injection, and namespaced broker
-configuration.
+guide, including local helper setup and proxy injection.
 
 OAuth callback refresh tokens are stored in the SQLite secret store by default:
 
@@ -176,98 +175,7 @@ and stores the returned `access_token`.
 
 The SQLite store is local persistence, not encryption. Keep the database path on a protected volume and restrict filesystem access to the `scia` process.
 
-## Namespaced OAuth broker
-
-`server.oauth.namespaces` configures OAuth clients by namespace. This lets agents or a proxy call scia for authorization URLs, token refresh, and revocation without receiving the SaaS client ID or client secret.
-
-```yaml
-server:
-  mode: "oauth"
-  oauth:
-    listen: "127.0.0.1:8081"
-    brokerToken: "env:SCIA_OAUTH_BROKER_TOKEN"
-    namespaces:
-      service-a:
-        google:
-          clientIdSecretRef: "secret:service-a.google.client-id"
-          clientSecretRef: "secret:service-a.google.client-secret"
-          scope: "https://www.googleapis.com/auth/calendar"
-          redirectUrl: "https://service-a.example.com/oauth/callback"
-        notion:
-          clientIdSecretRef: "secret:service-a.notion.client-id"
-          clientSecretRef: "secret:service-a.notion.client-secret"
-          redirectUrl: "https://service-a.example.com/oauth/notion/callback"
-        todoist:
-          clientIdSecretRef: "secret:service-a.todoist.client-id"
-          clientSecretRef: "secret:service-a.todoist.client-secret"
-          scope: "data:read_write"
-        slack:
-          clientIdSecretRef: "secret:service-a.slack.client-id"
-          clientSecretRef: "secret:service-a.slack.client-secret"
-          scope: "users:read chat:write"
-```
-
-`server.mode` is exclusive:
-
-- `proxy` starts only the forward proxy.
-- `oauth` starts only the OAuth broker server.
-
-The two servers are not started in the same process.
-
-Secret refs support these forms:
-
-- `secret:namespace.provider.key` resolves from the configured secret store as credential ID `namespace.provider` and key `key`.
-- `namespace.provider.key` is accepted as a shorthand for `secret:namespace.provider.key`.
-- `env:NAME` resolves from the process environment, which is useful for local experiments.
-
-For the example above, store `client-id` and `client-secret` under credential ID `service-a.google`. For env-backed experiments, use:
-
-```yaml
-clientIdSecretRef: "env:SERVICE_A_GOOGLE_CLIENT_ID"
-clientSecretRef: "env:SERVICE_A_GOOGLE_CLIENT_SECRET"
-```
-
-Google broker endpoints:
-
-- `GET /oauth/{namespace}/google/authorization-url?state=...` returns a generated Google authorization URL.
-- `GET /oauth/{namespace}/google/start` redirects to the generated Google authorization URL.
-- `POST /oauth/{namespace}/google/token` forwards a refresh-token or authorization-code request to Google with the configured client ID and client secret injected by scia.
-- `POST /oauth/{namespace}/google/access-token` exchanges the refresh token stored by scia for a Google access token.
-- `POST /oauth/{namespace}/google/revoke` forwards a revoke request to Google.
-
-Notion broker endpoints:
-
-- `GET /oauth/{namespace}/notion/authorization-url?state=...` returns a generated Notion authorization URL.
-- `GET /oauth/{namespace}/notion/start` redirects to the generated Notion authorization URL.
-- `POST /oauth/{namespace}/notion/token` forwards a refresh-token or authorization-code request to Notion with the configured client ID and client secret injected by scia.
-- `POST /oauth/{namespace}/notion/access-token` exchanges the refresh token stored by scia for a Notion access token and stores any rotated refresh token returned by Notion.
-- `POST /oauth/{namespace}/notion/revoke` forwards a revoke request to Notion.
-
-Todoist broker endpoints:
-
-- `GET /oauth/{namespace}/todoist/authorization-url?state=...` returns a generated Todoist authorization URL.
-- `GET /oauth/{namespace}/todoist/start` redirects to the generated Todoist authorization URL.
-- `POST /oauth/{namespace}/todoist/token` forwards a refresh-token or authorization-code request to Todoist with the configured client ID and client secret injected by scia.
-- `POST /oauth/{namespace}/todoist/access-token` returns a stored Todoist legacy access token, or exchanges the stored refresh token for a new access token and stores any rotated refresh token returned by Todoist.
-- `POST /oauth/{namespace}/todoist/revoke` forwards a revoke request to Todoist.
-
-Slack broker endpoints:
-
-- `GET /oauth/{namespace}/slack/authorization-url?state=...` returns a generated Slack user-token authorization URL.
-- `GET /oauth/{namespace}/slack/start` redirects to the generated Slack authorization URL.
-- `POST /oauth/{namespace}/slack/token` forwards a refresh-token or authorization-code request to Slack with the configured client ID and client secret injected by scia.
-- `POST /oauth/{namespace}/slack/access-token` returns a stored Slack legacy access token, or exchanges the stored refresh token for a new access token and stores any rotated refresh token returned by Slack.
-- `POST /oauth/{namespace}/slack/revoke` forwards a revoke request to Slack.
-
-GitHub broker endpoints:
-
-- `GET /oauth/{namespace}/github/authorization-url?state=...` returns a generated GitHub authorization URL.
-- `GET /oauth/{namespace}/github/start` redirects to the generated GitHub authorization URL.
-- `POST /oauth/{namespace}/github/token` forwards an authorization-code or refresh-token request to GitHub with the configured client ID and client secret injected by scia.
-- `POST /oauth/{namespace}/github/access-token` returns a stored GitHub access token, or exchanges the stored refresh token for a new access token and stores any rotated refresh token returned by GitHub.
-- `POST /oauth/{namespace}/github/revoke` deletes the app authorization grant for a GitHub OAuth token.
-
-Frontend integration metadata:
+## Frontend integration metadata
 
 - `GET /api/integrations` returns configured OAuth integrations as JSON for a frontend.
 - The response is generated from the current config on every request, so config reloads are reflected without frontend changes.
@@ -300,60 +208,6 @@ server:
             name: "Calendar read-only"
             desc: "Read events without writing changes."
             enabled: false
-```
-
-When `server.oauth.brokerToken` is set, broker API requests to
-`authorization-url`, `token`, `access-token`, and `revoke` must include
-`Authorization: Bearer <token>`. `env:` values are expanded, so the OAuth server
-and proxy can share a Kubernetes Secret or deployment environment variable
-without putting the token in config files. The browser redirect endpoint
-`/oauth/{namespace}/google/start` is not protected by this header because
-browsers do not attach service-to-service bearer tokens during redirects.
-
-The proxy can also reference the namespaced Google credential ID directly:
-
-```yaml
-rules:
-  - name: inject-service-a-google-token
-    hosts: ["www.googleapis.com"]
-    paths: ["/calendar/v3/*"]
-    action: allow
-    credentials: ["service-a.google"]
-```
-
-For a proxy that should not read OAuth client secrets directly, configure the
-Google credential with `params.token_broker_url`. The proxy reads the refresh
-token from its configured secret store, POSTs it to the OAuth broker when a
-matching request needs an access token, caches the returned access token until
-expiry, and injects it into the upstream request:
-
-```yaml
-credentials:
-  - id: service-a.google
-    type: google-oauth-refresh-token
-    params:
-      token_broker_url: "http://scia-oauth:8081/oauth/service-a/google/token"
-      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
-  - id: service-a.notion
-    type: notion-oauth-refresh-token
-    params:
-      token_broker_url: "http://scia-oauth:8081/oauth/service-a/notion/token"
-      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
-  - id: service-a.todoist
-    type: todoist-oauth-refresh-token
-    params:
-      token_broker_url: "http://scia-oauth:8081/oauth/service-a/todoist/token"
-      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
-  - id: service-a.slack
-    type: slack-user-oauth-token
-    params:
-      token_broker_url: "http://scia-oauth:8081/oauth/service-a/slack/token"
-      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
-  - id: service-a.github
-    type: github-oauth-token
-    params:
-      token_broker_url: "http://scia-oauth:8081/oauth/service-a/github/token"
-      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
 ```
 
 ## Configuration

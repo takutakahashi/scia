@@ -111,14 +111,12 @@ type IntegrationConfig struct {
 type OAuthConfig struct {
 	Listen       string                                    `yaml:"listen"`
 	RedirectURL  string                                    `yaml:"redirectUrl"`
-	BrokerToken  string                                    `yaml:"brokerToken"`
 	Integrations map[string]OAuthIntegrationMetadataConfig `yaml:"integrations"`
 	Google       GoogleOAuthConfig                         `yaml:"google"`
 	Notion       NotionOAuthConfig                         `yaml:"notion"`
 	Todoist      TodoistOAuthConfig                        `yaml:"todoist"`
 	Slack        SlackOAuthConfig                          `yaml:"slack"`
 	GitHub       GitHubOAuthConfig                         `yaml:"github"`
-	Namespaces   map[string]OAuthNamespaceConfig           `yaml:"namespaces"`
 }
 
 type OAuthIntegrationMetadataConfig struct {
@@ -207,14 +205,6 @@ type GitHubOAuthConfig struct {
 	TokenURL          string `yaml:"tokenUrl"`
 	RevokeURL         string `yaml:"revokeUrl"`
 	RedirectURL       string `yaml:"redirectUrl"`
-}
-
-type OAuthNamespaceConfig struct {
-	Google  GoogleOAuthConfig  `yaml:"google"`
-	Notion  NotionOAuthConfig  `yaml:"notion"`
-	Todoist TodoistOAuthConfig `yaml:"todoist"`
-	Slack   SlackOAuthConfig   `yaml:"slack"`
-	GitHub  GitHubOAuthConfig  `yaml:"github"`
 }
 
 type SecretsConfig struct {
@@ -360,29 +350,6 @@ func (c *Config) Validate() error {
 	if c.Server.OAuth.GitHub.HasClientConfig() {
 		seenCreds[c.GitHubOAuthCredentialID()] = struct{}{}
 	}
-	for namespace, ns := range c.Server.OAuth.Namespaces {
-		if namespace == "" {
-			return fmt.Errorf("server.oauth.namespaces cannot include an empty namespace")
-		}
-		if strings.Contains(namespace, ".") {
-			return fmt.Errorf("server.oauth.namespaces[%q] cannot contain dots", namespace)
-		}
-		if ns.Google.HasClientConfig() {
-			seenCreds[NamespaceGoogleCredentialID(namespace)] = struct{}{}
-		}
-		if ns.Notion.HasClientConfig() {
-			seenCreds[NamespaceNotionCredentialID(namespace)] = struct{}{}
-		}
-		if ns.Todoist.HasClientConfig() {
-			seenCreds[NamespaceTodoistCredentialID(namespace)] = struct{}{}
-		}
-		if ns.Slack.HasClientConfig() {
-			seenCreds[NamespaceSlackCredentialID(namespace)] = struct{}{}
-		}
-		if ns.GitHub.HasClientConfig() {
-			seenCreds[NamespaceGitHubCredentialID(namespace)] = struct{}{}
-		}
-	}
 	for i, rule := range c.Rules {
 		if rule.Name == "" {
 			return fmt.Errorf("rules[%d].name is required", i)
@@ -421,31 +388,6 @@ func CredentialByID(cfg *Config, id string) (CredentialConfig, bool) {
 	}
 	if cfg.Server.OAuth.GitHub.HasClientConfig() && id == cfg.GitHubOAuthCredentialID() {
 		return CredentialConfig{ID: id, Type: "github-oauth-token", Params: map[string]string{}}, true
-	}
-	if namespace, ok := GoogleCredentialNamespace(id); ok {
-		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Google.HasClientConfig() {
-			return CredentialConfig{ID: id, Type: "google-oauth-refresh-token", Params: map[string]string{}}, true
-		}
-	}
-	if namespace, ok := NotionCredentialNamespace(id); ok {
-		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Notion.HasClientConfig() {
-			return CredentialConfig{ID: id, Type: "notion-oauth-refresh-token", Params: map[string]string{}}, true
-		}
-	}
-	if namespace, ok := TodoistCredentialNamespace(id); ok {
-		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Todoist.HasClientConfig() {
-			return CredentialConfig{ID: id, Type: "todoist-oauth-refresh-token", Params: map[string]string{}}, true
-		}
-	}
-	if namespace, ok := SlackCredentialNamespace(id); ok {
-		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.Slack.HasClientConfig() {
-			return CredentialConfig{ID: id, Type: "slack-user-oauth-token", Params: map[string]string{}}, true
-		}
-	}
-	if namespace, ok := GitHubCredentialNamespace(id); ok {
-		if ns, exists := cfg.Server.OAuth.Namespaces[namespace]; exists && ns.GitHub.HasClientConfig() {
-			return CredentialConfig{ID: id, Type: "github-oauth-token", Params: map[string]string{}}, true
-		}
 	}
 	return CredentialConfig{}, false
 }
@@ -505,78 +447,12 @@ func (g GitHubOAuthConfig) HasClientConfig() bool {
 	return (g.ClientID != "" || g.ClientIDSecretRef != "") && (g.ClientSecret != "" || g.ClientSecretRef != "")
 }
 
-func GoogleCredentialNamespace(id string) (string, bool) {
-	namespace, provider, ok := strings.Cut(id, ".")
-	if !ok || namespace == "" || provider != "google" {
-		return "", false
-	}
-	return namespace, true
-}
-
-func NotionCredentialNamespace(id string) (string, bool) {
-	namespace, provider, ok := strings.Cut(id, ".")
-	if !ok || namespace == "" || provider != "notion" {
-		return "", false
-	}
-	return namespace, true
-}
-
-func TodoistCredentialNamespace(id string) (string, bool) {
-	namespace, provider, ok := strings.Cut(id, ".")
-	if !ok || namespace == "" || provider != "todoist" {
-		return "", false
-	}
-	return namespace, true
-}
-
-func SlackCredentialNamespace(id string) (string, bool) {
-	namespace, provider, ok := strings.Cut(id, ".")
-	if !ok || namespace == "" || provider != "slack" {
-		return "", false
-	}
-	return namespace, true
-}
-
-func GitHubCredentialNamespace(id string) (string, bool) {
-	namespace, provider, ok := strings.Cut(id, ".")
-	if !ok || namespace == "" || provider != "github" {
-		return "", false
-	}
-	return namespace, true
-}
-
-func NamespaceGoogleCredentialID(namespace string) string {
-	return namespace + ".google"
-}
-
-func NamespaceNotionCredentialID(namespace string) string {
-	return namespace + ".notion"
-}
-
-func NamespaceTodoistCredentialID(namespace string) string {
-	return namespace + ".todoist"
-}
-
-func NamespaceSlackCredentialID(namespace string) string {
-	return namespace + ".slack"
-}
-
-func NamespaceGitHubCredentialID(namespace string) string {
-	return namespace + ".github"
-}
-
 func GoogleOAuthConfigForCredential(cfg *Config, credentialID string) (GoogleOAuthConfig, bool) {
 	if credentialID == "" || credentialID == cfg.GoogleOAuthCredentialID() {
 		if cfg.Server.OAuth.Google.HasClientConfig() {
 			return cfg.Server.OAuth.Google, true
 		}
 		return GoogleOAuthConfig{}, false
-	}
-	if namespace, ok := GoogleCredentialNamespace(credentialID); ok {
-		ns, exists := cfg.Server.OAuth.Namespaces[namespace]
-		if exists && ns.Google.HasClientConfig() {
-			return ns.Google, true
-		}
 	}
 	return GoogleOAuthConfig{}, false
 }
@@ -588,12 +464,6 @@ func NotionOAuthConfigForCredential(cfg *Config, credentialID string) (NotionOAu
 		}
 		return NotionOAuthConfig{}, false
 	}
-	if namespace, ok := NotionCredentialNamespace(credentialID); ok {
-		ns, exists := cfg.Server.OAuth.Namespaces[namespace]
-		if exists && ns.Notion.HasClientConfig() {
-			return ns.Notion, true
-		}
-	}
 	return NotionOAuthConfig{}, false
 }
 
@@ -603,12 +473,6 @@ func TodoistOAuthConfigForCredential(cfg *Config, credentialID string) (TodoistO
 			return cfg.Server.OAuth.Todoist, true
 		}
 		return TodoistOAuthConfig{}, false
-	}
-	if namespace, ok := TodoistCredentialNamespace(credentialID); ok {
-		ns, exists := cfg.Server.OAuth.Namespaces[namespace]
-		if exists && ns.Todoist.HasClientConfig() {
-			return ns.Todoist, true
-		}
 	}
 	return TodoistOAuthConfig{}, false
 }
@@ -620,12 +484,6 @@ func SlackOAuthConfigForCredential(cfg *Config, credentialID string) (SlackOAuth
 		}
 		return SlackOAuthConfig{}, false
 	}
-	if namespace, ok := SlackCredentialNamespace(credentialID); ok {
-		ns, exists := cfg.Server.OAuth.Namespaces[namespace]
-		if exists && ns.Slack.HasClientConfig() {
-			return ns.Slack, true
-		}
-	}
 	return SlackOAuthConfig{}, false
 }
 
@@ -635,12 +493,6 @@ func GitHubOAuthConfigForCredential(cfg *Config, credentialID string) (GitHubOAu
 			return cfg.Server.OAuth.GitHub, true
 		}
 		return GitHubOAuthConfig{}, false
-	}
-	if namespace, ok := GitHubCredentialNamespace(credentialID); ok {
-		ns, exists := cfg.Server.OAuth.Namespaces[namespace]
-		if exists && ns.GitHub.HasClientConfig() {
-			return ns.GitHub, true
-		}
 	}
 	return GitHubOAuthConfig{}, false
 }
