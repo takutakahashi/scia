@@ -787,12 +787,94 @@ rules:
 	}
 }
 
+func TestAdminPutTokenStoresSecret(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")), secretStore)
+	defer proxyServer.Close()
+
+	body := strings.NewReader(`{"credentialId":"github","key":"access_token","token":"github-token"}`)
+	req, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/_scia/tokens", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	got := secretStore.value("github", "access_token")
+	if got != "github-token" {
+		t.Fatalf("unexpected stored token: %q", got)
+	}
+}
+
+func TestAdminPutTokenRequiresAdminToken(t *testing.T) {
+	dir := t.TempDir()
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")))
+	defer proxyServer.Close()
+
+	resp, err := http.Post(proxyServer.URL+"/_scia/tokens", "application/json", strings.NewReader(`{"credentialId":"github","key":"access_token","token":"github-token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+}
+
+func TestAdminPutTokenValidatesRequest(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Post(proxyServer.URL+"/_scia/tokens", "application/json", strings.NewReader(`{"credentialId":"github","token":"github-token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if len(secretStore.values) != 0 {
+		t.Fatalf("unexpected stored values: %#v", secretStore.values)
+	}
+}
+
 func newTestProxy(t *testing.T, cfg string) *httptest.Server {
 	server, _ := newTestProxyWithPath(t, cfg)
 	return server
 }
 
 func newTestProxyWithPath(t *testing.T, cfg string) (*httptest.Server, string) {
+	return newTestProxyWithPathAndSecretStore(t, cfg, secrets.NoopStore{})
+}
+
+func newTestProxyWithSecretStore(t *testing.T, cfg string, secretStore secrets.Store) *httptest.Server {
+	server, _ := newTestProxyWithPathAndSecretStore(t, cfg, secretStore)
+	return server
+}
+
+func newTestProxyWithPathAndSecretStore(t *testing.T, cfg string, secretStore secrets.Store) (*httptest.Server, string) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -813,7 +895,7 @@ server:
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHandler(store, secrets.NoopStore{}, approval.NewManager(store.Get().Server.ApprovalTimeout.Duration), logger)
+	handler, err := NewHandler(store, secretStore, approval.NewManager(store.Get().Server.ApprovalTimeout.Duration), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -845,4 +927,36 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 		t.Fatal(err)
 	}
 	return parsed
+}
+
+type recordingSecretStore struct {
+	values map[string]string
+}
+
+func newRecordingSecretStore() *recordingSecretStore {
+	return &recordingSecretStore{values: map[string]string{}}
+}
+
+func (s *recordingSecretStore) Get(_ context.Context, credentialID, key string) (string, bool, error) {
+	value, ok := s.values[credentialID+":"+key]
+	return value, ok, nil
+}
+
+func (s *recordingSecretStore) Put(_ context.Context, credentialID, key, value string) error {
+	s.values[credentialID+":"+key] = value
+	return nil
+}
+
+func (s *recordingSecretStore) Delete(_ context.Context, credentialID, key string) error {
+	delete(s.values, credentialID+":"+key)
+	return nil
+}
+
+func (s *recordingSecretStore) Close() error {
+	return nil
+}
+
+func (s *recordingSecretStore) value(credentialID, key string) string {
+	value, _, _ := s.Get(context.Background(), credentialID, key)
+	return value
 }
