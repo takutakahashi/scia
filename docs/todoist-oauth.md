@@ -110,67 +110,11 @@ Matching requests to `https://api.todoist.com/api/v1/...` receive:
 Authorization: Bearer <todoist-access-token>
 ```
 
-## Namespaced broker
-
-Use `server.oauth.namespaces` when one OAuth service should hold the Todoist
-client secret and another proxy service should only request access tokens.
-
-OAuth broker config:
-
-```yaml
-server:
-  mode: "oauth"
-  oauth:
-    listen: "127.0.0.1:8081"
-    brokerToken: "env:SCIA_OAUTH_BROKER_TOKEN"
-    namespaces:
-      service-a:
-        todoist:
-          clientIdSecretRef: "secret:service-a.todoist.client-id"
-          clientSecretRef: "secret:service-a.todoist.client-secret"
-          scope: "data:read_write"
-          redirectUrl: "https://service-a.example.com/oauth/todoist/callback"
-```
-
-The broker exposes these endpoints:
-
-- `GET /oauth/{namespace}/todoist/authorization-url?state=...`
-- `GET /oauth/{namespace}/todoist/start`
-- `POST /oauth/{namespace}/todoist/token`
-- `POST /oauth/{namespace}/todoist/access-token`
-- `POST /oauth/{namespace}/todoist/revoke`
-
-When `server.oauth.brokerToken` is set, calls to `authorization-url`, `token`,
-`access-token`, and `revoke` require:
-
-```text
-Authorization: Bearer <SCIA_OAUTH_BROKER_TOKEN>
-```
-
-Proxy config using the broker:
-
-```yaml
-credentials:
-  - id: service-a.todoist
-    type: todoist-oauth-refresh-token
-    params:
-      token_broker_url: "http://scia-oauth:8081/oauth/service-a/todoist/token"
-      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
-
-rules:
-  - name: inject-service-a-todoist-token
-    hosts: ["api.todoist.com"]
-    paths: ["/api/v1/*"]
-    action: allow
-    credentials: ["service-a.todoist"]
-```
-
 ## Troubleshooting
 
 - `invalid_request` on the Todoist consent screen usually means the app has
   multiple redirect URLs configured and the request did not include a matching
-  `redirect_uri`. Set `server.oauth.todoist.redirectUrl` or
-  `server.oauth.namespaces.<namespace>.todoist.redirectUrl`.
+  `redirect_uri`. Set `server.oauth.todoist.redirectUrl`.
 - `invalid_scope` means the `scope` value is not supported by Todoist. Use a
   comma-separated Todoist scope string such as `data:read_write`.
 - `refresh_token or access_token is not registered` means the Todoist OAuth

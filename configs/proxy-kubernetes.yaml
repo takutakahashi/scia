@@ -23,8 +23,6 @@ credentials:
     type: google-oauth-refresh-token
     params:
       user: alice
-      token_broker_url: "http://scia-oauth:8081/oauth/alice/google/token"
-      token_broker_token: "env:SCIA_OAUTH_BROKER_TOKEN"
 
 rules:
   - name: inject-alice-google-calendar-token
