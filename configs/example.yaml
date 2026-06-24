@@ -96,6 +96,11 @@ server:
       redirectUrl: "http://localhost:8081/oauth/github/callback"
   secrets:
     sqlitePath: "data/scia-secrets.db"
+    # mode: "external"
+    # external:
+    #   webhook:
+    #     url: "env:SCIA_EXTERNAL_SECRETS_WEBHOOK_URL"
+    #     secretKey: "env:SCIA_EXTERNAL_SECRETS_WEBHOOK_SECRET_KEY"
 
 credentials:
   - id: github-token

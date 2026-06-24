@@ -122,6 +122,24 @@ server:
     sqlitePath: "data/scia-secrets.db"
 ```
 
+To send secrets to an external system instead, use the `external` secret store:
+
+```yaml
+server:
+  secrets:
+    mode: "external"
+    external:
+      webhook:
+        url: "env:SCIA_EXTERNAL_SECRETS_WEBHOOK_URL"
+        secretKey: "env:SCIA_EXTERNAL_SECRETS_WEBHOOK_SECRET_KEY"
+```
+
+`external` posts a JSON webhook on `Put` and `Delete`. Secret values are sent in
+the payload as AES-256-GCM encrypted `value.ciphertext`; `credential_id`, `key`,
+event type, and timestamp are sent as plaintext metadata. The AES key is derived
+from `secretKey` with SHA-256, and the GCM additional authenticated data is
+`credential_id + "\x00" + key`.
+
 The SQLite file stores values by credential ID and key. For Google credentials,
 callback stores `refresh_token`; request-time injection reads
 `params.refresh_token` first and falls back to the secret store. For Notion

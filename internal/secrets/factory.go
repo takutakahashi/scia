@@ -24,6 +24,9 @@ func NewFromConfig(ctx context.Context, cfg *config.Config) (Store, error) {
 			DynamicUsers:                cfg.Server.Secrets.Kubernetes.DynamicUsers,
 			DynamicUserSecretNamePrefix: cfg.Server.Secrets.Kubernetes.DynamicUserSecretNamePrefix,
 		})
+	case "external":
+		webhook := cfg.Server.Secrets.External.Webhook
+		return NewExternalStore(config.HeaderValueFromEnv(webhook.URL), config.HeaderValueFromEnv(webhook.SecretKey), nil)
 	default:
 		return nil, fmt.Errorf("unsupported secrets mode %q", mode)
 	}
