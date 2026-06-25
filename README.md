@@ -52,6 +52,7 @@ Admin endpoints:
 - `GET /_scia/ca.pem`
 - `GET /_scia/approvals`
 - `POST /_scia/tokens`
+- `DELETE /_scia/tokens`
 - `POST /_scia/approvals/{id}/approve`
 - `POST /_scia/approvals/{id}/deny`
 
@@ -65,6 +66,15 @@ curl -X POST http://localhost:8080/_scia/tokens \
   -H "Authorization: Bearer $SCIA_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"credentialId":"github","key":"access_token","token":"TOKEN_VALUE"}'
+```
+
+`DELETE /_scia/tokens` deletes a token from the configured secret store:
+
+```sh
+curl -X DELETE http://localhost:8080/_scia/tokens \
+  -H "Authorization: Bearer $SCIA_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"credentialId":"github","key":"access_token"}'
 ```
 
 The OAuth helper UI runs on a separate port, `server.oauth.listen` (`127.0.0.1:8081` by default). Configure the Google OAuth client redirect URI to match `server.oauth.redirectUrl`, for example:

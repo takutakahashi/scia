@@ -649,6 +649,8 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.approval.List())
 	case r.Method == http.MethodPost && (r.URL.Path == "/_scia/tokens" || r.URL.Path == "/_scia/secrets"):
 		h.serveAdminPutToken(w, r)
+	case r.Method == http.MethodDelete && (r.URL.Path == "/_scia/tokens" || r.URL.Path == "/_scia/secrets"):
+		h.serveAdminDeleteToken(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/_scia/approvals/"):
 		id, action, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, "/_scia/approvals/"), "/")
 		if !ok {
@@ -676,36 +678,67 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveAdminPutToken(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		CredentialID      string `json:"credentialId"`
-		CredentialIDSnake string `json:"credential_id"`
-		Key               string `json:"key"`
-		Token             string `json:"token"`
-		Value             string `json:"value"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+	req, ok := decodeAdminTokenRequest(w, r)
+	if !ok {
 		return
 	}
-	credentialID := strings.TrimSpace(req.CredentialID)
-	if credentialID == "" {
-		credentialID = strings.TrimSpace(req.CredentialIDSnake)
-	}
-	key := strings.TrimSpace(req.Key)
-	value := req.Token
-	if value == "" {
-		value = req.Value
-	}
-	if credentialID == "" || key == "" || value == "" {
+	value := req.value()
+	if req.CredentialID == "" || req.Key == "" || value == "" {
 		http.Error(w, "credentialId, key, and token are required", http.StatusBadRequest)
 		return
 	}
-	if err := h.secrets.Put(r.Context(), credentialID, key, value); err != nil {
-		h.logger.Error("failed to store token", "error", err, "credential_id", credentialID, "key", key)
+	if err := h.secrets.Put(r.Context(), req.CredentialID, req.Key, value); err != nil {
+		h.logger.Error("failed to store token", "error", err, "credential_id", req.CredentialID, "key", req.Key)
 		http.Error(w, "failed to store token", http.StatusBadGateway)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) serveAdminDeleteToken(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeAdminTokenRequest(w, r)
+	if !ok {
+		return
+	}
+	if req.CredentialID == "" || req.Key == "" {
+		http.Error(w, "credentialId and key are required", http.StatusBadRequest)
+		return
+	}
+	if err := h.secrets.Delete(r.Context(), req.CredentialID, req.Key); err != nil {
+		h.logger.Error("failed to delete token", "error", err, "credential_id", req.CredentialID, "key", req.Key)
+		http.Error(w, "failed to delete token", http.StatusBadGateway)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type adminTokenRequest struct {
+	CredentialID      string `json:"credentialId"`
+	CredentialIDSnake string `json:"credential_id"`
+	Key               string `json:"key"`
+	Token             string `json:"token"`
+	Value             string `json:"value"`
+}
+
+func decodeAdminTokenRequest(w http.ResponseWriter, r *http.Request) (adminTokenRequest, bool) {
+	var req adminTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return adminTokenRequest{}, false
+	}
+	req.CredentialID = strings.TrimSpace(req.CredentialID)
+	if req.CredentialID == "" {
+		req.CredentialID = strings.TrimSpace(req.CredentialIDSnake)
+	}
+	req.Key = strings.TrimSpace(req.Key)
+	return req, true
+}
+
+func (r adminTokenRequest) value() string {
+	if r.Token != "" {
+		return r.Token
+	}
+	return r.Value
 }
 
 func (h *Handler) currentCA(cfg *config.Config) (*certificateAuthority, error) {

@@ -860,6 +860,94 @@ func TestAdminPutTokenValidatesRequest(t *testing.T) {
 	}
 }
 
+func TestAdminDeleteTokenDeletesSecret(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "github", "access_token", "github-token"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")), secretStore)
+	defer proxyServer.Close()
+
+	body := strings.NewReader(`{"credentialId":"github","key":"access_token"}`)
+	req, err := http.NewRequest(http.MethodDelete, proxyServer.URL+"/_scia/tokens", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	if got := secretStore.value("github", "access_token"); got != "" {
+		t.Fatalf("unexpected remaining token: %q", got)
+	}
+}
+
+func TestAdminDeleteTokenRequiresAdminToken(t *testing.T) {
+	dir := t.TempDir()
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")))
+	defer proxyServer.Close()
+
+	req, err := http.NewRequest(http.MethodDelete, proxyServer.URL+"/_scia/tokens", strings.NewReader(`{"credentialId":"github","key":"access_token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+}
+
+func TestAdminDeleteTokenValidatesRequest(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "github", "access_token", "github-token"); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
+	defer proxyServer.Close()
+
+	req, err := http.NewRequest(http.MethodDelete, proxyServer.URL+"/_scia/tokens", strings.NewReader(`{"credentialId":"github"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if got := secretStore.value("github", "access_token"); got != "github-token" {
+		t.Fatalf("unexpected stored token: %q", got)
+	}
+}
+
 func newTestProxy(t *testing.T, cfg string) *httptest.Server {
 	server, _ := newTestProxyWithPath(t, cfg)
 	return server
