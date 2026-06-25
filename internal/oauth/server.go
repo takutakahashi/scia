@@ -149,10 +149,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/integrations", s.frontendIntegrations)
 	mux.HandleFunc("/oauth/google/start", s.startGoogle)
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
+	mux.HandleFunc("/oauth/google/token", s.googleToken)
 	mux.HandleFunc("/oauth/notion/start", s.startNotion)
 	mux.HandleFunc("/oauth/notion/callback", s.notionCallback)
 	mux.HandleFunc("/oauth/todoist/start", s.startTodoist)
 	mux.HandleFunc("/oauth/todoist/callback", s.todoistCallback)
+	mux.HandleFunc("/oauth/todoist/token", s.todoistToken)
 	mux.HandleFunc("/oauth/slack/start", s.startSlack)
 	mux.HandleFunc("/oauth/slack/callback", s.slackCallback)
 	mux.HandleFunc("/oauth/github/start", s.startGitHub)
@@ -321,6 +323,37 @@ func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = callbackTemplate.Execute(w, data)
+}
+
+func (s *Server) googleToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	cfg := s.store.Get()
+	credentialID := r.Form.Get("credential")
+	if credentialID == "" {
+		credentialID = cfg.GoogleOAuthCredentialID()
+	}
+	if !s.authorizeOptionalBrokerUser(w, r, cfg) {
+		return
+	}
+	cred, ok := s.googleCredential(cfg, credentialID)
+	if !ok {
+		http.Error(w, "unknown google credential", http.StatusBadRequest)
+		return
+	}
+	token, err := s.exchangeGoogleRefreshToken(r.Context(), cred, r.Form)
+	if err != nil {
+		s.logger.Error("google oauth refresh exchange failed", "error", err, "credential", credentialID)
+		http.Error(w, "token exchange failed", http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, token)
 }
 
 func (s *Server) startNotion(w http.ResponseWriter, r *http.Request) {
@@ -574,6 +607,37 @@ func (s *Server) todoistCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = callbackTemplate.Execute(w, data)
+}
+
+func (s *Server) todoistToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	cfg := s.store.Get()
+	credentialID := r.Form.Get("credential")
+	if credentialID == "" {
+		credentialID = cfg.TodoistOAuthCredentialID()
+	}
+	if !s.authorizeOptionalBrokerUser(w, r, cfg) {
+		return
+	}
+	cred, ok := s.todoistCredential(cfg, credentialID)
+	if !ok {
+		http.Error(w, "unknown todoist credential", http.StatusBadRequest)
+		return
+	}
+	token, err := s.exchangeTodoistRefreshToken(r.Context(), cred, r.Form)
+	if err != nil {
+		s.logger.Error("todoist oauth refresh exchange failed", "error", err, "credential", credentialID)
+		http.Error(w, "token exchange failed", http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, token)
 }
 
 func (s *Server) startSlack(w http.ResponseWriter, r *http.Request) {
@@ -913,6 +977,42 @@ func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.
 	return body, nil
 }
 
+func (s *Server) exchangeGoogleRefreshToken(ctx context.Context, cred config.CredentialConfig, form url.Values) (tokenResponse, error) {
+	refreshToken := form.Get("refresh_token")
+	if refreshToken == "" {
+		return tokenResponse{}, fmt.Errorf("refresh_token is required")
+	}
+	cfg := s.store.Get()
+	tokenURL := cred.Params["token_url"]
+	googleCfg, hasGoogleCfg := config.GoogleOAuthConfigForCredential(cfg, cred.ID)
+	if tokenURL == "" && hasGoogleCfg {
+		tokenURL = googleCfg.TokenURL
+	}
+	if tokenURL == "" {
+		tokenURL = googleTokenURL
+	}
+	clientID, err := s.googleClientID(ctx, cfg, cred)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	clientSecret, err := s.googleClientSecret(ctx, cfg, cred)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	if clientID == "" || clientSecret == "" {
+		return tokenResponse{}, fmt.Errorf("google credential is missing client_id or client_secret")
+	}
+	upstream := url.Values{}
+	upstream.Set("grant_type", "refresh_token")
+	upstream.Set("client_id", clientID)
+	upstream.Set("client_secret", clientSecret)
+	upstream.Set("refresh_token", refreshToken)
+	if scope := form.Get("scope"); scope != "" {
+		upstream.Set("scope", scope)
+	}
+	return s.forwardOAuthForm(ctx, tokenURL, upstream)
+}
+
 func (s *Server) exchangeNotionCode(ctx context.Context, r *http.Request, cred config.CredentialConfig, code string) (tokenResponse, error) {
 	cfg := s.store.Get()
 	tokenURL := cred.Params["token_url"]
@@ -1015,6 +1115,70 @@ func (s *Server) exchangeTodoistCode(ctx context.Context, cred config.Credential
 	}
 	if token.AccessToken == "" {
 		return tokenResponse{}, fmt.Errorf("todoist did not return an access_token")
+	}
+	return token, nil
+}
+
+func (s *Server) exchangeTodoistRefreshToken(ctx context.Context, cred config.CredentialConfig, form url.Values) (tokenResponse, error) {
+	refreshToken := form.Get("refresh_token")
+	if refreshToken == "" {
+		return tokenResponse{}, fmt.Errorf("refresh_token is required")
+	}
+	cfg := s.store.Get()
+	tokenURL := cred.Params["token_url"]
+	todoistCfg, hasTodoistCfg := config.TodoistOAuthConfigForCredential(cfg, cred.ID)
+	if tokenURL == "" && hasTodoistCfg {
+		tokenURL = todoistCfg.TokenURL
+	}
+	if tokenURL == "" {
+		tokenURL = todoistTokenURL
+	}
+	clientID, err := s.todoistClientID(ctx, cfg, cred)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	clientSecret, err := s.todoistClientSecret(ctx, cfg, cred)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	if clientID == "" || clientSecret == "" {
+		return tokenResponse{}, fmt.Errorf("todoist credential is missing client_id or client_secret")
+	}
+	upstream := url.Values{}
+	upstream.Set("grant_type", "refresh_token")
+	upstream.Set("client_id", clientID)
+	upstream.Set("client_secret", clientSecret)
+	upstream.Set("refresh_token", refreshToken)
+	if scope := form.Get("scope"); scope != "" {
+		upstream.Set("scope", scope)
+	}
+	return s.forwardOAuthForm(ctx, tokenURL, upstream)
+}
+
+func (s *Server) forwardOAuthForm(ctx context.Context, tokenURL string, form url.Values) (tokenResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return tokenResponse{}, err
+	}
+	defer resp.Body.Close()
+	var token tokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+		return tokenResponse{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		if token.Error != "" {
+			return tokenResponse{}, fmt.Errorf("%s: %s", token.Error, token.ErrorDesc)
+		}
+		return tokenResponse{}, fmt.Errorf("token endpoint returned %s", resp.Status)
+	}
+	if token.AccessToken == "" {
+		return tokenResponse{}, fmt.Errorf("token endpoint response did not include access_token")
 	}
 	return token, nil
 }
@@ -1200,6 +1364,21 @@ func (s *Server) authorizeDynamicUserRequest(w http.ResponseWriter, r *http.Requ
 		return false
 	}
 	return true
+}
+
+func (s *Server) authorizeOptionalBrokerUser(w http.ResponseWriter, r *http.Request, cfg *config.Config) bool {
+	userID := strings.TrimSpace(r.Form.Get("user"))
+	if userID == "" {
+		userID = strings.TrimSpace(r.URL.Query().Get("user"))
+	}
+	if userID == "" {
+		return true
+	}
+	if !cfg.HasUser(userID) {
+		http.Error(w, "unknown user", http.StatusBadRequest)
+		return false
+	}
+	return s.authorizeDynamicUserRequest(w, r, cfg, userID)
 }
 
 func dynamicUserTokenFromRequest(r *http.Request) string {

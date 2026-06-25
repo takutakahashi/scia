@@ -785,6 +785,55 @@ func TestTodoistOAuthCallbackStoresLegacyAccessToken(t *testing.T) {
 	}
 }
 
+func TestTodoistOAuthTokenExchangesRefreshToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "client_id", "todoist-client-id")
+		assertFormValue(t, r, "client_secret", "todoist-client-secret")
+		assertFormValue(t, r, "refresh_token", "todoist-refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "todoist-access-token",
+			"refresh_token": "rotated-refresh-token",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Todoist: config.TodoistOAuthConfig{
+					CredentialID: "todoist",
+					ClientID:     "todoist-client-id",
+					ClientSecret: "todoist-client-secret",
+					TokenURL:     tokenEndpoint.URL,
+				},
+			},
+		},
+	})
+	srv := NewServer(store, newMemorySecretStore(), slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/todoist/token", strings.NewReader("credential=todoist&grant_type=refresh_token&refresh_token=todoist-refresh-token"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got tokenResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessToken != "todoist-access-token" || got.RefreshToken != "rotated-refresh-token" {
+		t.Fatalf("unexpected token response: %+v", got)
+	}
+}
+
 func TestSlackOAuthCallbackStoresRefreshToken(t *testing.T) {
 	ok := true
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -926,6 +975,88 @@ func TestGoogleOAuthCallbackStoresRefreshTokenForKubernetesUser(t *testing.T) {
 	}
 	if got, ok, err := secretStore.Get(context.Background(), "alice", "google-calendar.refresh_token"); err != nil || !ok || got != "k8s-refresh-token" {
 		t.Fatalf("refresh token not stored for user: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestGoogleOAuthTokenExchangesRefreshToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "client_id", "client-id")
+		assertFormValue(t, r, "client_secret", "client-secret")
+		assertFormValue(t, r, "refresh_token", "refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "google-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "client-id",
+					ClientSecret: "client-secret",
+					TokenURL:     tokenEndpoint.URL,
+				},
+			},
+		},
+	})
+	srv := NewServer(store, newMemorySecretStore(), slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/google/token", strings.NewReader("credential=google-calendar&grant_type=refresh_token&refresh_token=refresh-token"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got tokenResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessToken != "google-access-token" {
+		t.Fatalf("unexpected access token: %q", got.AccessToken)
+	}
+}
+
+func TestGoogleOAuthTokenRejectsMismatchedDynamicUserToken(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Secrets: config.SecretsConfig{
+				Mode: "kubernetes",
+				Kubernetes: config.KubernetesSecretsConfig{
+					DynamicUsers: true,
+				},
+			},
+			OAuth: config.OAuthConfig{
+				Google: config.GoogleOAuthConfig{
+					CredentialID: "google-calendar",
+					ClientID:     "client-id",
+					ClientSecret: "client-secret",
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "bob", dynamicUserTokenSecretKey, "token-1"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(store, secretStore, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/google/token?user_token=token-2", strings.NewReader("credential=google-calendar&user=bob&refresh_token=refresh-token"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
