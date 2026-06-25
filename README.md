@@ -52,6 +52,7 @@ Admin endpoints:
 - `GET /_scia/ca.pem`
 - `GET /_scia/approvals`
 - `POST /_scia/tokens`
+- `POST /_scia/tokens/revoke`
 - `POST /_scia/approvals/{id}/approve`
 - `POST /_scia/approvals/{id}/deny`
 
@@ -66,6 +67,21 @@ curl -X POST http://localhost:8080/_scia/tokens \
   -H "Content-Type: application/json" \
   -d '{"credentialId":"github","key":"access_token","token":"TOKEN_VALUE"}'
 ```
+
+`POST /_scia/tokens/revoke` revokes a stored token through a configured broker
+and deletes the local secret only after the broker succeeds. Configure the
+credential with `params.revoke_broker_url`; `params.revoke_broker_token` is sent
+as a bearer token when present, and falls back to `params.token_broker_token`.
+
+```sh
+curl -X POST http://localhost:8080/_scia/tokens/revoke \
+  -H "Authorization: Bearer $SCIA_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"credentialId":"github","key":"access_token"}'
+```
+
+The revoke broker receives `application/x-www-form-urlencoded` fields:
+`credential_id`, `credential_type`, `token`, and `token_type_hint`.
 
 The OAuth helper UI runs on a separate port, `server.oauth.listen` (`127.0.0.1:8081` by default). Configure the Google OAuth client redirect URI to match `server.oauth.redirectUrl`, for example:
 
