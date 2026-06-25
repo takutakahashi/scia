@@ -32,6 +32,7 @@ type Handler struct {
 	approval   *approval.Manager
 	injector   *auth.Injector
 	transport  *http.Transport
+	client     *http.Client
 	logger     *slog.Logger
 	caMu       sync.RWMutex
 	ca         *certificateAuthority
@@ -53,6 +54,7 @@ func NewHandler(store *config.Store, secretStore secrets.Store, approvals *appro
 		secrets:  secretStore,
 		approval: approvals,
 		injector: auth.NewInjector(secretStore),
+		client:   &http.Client{Timeout: 10 * time.Second},
 		transport: &http.Transport{
 			Proxy:                 nil,
 			ForceAttemptHTTP2:     false,
@@ -649,6 +651,8 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.approval.List())
 	case r.Method == http.MethodPost && (r.URL.Path == "/_scia/tokens" || r.URL.Path == "/_scia/secrets"):
 		h.serveAdminPutToken(w, r)
+	case r.Method == http.MethodPost && (r.URL.Path == "/_scia/tokens/revoke" || r.URL.Path == "/_scia/secrets/revoke"):
+		h.serveAdminRevokeToken(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/_scia/approvals/"):
 		id, action, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, "/_scia/approvals/"), "/")
 		if !ok {
@@ -676,36 +680,183 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveAdminPutToken(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		CredentialID      string `json:"credentialId"`
-		CredentialIDSnake string `json:"credential_id"`
-		Key               string `json:"key"`
-		Token             string `json:"token"`
-		Value             string `json:"value"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+	req, ok := decodeAdminTokenRequest(w, r)
+	if !ok {
 		return
 	}
-	credentialID := strings.TrimSpace(req.CredentialID)
-	if credentialID == "" {
-		credentialID = strings.TrimSpace(req.CredentialIDSnake)
-	}
-	key := strings.TrimSpace(req.Key)
-	value := req.Token
-	if value == "" {
-		value = req.Value
-	}
-	if credentialID == "" || key == "" || value == "" {
+	value := req.value()
+	if req.CredentialID == "" || req.Key == "" || value == "" {
 		http.Error(w, "credentialId, key, and token are required", http.StatusBadRequest)
 		return
 	}
-	if err := h.secrets.Put(r.Context(), credentialID, key, value); err != nil {
-		h.logger.Error("failed to store token", "error", err, "credential_id", credentialID, "key", key)
+	if err := h.secrets.Put(r.Context(), req.CredentialID, req.Key, value); err != nil {
+		h.logger.Error("failed to store token", "error", err, "credential_id", req.CredentialID, "key", req.Key)
 		http.Error(w, "failed to store token", http.StatusBadGateway)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) serveAdminRevokeToken(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeAdminTokenRequest(w, r)
+	if !ok {
+		return
+	}
+	if req.CredentialID == "" {
+		http.Error(w, "credentialId is required", http.StatusBadRequest)
+		return
+	}
+	cfg := h.store.Get()
+	cred, ok := config.CredentialByID(cfg, req.CredentialID)
+	if !ok {
+		http.Error(w, "unknown credential", http.StatusBadRequest)
+		return
+	}
+	brokerURL := config.HeaderValueFromEnv(cred.Params["revoke_broker_url"])
+	if brokerURL == "" {
+		http.Error(w, "credential requires revoke_broker_url", http.StatusBadRequest)
+		return
+	}
+	storageID := strings.TrimSpace(req.User)
+	if storageID == "" {
+		storageID = config.CredentialUserID(cfg, cred)
+	}
+	key, token, found, err := h.adminTokenToRevoke(r.Context(), cfg, cred, storageID, req.Key)
+	if err != nil {
+		h.logger.Error("failed to read token for revoke", "error", err, "credential_id", req.CredentialID, "key", req.Key)
+		http.Error(w, "failed to read token", http.StatusBadGateway)
+		return
+	}
+	if !found {
+		http.Error(w, "token not found", http.StatusNotFound)
+		return
+	}
+	if err := h.revokeTokenWithBroker(r.Context(), cred, brokerURL, key, token); err != nil {
+		h.logger.Error("failed to revoke token", "error", err, "credential_id", req.CredentialID, "key", key)
+		http.Error(w, "failed to revoke token", http.StatusBadGateway)
+		return
+	}
+	if err := h.secrets.Delete(r.Context(), storageID, adminTokenStorageKey(cfg, storageID, req.CredentialID, key)); err != nil {
+		h.logger.Error("failed to delete revoked token", "error", err, "credential_id", req.CredentialID, "key", key)
+		http.Error(w, "failed to delete revoked token", http.StatusBadGateway)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) adminTokenToRevoke(ctx context.Context, cfg *config.Config, cred config.CredentialConfig, storageID, requestedKey string) (string, string, bool, error) {
+	keys := []string{strings.TrimSpace(requestedKey)}
+	if keys[0] == "" {
+		keys = []string{"refresh_token", "access_token"}
+	}
+	for _, key := range keys {
+		storageKey := adminTokenStorageKey(cfg, storageID, cred.ID, key)
+		value, ok, err := h.secrets.Get(ctx, storageID, storageKey)
+		if err != nil {
+			return "", "", false, err
+		}
+		if ok {
+			return key, value, true, nil
+		}
+		if storageKey != key && key == "refresh_token" && strings.HasSuffix(cred.ID, ".google") {
+			value, ok, err := h.secrets.Get(ctx, storageID, key)
+			if err != nil {
+				return "", "", false, err
+			}
+			if ok {
+				return key, value, true, nil
+			}
+		}
+	}
+	return "", "", false, nil
+}
+
+func (h *Handler) revokeTokenWithBroker(ctx context.Context, cred config.CredentialConfig, brokerURL, key, token string) error {
+	form := url.Values{}
+	form.Set("credential_id", cred.ID)
+	form.Set("credential_type", cred.Type)
+	form.Set("token", token)
+	form.Set("token_type_hint", key)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, brokerURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	brokerToken := config.HeaderValueFromEnv(cred.Params["revoke_broker_token"])
+	if brokerToken == "" {
+		brokerToken = config.HeaderValueFromEnv(cred.Params["token_broker_token"])
+	}
+	if brokerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+brokerToken)
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("revoke broker returned %s", resp.Status)
+	}
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return nil
+	}
+	var brokerResp struct {
+		OK        *bool  `json:"ok"`
+		Error     string `json:"error"`
+		ErrorDesc string `json:"error_description"`
+	}
+	if err := json.Unmarshal(body, &brokerResp); err != nil {
+		return nil
+	}
+	if brokerResp.OK != nil && !*brokerResp.OK {
+		if brokerResp.Error != "" {
+			return fmt.Errorf("%s: %s", brokerResp.Error, brokerResp.ErrorDesc)
+		}
+		return errors.New("revoke broker returned ok=false")
+	}
+	return nil
+}
+
+type adminTokenRequest struct {
+	CredentialID      string `json:"credentialId"`
+	CredentialIDSnake string `json:"credential_id"`
+	Key               string `json:"key"`
+	Token             string `json:"token"`
+	Value             string `json:"value"`
+	User              string `json:"user"`
+}
+
+func decodeAdminTokenRequest(w http.ResponseWriter, r *http.Request) (adminTokenRequest, bool) {
+	var req adminTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return adminTokenRequest{}, false
+	}
+	req.CredentialID = strings.TrimSpace(req.CredentialID)
+	if req.CredentialID == "" {
+		req.CredentialID = strings.TrimSpace(req.CredentialIDSnake)
+	}
+	req.Key = strings.TrimSpace(req.Key)
+	req.User = strings.TrimSpace(req.User)
+	return req, true
+}
+
+func (r adminTokenRequest) value() string {
+	if r.Token != "" {
+		return r.Token
+	}
+	return r.Value
+}
+
+func adminTokenStorageKey(cfg *config.Config, storageID, credentialID, key string) string {
+	if cfg.Server.Secrets.Mode == "kubernetes" && cfg.HasUser(storageID) && credentialID != "" {
+		return credentialID + "." + key
+	}
+	return key
 }
 
 func (h *Handler) currentCA(cfg *config.Config) (*certificateAuthority, error) {

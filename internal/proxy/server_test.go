@@ -860,6 +860,124 @@ func TestAdminPutTokenValidatesRequest(t *testing.T) {
 	}
 }
 
+func TestAdminRevokeTokenUsesBrokerAndDeletesSecret(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "github", "access_token", "github-token"); err != nil {
+		t.Fatal(err)
+	}
+	var brokerCalled atomic.Bool
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		brokerCalled.Store(true)
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected broker method: %s", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer broker-shared-token" {
+			t.Fatalf("unexpected broker authorization: %q", got)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.Form.Get("credential_id"); got != "github" {
+			t.Fatalf("unexpected credential_id: %q", got)
+		}
+		if got := r.Form.Get("credential_type"); got != "github-oauth-token" {
+			t.Fatalf("unexpected credential_type: %q", got)
+		}
+		if got := r.Form.Get("token_type_hint"); got != "access_token" {
+			t.Fatalf("unexpected token_type_hint: %q", got)
+		}
+		if got := r.Form.Get("token"); got != "github-token" {
+			t.Fatalf("unexpected token: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer broker.Close()
+
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+credentials:
+  - id: github
+    type: github-oauth-token
+    params:
+      revoke_broker_url: "%s"
+      revoke_broker_token: broker-shared-token
+`, broker.URL), secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Post(proxyServer.URL+"/_scia/tokens/revoke", "application/json", strings.NewReader(`{"credentialId":"github","key":"access_token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	if !brokerCalled.Load() {
+		t.Fatal("broker was not called")
+	}
+	if got := secretStore.value("github", "access_token"); got != "" {
+		t.Fatalf("unexpected stored token after revoke: %q", got)
+	}
+}
+
+func TestAdminRevokeTokenRequiresBroker(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "github", "access_token", "github-token"); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, `
+credentials:
+  - id: github
+    type: github-oauth-token
+`, secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Post(proxyServer.URL+"/_scia/tokens/revoke", "application/json", strings.NewReader(`{"credentialId":"github","key":"access_token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if got := secretStore.value("github", "access_token"); got != "github-token" {
+		t.Fatalf("unexpected stored token: %q", got)
+	}
+}
+
+func TestAdminRevokeTokenKeepsSecretWhenBrokerFails(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "github", "access_token", "github-token"); err != nil {
+		t.Fatal(err)
+	}
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "broker failed", http.StatusBadGateway)
+	}))
+	defer broker.Close()
+
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+credentials:
+  - id: github
+    type: github-oauth-token
+    params:
+      revoke_broker_url: "%s"
+`, broker.URL), secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Post(proxyServer.URL+"/_scia/tokens/revoke", "application/json", strings.NewReader(`{"credentialId":"github","key":"access_token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if got := secretStore.value("github", "access_token"); got != "github-token" {
+		t.Fatalf("unexpected stored token: %q", got)
+	}
+}
+
 func newTestProxy(t *testing.T, cfg string) *httptest.Server {
 	server, _ := newTestProxyWithPath(t, cfg)
 	return server
