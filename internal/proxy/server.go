@@ -28,6 +28,7 @@ import (
 
 type Handler struct {
 	store      *config.Store
+	secrets    secrets.Store
 	approval   *approval.Manager
 	injector   *auth.Injector
 	transport  *http.Transport
@@ -39,6 +40,9 @@ type Handler struct {
 }
 
 func NewHandler(store *config.Store, secretStore secrets.Store, approvals *approval.Manager, logger *slog.Logger) (*Handler, error) {
+	if secretStore == nil {
+		secretStore = secrets.NoopStore{}
+	}
 	cfg := store.Get()
 	ca, err := loadOrCreateCA(cfg.Server.MITM.CACertPath, cfg.Server.MITM.CAKeyPath)
 	if err != nil {
@@ -46,6 +50,7 @@ func NewHandler(store *config.Store, secretStore secrets.Store, approvals *appro
 	}
 	handler := &Handler{
 		store:    store,
+		secrets:  secretStore,
 		approval: approvals,
 		injector: auth.NewInjector(secretStore),
 		transport: &http.Transport{
@@ -642,6 +647,8 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(ca.certPEM)
 	case r.Method == http.MethodGet && r.URL.Path == "/_scia/approvals":
 		writeJSON(w, h.approval.List())
+	case r.Method == http.MethodPost && (r.URL.Path == "/_scia/tokens" || r.URL.Path == "/_scia/secrets"):
+		h.serveAdminPutToken(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/_scia/approvals/"):
 		id, action, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, "/_scia/approvals/"), "/")
 		if !ok {
@@ -666,6 +673,39 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (h *Handler) serveAdminPutToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CredentialID      string `json:"credentialId"`
+		CredentialIDSnake string `json:"credential_id"`
+		Key               string `json:"key"`
+		Token             string `json:"token"`
+		Value             string `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	credentialID := strings.TrimSpace(req.CredentialID)
+	if credentialID == "" {
+		credentialID = strings.TrimSpace(req.CredentialIDSnake)
+	}
+	key := strings.TrimSpace(req.Key)
+	value := req.Token
+	if value == "" {
+		value = req.Value
+	}
+	if credentialID == "" || key == "" || value == "" {
+		http.Error(w, "credentialId, key, and token are required", http.StatusBadRequest)
+		return
+	}
+	if err := h.secrets.Put(r.Context(), credentialID, key, value); err != nil {
+		h.logger.Error("failed to store token", "error", err, "credential_id", credentialID, "key", key)
+		http.Error(w, "failed to store token", http.StatusBadGateway)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) currentCA(cfg *config.Config) (*certificateAuthority, error) {

@@ -51,10 +51,21 @@ Admin endpoints:
 - `GET /_scia/healthz`
 - `GET /_scia/ca.pem`
 - `GET /_scia/approvals`
+- `POST /_scia/tokens`
 - `POST /_scia/approvals/{id}/approve`
 - `POST /_scia/approvals/{id}/deny`
 
 If `server.adminToken` is set, admin requests must include `Authorization: Bearer <token>`. Config values with the `env:` prefix are read from environment variables.
+
+`POST /_scia/tokens` stores a token in the configured secret store and returns
+`204 No Content` without echoing the token value:
+
+```sh
+curl -X POST http://localhost:8080/_scia/tokens \
+  -H "Authorization: Bearer $SCIA_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"credentialId":"github","key":"access_token","token":"TOKEN_VALUE"}'
+```
 
 The OAuth helper UI runs on a separate port, `server.oauth.listen` (`127.0.0.1:8081` by default). Configure the Google OAuth client redirect URI to match `server.oauth.redirectUrl`, for example:
 
