@@ -54,14 +54,9 @@ server:
         authUrl: https://github.com/login/oauth/authorize
         tokenUrl: https://github.com/login/oauth/access_token
         revokeUrl: https://api.github.com/applications
-        defaultScopes: ["read:user"]
-        availableScopes:
-          - id: read-user
-            value: read:user
-            name: Read user profile
-          - id: repo
-            value: repo
-            name: Repository access
+        scopeParam:
+          name: scope
+          separator: " "
         tokenRequest:
           bodyFormat: form
           clientAuth: body
@@ -150,13 +145,17 @@ type ServiceOAuthConfig struct {
     ClientIDSecretRef string
     ClientSecret      string
     ClientSecretRef   string
-    DefaultScopes     []string
-    AvailableScopes   []OAuthIntegrationScopeConfig
     AuthURL           string
     TokenURL          string
     RevokeURL         string
     RedirectURL       string
+    ScopeParam        ScopeParamConfig
     TokenRequest      TokenRequestConfig
+}
+
+type ScopeParamConfig struct {
+    Name      string // usually "scope"; empty disables scope query param
+    Separator string // usually " "; sometimes "," depending on provider
 }
 
 type TokenRequestConfig struct {
@@ -182,8 +181,8 @@ Validation rules:
 - each host rule must use exactly one of `host` or `hostSuffix`
 - `authMethod` defaults to `bearer` when OAuth is configured, otherwise `none`
 - OAuth services must define `clientId`, `clientSecret`, `authUrl`, and `tokenUrl` directly or via secret refs
-- `defaultScopes` are the OAuth permission values sent by default in the OAuth authorization request
-- `availableScopes` are display metadata and allowed alternatives for the OAuth helper UI
+- `scopeParam.name` defaults to `scope`; set it to an empty string only for providers that do not accept a scope parameter
+- `scopeParam.separator` defaults to a single space because most OAuth servers expect space-delimited scope values
 - `tokenRequest.bodyFormat` defaults to `form`
 - `tokenRequest.clientAuth` defaults to `body`
 - reject templated header/query values that reference unsupported fields
@@ -208,7 +207,7 @@ Semantics:
 - files are loaded left to right
 - later files override earlier scalar/map values
 - maps such as `server.services` merge by key
-- slices such as `rules`, `credentials`, `hosts`, `availableScopes`, `headers`, and `query` replace the earlier slice by default
+- slices such as `rules`, `credentials`, `hosts`, `headers`, and `query` replace the earlier slice by default
 - validation runs after the final merged config is built
 - file watching watches every loaded file and reloads the merged config when any file changes
 
@@ -230,20 +229,40 @@ scia -config /etc/scia/services/google.yaml -config /etc/scia/scia.yaml
 
 Do not auto-load every bundled default file implicitly in the first version. Explicit `-config` order keeps startup behavior predictable and avoids accidentally enabling services that an operator did not intend to expose. A later convenience flag such as `-config-dir /etc/scia/services` can be added after the merge semantics are proven.
 
-## OAuth Scopes
+## OAuth Scope Parameter
 
-In OAuth, a scope is a permission string requested from the provider during authorization. Examples:
+Scope values and user-facing scope choices remain the responsibility of integrations. Generic service definitions should not decide which scopes exist, which scopes are enabled by default, or how they are displayed.
 
-- Google Calendar read-only: `https://www.googleapis.com/auth/calendar.readonly`
-- GitHub user profile: `read:user`
-- GitHub repository access: `repo`
+The service definition only decides how already-selected scope values are serialized into the authorization request sent to the provider's authorization server.
 
-`scia` should model scopes in two separate fields:
+Most OAuth providers expect:
 
-- `defaultScopes`: the actual OAuth permission values sent by default
-- `availableScopes`: the selectable catalog exposed to the helper UI, with stable IDs, labels, descriptions, and underlying provider values
+```text
+?scope=value1%20value2
+```
 
-This avoids overloading one `scopes` field for both runtime authorization and frontend display metadata. Existing `server.oauth.integrations.*.scopes` remains a compatibility metadata field during migration.
+So `scopeParam` defaults to:
+
+```yaml
+scopeParam:
+  name: scope
+  separator: " "
+```
+
+If a provider uses another parameter name or separator, the default service YAML can override only that transport detail:
+
+```yaml
+scopeParam:
+  name: user_scope
+  separator: ","
+```
+
+OAuth start flow:
+
+1. Integration metadata resolves the selected scope values.
+2. Generic OAuth service joins those values with `scopeParam.separator`.
+3. Generic OAuth service sends the joined value under `scopeParam.name`.
+4. If no scopes are selected or `scopeParam.name` is empty, no scope parameter is sent.
 
 ## Runtime Design
 
