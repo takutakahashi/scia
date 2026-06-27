@@ -54,7 +54,14 @@ server:
         authUrl: https://github.com/login/oauth/authorize
         tokenUrl: https://github.com/login/oauth/access_token
         revokeUrl: https://api.github.com/applications
-        scopes: read:user
+        defaultScopes: ["read:user"]
+        availableScopes:
+          - id: read-user
+            value: read:user
+            name: Read user profile
+          - id: repo
+            value: repo
+            name: Repository access
         tokenRequest:
           bodyFormat: form
           clientAuth: body
@@ -143,7 +150,8 @@ type ServiceOAuthConfig struct {
     ClientIDSecretRef string
     ClientSecret      string
     ClientSecretRef   string
-    Scope             string
+    DefaultScopes     []string
+    AvailableScopes   []OAuthIntegrationScopeConfig
     AuthURL           string
     TokenURL          string
     RevokeURL         string
@@ -174,10 +182,68 @@ Validation rules:
 - each host rule must use exactly one of `host` or `hostSuffix`
 - `authMethod` defaults to `bearer` when OAuth is configured, otherwise `none`
 - OAuth services must define `clientId`, `clientSecret`, `authUrl`, and `tokenUrl` directly or via secret refs
+- `defaultScopes` are the OAuth permission values sent by default in the OAuth authorization request
+- `availableScopes` are display metadata and allowed alternatives for the OAuth helper UI
 - `tokenRequest.bodyFormat` defaults to `form`
 - `tokenRequest.clientAuth` defaults to `body`
 - reject templated header/query values that reference unsupported fields
 - reject ambiguous host rules where a catch-all and path-scoped rule share the same host for one service unless explicitly ordered
+
+## Multiple YAML Files
+
+`scia` should support loading more than one YAML file and merging them in order. This lets the container image ship default service definitions while operators keep local secrets, rules, and overrides in a separate file.
+
+CLI proposal:
+
+```sh
+scia \
+  -config /etc/scia/services/google.yaml \
+  -config /etc/scia/services/github.yaml \
+  -config /etc/scia/scia.yaml
+```
+
+Semantics:
+
+- `-config` becomes repeatable. A single `-config` keeps today's behavior.
+- files are loaded left to right
+- later files override earlier scalar/map values
+- maps such as `server.services` merge by key
+- slices such as `rules`, `credentials`, `hosts`, `availableScopes`, `headers`, and `query` replace the earlier slice by default
+- validation runs after the final merged config is built
+- file watching watches every loaded file and reloads the merged config when any file changes
+
+Default container layout:
+
+```text
+/etc/scia/services/google.yaml
+/etc/scia/services/github.yaml
+/etc/scia/services/notion.yaml
+/etc/scia/services/todoist.yaml
+/etc/scia/services/slack.yaml
+```
+
+The runtime image should copy these files into `/etc/scia/services/`. A deployment can opt in by passing those default files before its own config:
+
+```sh
+scia -config /etc/scia/services/google.yaml -config /etc/scia/scia.yaml
+```
+
+Do not auto-load every bundled default file implicitly in the first version. Explicit `-config` order keeps startup behavior predictable and avoids accidentally enabling services that an operator did not intend to expose. A later convenience flag such as `-config-dir /etc/scia/services` can be added after the merge semantics are proven.
+
+## OAuth Scopes
+
+In OAuth, a scope is a permission string requested from the provider during authorization. Examples:
+
+- Google Calendar read-only: `https://www.googleapis.com/auth/calendar.readonly`
+- GitHub user profile: `read:user`
+- GitHub repository access: `repo`
+
+`scia` should model scopes in two separate fields:
+
+- `defaultScopes`: the actual OAuth permission values sent by default
+- `availableScopes`: the selectable catalog exposed to the helper UI, with stable IDs, labels, descriptions, and underlying provider values
+
+This avoids overloading one `scopes` field for both runtime authorization and frontend display metadata. Existing `server.oauth.integrations.*.scopes` remains a compatibility metadata field during migration.
 
 ## Runtime Design
 
