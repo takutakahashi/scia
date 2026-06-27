@@ -198,6 +198,7 @@ Validation rules:
 - `tokenRequest.refreshGrantType` defaults to `refresh_token`
 - `tokenRequest.refreshTokenURL` defaults to `tokenUrl`
 - `tokenRequest.successField` is optional; when set, the JSON response must contain that boolean field with value `true`
+- token responses should be stored as a field map, not only as `access_token`, so OIDC providers can expose `id_token` to injection templates
 - reject templated header/query values that reference unsupported fields
 - reject ambiguous host rules where a catch-all and path-scoped rule share the same host for one service unless explicitly ordered
 
@@ -393,6 +394,50 @@ Slack alignment:
 - These are natural extensions of OneCLI's `RefreshConfig` idea, but they go beyond OneCLI's current gateway abstraction because OneCLI only models refresh-token requests, not generic code-exchange behavior in the gateway registry.
 
 Net result: the service design remains OneCLI-compatible for the runtime gateway concepts, while adding a few OAuth-helper fields that `scia` needs because it owns the OAuth helper flow in the same binary/config model.
+
+## Dex Mock OAuth Fit Check
+
+Dex implements OpenID Connect on top of OAuth2. A local/mock Dex service using the standard authorization code flow is representable with the same generic service model.
+
+Important differences from a plain OAuth access-token service:
+
+- Dex authorization and token endpoints are usually derived from the issuer, for example `http://dex:5556/dex/auth` and `http://dex:5556/dex/token`.
+- OIDC login requests require the `openid` scope. Additional scopes such as `email`, `profile`, `groups`, and `offline_access` are integration concerns.
+- Dex returns an `id_token` in addition to an `access_token`.
+- Dex issues refresh tokens only when `offline_access` is requested and the connector supports refresh tokens.
+- Dex rotates refresh tokens, so the generic token refresh path must persist a returned `refresh_token` when present.
+
+Example Dex-backed mock service:
+
+```yaml
+server:
+  services:
+    mock-dex-api:
+      name: Mock Dex API
+      hosts:
+        - host: mock-api.local
+          authMethod: bearer
+      oauth:
+        credentialId: mock-dex-api
+        clientId: env:DEX_CLIENT_ID
+        clientSecret: env:DEX_CLIENT_SECRET
+        authUrl: http://dex:5556/dex/auth
+        tokenUrl: http://dex:5556/dex/token
+        scopeParam:
+          name: scope
+          separator: " "
+        tokenRequest:
+          bodyFormat: form
+          clientAuth: body
+          codeGrantType: authorization_code
+          refreshGrantType: refresh_token
+      injection:
+        headers:
+          - name: Authorization
+            value: "Bearer {{ .id_token }}"
+```
+
+If the mock upstream expects an OAuth access token instead of an OIDC ID token, the same service can inject `{{ .access_token }}` instead. The design does not need special Dex fields unless we want OIDC discovery support later. Static `authUrl` and `tokenUrl` are enough for the first version.
 
 ## Runtime Design
 
