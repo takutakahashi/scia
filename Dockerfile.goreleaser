@@ -1,6 +1,7 @@
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /tmp
 COPY scia /scia
+COPY configs/services /etc/scia/services
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/scia"]

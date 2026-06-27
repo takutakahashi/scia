@@ -78,6 +78,7 @@ type ServerConfig struct {
 	MITM            MITMConfig            `yaml:"mitm"`
 	BackendProxy    BackendProxyConfig    `yaml:"backendProxy"`
 	Integrations    IntegrationsConfig    `yaml:"integrations"`
+	Services        ServicesConfig        `yaml:"services"`
 	OAuth           OAuthConfig           `yaml:"oauth"`
 	Secrets         SecretsConfig         `yaml:"secrets"`
 	Users           map[string]UserConfig `yaml:"users"`
@@ -106,6 +107,65 @@ type IntegrationsConfig struct {
 
 type IntegrationConfig struct {
 	Hosts []string `yaml:"hosts"`
+}
+
+type ServicesConfig map[string]ServiceConfig
+
+type ServiceConfig struct {
+	Name        string                 `yaml:"name"`
+	IconURL     string                 `yaml:"iconUrl"`
+	Description string                 `yaml:"description"`
+	Released    *bool                  `yaml:"released"`
+	Hosts       []ServiceHostRule      `yaml:"hosts"`
+	OAuth       *ServiceOAuthConfig    `yaml:"oauth"`
+	Injection   ServiceInjectionConfig `yaml:"injection"`
+}
+
+type ServiceHostRule struct {
+	Host                string `yaml:"host"`
+	HostSuffix          string `yaml:"hostSuffix"`
+	PathPrefix          string `yaml:"pathPrefix"`
+	AuthMethod          string `yaml:"authMethod"`
+	CredentialHostField string `yaml:"credentialHostField"`
+}
+
+type ServiceOAuthConfig struct {
+	CredentialID        string             `yaml:"credentialId"`
+	ClientID            string             `yaml:"clientId"`
+	ClientIDSecretRef   string             `yaml:"clientIdSecretRef"`
+	ClientSecret        string             `yaml:"clientSecret"`
+	ClientSecretRef     string             `yaml:"clientSecretRef"`
+	AuthURL             string             `yaml:"authUrl"`
+	TokenURL            string             `yaml:"tokenUrl"`
+	RevokeURL           string             `yaml:"revokeUrl"`
+	RedirectURL         string             `yaml:"redirectUrl"`
+	ScopeParam          ScopeParamConfig   `yaml:"scopeParam"`
+	AuthorizationParams map[string]string  `yaml:"authorizationParams"`
+	TokenRequest        TokenRequestConfig `yaml:"tokenRequest"`
+}
+
+type ScopeParamConfig struct {
+	Name      *string `yaml:"name"`
+	Separator string  `yaml:"separator"`
+}
+
+type TokenRequestConfig struct {
+	BodyFormat       string  `yaml:"bodyFormat"`
+	ClientAuth       string  `yaml:"clientAuth"`
+	CodeGrantType    *string `yaml:"codeGrantType"`
+	RefreshGrantType *string `yaml:"refreshGrantType"`
+	RefreshTokenURL  string  `yaml:"refreshTokenURL"`
+	SuccessField     string  `yaml:"successField"`
+}
+
+type ServiceInjectionConfig struct {
+	Headers []InjectionTemplate `yaml:"headers"`
+	Query   []InjectionTemplate `yaml:"query"`
+}
+
+type InjectionTemplate struct {
+	Name  string `yaml:"name"`
+	Value string `yaml:"value"`
 }
 
 type OAuthConfig struct {
@@ -244,6 +304,7 @@ type RuleConfig struct {
 	Paths        []string `yaml:"paths"`
 	Action       string   `yaml:"action"`
 	Credentials  []string `yaml:"credentials"`
+	Services     []string `yaml:"services"`
 	ApprovalNote string   `yaml:"approvalNote"`
 }
 
@@ -356,7 +417,7 @@ func (c *Config) Validate() error {
 		}
 		seenCreds[cred.ID] = struct{}{}
 		switch cred.Type {
-		case "bearer", "basic", "static-header", "oauth2-client-credentials", "google-oauth-refresh-token", "notion-oauth-refresh-token", "todoist-oauth-refresh-token", "slack-user-oauth-token", "github-oauth-token":
+		case "bearer", "basic", "static-header", "oauth2-client-credentials", "google-oauth-refresh-token", "notion-oauth-refresh-token", "todoist-oauth-refresh-token", "slack-user-oauth-token", "github-oauth-token", "generic-oauth":
 		default:
 			return fmt.Errorf("credential %q has unsupported type %q", cred.ID, cred.Type)
 		}
@@ -379,6 +440,84 @@ func (c *Config) Validate() error {
 	if c.Server.OAuth.GitHub.HasClientConfig() {
 		seenCreds[c.GitHubOAuthCredentialID()] = struct{}{}
 	}
+	for serviceID, service := range c.Server.Services {
+		if serviceID == "" {
+			return fmt.Errorf("server.services cannot include an empty service id")
+		}
+		if !validServiceID(serviceID) {
+			return fmt.Errorf("server.services[%q] must contain only lowercase letters, numbers, dots, underscores, and hyphens", serviceID)
+		}
+		if len(service.Hosts) == 0 {
+			return fmt.Errorf("server.services[%q].hosts is required", serviceID)
+		}
+		for i := range service.Hosts {
+			host := &service.Hosts[i]
+			if (host.Host == "") == (host.HostSuffix == "") {
+				return fmt.Errorf("server.services[%q].hosts[%d] must set exactly one of host or hostSuffix", serviceID, i)
+			}
+			if host.AuthMethod == "" {
+				if service.OAuth != nil {
+					host.AuthMethod = "bearer"
+				} else {
+					host.AuthMethod = "none"
+				}
+				service.Hosts[i] = *host
+			}
+			switch host.AuthMethod {
+			case "bearer", "basic-x-access-token", "basic", "none":
+			default:
+				return fmt.Errorf("server.services[%q].hosts[%d] has unsupported authMethod %q", serviceID, i, host.AuthMethod)
+			}
+		}
+		if service.OAuth != nil {
+			if service.OAuth.CredentialID == "" {
+				service.OAuth.CredentialID = serviceID
+			}
+			if service.OAuth.AuthURL == "" {
+				return fmt.Errorf("server.services[%q].oauth.authUrl is required", serviceID)
+			}
+			if service.OAuth.TokenURL == "" {
+				return fmt.Errorf("server.services[%q].oauth.tokenUrl is required", serviceID)
+			}
+			if (service.OAuth.ClientID == "" && service.OAuth.ClientIDSecretRef == "") || (service.OAuth.ClientSecret == "" && service.OAuth.ClientSecretRef == "") {
+				return fmt.Errorf("server.services[%q].oauth requires clientId/clientSecret or secret refs", serviceID)
+			}
+			if service.OAuth.ScopeParam.Separator == "" {
+				service.OAuth.ScopeParam.Separator = " "
+			}
+			if service.OAuth.TokenRequest.BodyFormat == "" {
+				service.OAuth.TokenRequest.BodyFormat = "form"
+			}
+			switch service.OAuth.TokenRequest.BodyFormat {
+			case "form", "json":
+			default:
+				return fmt.Errorf("server.services[%q].oauth.tokenRequest.bodyFormat must be form or json", serviceID)
+			}
+			if service.OAuth.TokenRequest.ClientAuth == "" {
+				service.OAuth.TokenRequest.ClientAuth = "body"
+			}
+			switch service.OAuth.TokenRequest.ClientAuth {
+			case "body", "basic":
+			default:
+				return fmt.Errorf("server.services[%q].oauth.tokenRequest.clientAuth must be body or basic", serviceID)
+			}
+			service.OAuth = service.OAuth
+		}
+		for i, h := range service.Injection.Headers {
+			if h.Name == "" || h.Value == "" {
+				return fmt.Errorf("server.services[%q].injection.headers[%d] requires name and value", serviceID, i)
+			}
+		}
+		for i, q := range service.Injection.Query {
+			if q.Name == "" || q.Value == "" {
+				return fmt.Errorf("server.services[%q].injection.query[%d] requires name and value", serviceID, i)
+			}
+		}
+		c.Server.Services[serviceID] = service
+		if service.OAuth != nil {
+			seenCreds[service.OAuth.CredentialID] = struct{}{}
+		}
+	}
 	for i, rule := range c.Rules {
 		if rule.Name == "" {
 			return fmt.Errorf("rules[%d].name is required", i)
@@ -391,6 +530,11 @@ func (c *Config) Validate() error {
 		for _, credentialID := range rule.Credentials {
 			if _, ok := seenCreds[credentialID]; !ok {
 				return fmt.Errorf("rule %q references unknown credential %q", rule.Name, credentialID)
+			}
+		}
+		for _, serviceID := range rule.Services {
+			if _, ok := c.Server.Services[serviceID]; !ok {
+				return fmt.Errorf("rule %q references unknown service %q", rule.Name, serviceID)
 			}
 		}
 	}
@@ -418,7 +562,64 @@ func CredentialByID(cfg *Config, id string) (CredentialConfig, bool) {
 	if cfg.Server.OAuth.GitHub.HasClientConfig() && id == cfg.GitHubOAuthCredentialID() {
 		return CredentialConfig{ID: id, Type: "github-oauth-token", Params: map[string]string{}}, true
 	}
+	for _, service := range cfg.Server.Services {
+		if service.OAuth != nil && id == service.OAuth.CredentialID {
+			return CredentialConfig{ID: id, Type: "generic-oauth", Params: map[string]string{}}, true
+		}
+	}
 	return CredentialConfig{}, false
+}
+
+func ServiceByID(cfg *Config, id string) (ServiceConfig, bool) {
+	if cfg == nil || cfg.Server.Services == nil {
+		return ServiceConfig{}, false
+	}
+	service, ok := cfg.Server.Services[id]
+	return service, ok
+}
+
+func ServiceByCredentialID(cfg *Config, credentialID string) (string, ServiceConfig, bool) {
+	for id, service := range cfg.Server.Services {
+		if service.OAuth != nil && service.OAuth.CredentialID == credentialID {
+			return id, service, true
+		}
+	}
+	return "", ServiceConfig{}, false
+}
+
+func (o ServiceOAuthConfig) ScopeParamName() string {
+	if o.ScopeParam.Name == nil {
+		return "scope"
+	}
+	return *o.ScopeParam.Name
+}
+
+func (o ServiceOAuthConfig) ScopeParamSeparator() string {
+	if o.ScopeParam.Separator == "" {
+		return " "
+	}
+	return o.ScopeParam.Separator
+}
+
+func (t TokenRequestConfig) ResolvedCodeGrantType() string {
+	if t.CodeGrantType == nil {
+		return "authorization_code"
+	}
+	return *t.CodeGrantType
+}
+
+func (t TokenRequestConfig) ResolvedRefreshGrantType() string {
+	if t.RefreshGrantType == nil {
+		return "refresh_token"
+	}
+	return *t.RefreshGrantType
+}
+
+func (t TokenRequestConfig) RefreshURL(tokenURL string) string {
+	if t.RefreshTokenURL != "" {
+		return t.RefreshTokenURL
+	}
+	return tokenURL
 }
 
 func (c *Config) GoogleOAuthCredentialID() string {
@@ -618,6 +819,18 @@ func ValidDynamicUserID(userID string) bool {
 			return false
 		}
 		if (i == 0 || i == len(userID)-1) && isHyphen {
+			return false
+		}
+	}
+	return true
+}
+
+func validServiceID(id string) bool {
+	for _, r := range id {
+		isLower := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		isSep := r == '-' || r == '_' || r == '.'
+		if !isLower && !isDigit && !isSep {
 			return false
 		}
 	}

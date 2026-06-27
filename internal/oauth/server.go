@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -159,6 +160,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/oauth/slack/callback", s.slackCallback)
 	mux.HandleFunc("/oauth/github/start", s.startGitHub)
 	mux.HandleFunc("/oauth/github/callback", s.githubCallback)
+	mux.HandleFunc("/oauth/", s.genericOAuth)
 	return mux
 }
 
@@ -200,6 +202,172 @@ func (s *Server) frontendIntegrations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, integrationsResponse{Integrations: s.frontendIntegrationList(r, s.store.Get())})
+}
+
+func (s *Server) genericOAuth(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/oauth/")
+	serviceID, action, ok := strings.Cut(rest, "/")
+	if !ok || serviceID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch action {
+	case "start":
+		s.startGeneric(w, r, serviceID)
+	case "callback":
+		s.genericCallback(w, r, serviceID)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) startGeneric(w http.ResponseWriter, r *http.Request, serviceID string) {
+	credentialID := r.URL.Query().Get("credential")
+	userID := r.URL.Query().Get("user")
+	cfg := s.store.Get()
+	service, ok := cfg.Server.Services[serviceID]
+	if !ok || service.OAuth == nil {
+		http.Error(w, "unknown oauth service", http.StatusBadRequest)
+		return
+	}
+	if credentialID != "" && credentialID != service.OAuth.CredentialID {
+		http.Error(w, "credential does not match service", http.StatusBadRequest)
+		return
+	}
+	if cfg.Server.Secrets.Mode == "kubernetes" {
+		if userID == "" {
+			http.Error(w, "user is required in kubernetes mode", http.StatusBadRequest)
+			return
+		}
+		if !cfg.HasUser(userID) {
+			http.Error(w, "unknown user", http.StatusBadRequest)
+			return
+		}
+		if !s.authorizeDynamicUserRequest(w, r, cfg, userID) {
+			return
+		}
+	}
+	clientID, err := serviceClientValue(r.Context(), s.secrets, service.OAuth.ClientID, service.OAuth.ClientIDSecretRef)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if clientID == "" {
+		http.Error(w, "credential is missing client_id", http.StatusBadRequest)
+		return
+	}
+	selectedScope, err := oauthScopeFromRequest(cfg, service.OAuth.CredentialID, serviceID, r.URL.Query().Get("scope"), "", "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	redirectURI := r.URL.Query().Get("redirect_uri")
+	if redirectURI == "" {
+		redirectURI = service.OAuth.RedirectURL
+	}
+	if redirectURI == "" {
+		redirectURI = s.providerRedirectURL(r, serviceID)
+	}
+	state, err := s.createState(r.Context(), serviceID, stateInfo{User: userID, CredentialID: service.OAuth.CredentialID, RedirectURI: redirectURI})
+	if err != nil {
+		http.Error(w, "failed to create state", http.StatusInternalServerError)
+		return
+	}
+	q := url.Values{}
+	q.Set("client_id", clientID)
+	q.Set("redirect_uri", redirectURI)
+	q.Set("response_type", "code")
+	if scopeName := service.OAuth.ScopeParamName(); scopeName != "" && selectedScope != "" {
+		scopes := splitScopeValues(selectedScope)
+		q.Set(scopeName, strings.Join(scopes, service.OAuth.ScopeParamSeparator()))
+	}
+	for key, value := range service.OAuth.AuthorizationParams {
+		q.Set(key, value)
+	}
+	q.Set("state", state)
+	http.Redirect(w, r, service.OAuth.AuthURL+"?"+q.Encode(), http.StatusFound)
+}
+
+func (s *Server) genericCallback(w http.ResponseWriter, r *http.Request, serviceID string) {
+	if errText := r.URL.Query().Get("error"); errText != "" {
+		http.Error(w, errText, http.StatusBadRequest)
+		return
+	}
+	state := r.URL.Query().Get("state")
+	info, ok, err := s.consumeState(r.Context(), state, serviceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !ok {
+		http.Error(w, "invalid state", http.StatusBadRequest)
+		return
+	}
+	if time.Since(info.CreatedAt) > 10*time.Minute {
+		http.Error(w, "state expired", http.StatusBadRequest)
+		return
+	}
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "missing code", http.StatusBadRequest)
+		return
+	}
+	cfg := s.store.Get()
+	service, ok := cfg.Server.Services[serviceID]
+	if !ok || service.OAuth == nil {
+		http.Error(w, "service disappeared", http.StatusBadRequest)
+		return
+	}
+	token, err := s.exchangeGenericCode(r.Context(), service, code, info.RedirectURI)
+	if err != nil {
+		s.logger.Error("generic oauth code exchange failed", "error", err, "service", serviceID)
+		http.Error(w, "token exchange failed", http.StatusBadGateway)
+		return
+	}
+	storageID := s.storageUserID(cfg, info)
+	storedTokenKind := ""
+	storedTokenValue := ""
+	for key, value := range token {
+		if value == "" {
+			continue
+		}
+		if err := s.secrets.Put(r.Context(), storageID, s.storageTokenKey(cfg, storageID, info.CredentialID, key), value); err != nil {
+			s.logger.Error("failed to store generic oauth token field", "error", err, "credential", info.CredentialID, "user", info.User, "key", key)
+			http.Error(w, "failed to store token", http.StatusInternalServerError)
+			return
+		}
+		if storedTokenKind == "" && (key == "refresh_token" || key == "access_token" || key == "id_token") {
+			storedTokenKind = key
+			storedTokenValue = value
+		}
+	}
+	if storedTokenKind == "" {
+		http.Error(w, "token response did not include a usable token", http.StatusBadGateway)
+		return
+	}
+	data := struct {
+		Provider     string
+		User         string
+		CredentialID string
+		TokenKind    string
+		TokenValue   string
+		RefreshToken string
+		AccessToken  string
+		ExpiresIn    int64
+		Stored       bool
+	}{
+		Provider:     firstNonEmpty(service.Name, serviceID),
+		User:         info.User,
+		CredentialID: info.CredentialID,
+		TokenKind:    storedTokenKind,
+		TokenValue:   storedTokenValue,
+		RefreshToken: token["refresh_token"],
+		AccessToken:  token["access_token"],
+		ExpiresIn:    parseInt64(token["expires_in"]),
+		Stored:       true,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = callbackTemplate.Execute(w, data)
 }
 
 func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request) {
@@ -977,6 +1145,58 @@ func (s *Server) exchangeCode(ctx context.Context, r *http.Request, cred config.
 	return body, nil
 }
 
+func (s *Server) exchangeGenericCode(ctx context.Context, service config.ServiceConfig, code, redirectURI string) (map[string]string, error) {
+	oauthCfg := service.OAuth
+	if oauthCfg == nil {
+		return nil, fmt.Errorf("service is not oauth-enabled")
+	}
+	clientID, err := serviceClientValue(ctx, s.secrets, oauthCfg.ClientID, oauthCfg.ClientIDSecretRef)
+	if err != nil {
+		return nil, err
+	}
+	clientSecret, err := serviceClientValue(ctx, s.secrets, oauthCfg.ClientSecret, oauthCfg.ClientSecretRef)
+	if err != nil {
+		return nil, err
+	}
+	if clientID == "" || clientSecret == "" {
+		return nil, fmt.Errorf("service credential is missing client_id or client_secret")
+	}
+	body := map[string]string{"code": code}
+	if redirectURI != "" {
+		body["redirect_uri"] = redirectURI
+	}
+	if grantType := oauthCfg.TokenRequest.ResolvedCodeGrantType(); grantType != "" {
+		body["grant_type"] = grantType
+	}
+	req, err := genericTokenRequest(ctx, oauthCfg.TokenURL, oauthCfg.TokenRequest, body, clientID, clientSecret)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("token endpoint returned %s", resp.Status)
+	}
+	if field := oauthCfg.TokenRequest.SuccessField; field != "" {
+		ok, _ := raw[field].(bool)
+		if !ok {
+			return nil, fmt.Errorf("token endpoint response %s was not true", field)
+		}
+	}
+	fields := stringifyTokenFields(raw)
+	if fields["access_token"] == "" && fields["id_token"] == "" && fields["refresh_token"] == "" {
+		return nil, fmt.Errorf("token endpoint response did not include access_token, id_token, or refresh_token")
+	}
+	return fields, nil
+}
+
 func (s *Server) exchangeGoogleRefreshToken(ctx context.Context, cred config.CredentialConfig, form url.Values) (tokenResponse, error) {
 	refreshToken := form.Get("refresh_token")
 	if refreshToken == "" {
@@ -1405,10 +1625,44 @@ func (s *Server) frontendIntegrationList(r *http.Request, cfg *config.Config) []
 	for _, option := range s.githubOptions(cfg) {
 		integrations = append(integrations, s.githubFrontendIntegration(r, cfg, option))
 	}
+	seen := map[string]struct{}{}
+	for _, integration := range integrations {
+		seen[integration.ID] = struct{}{}
+	}
+	for serviceID, service := range cfg.Server.Services {
+		if service.OAuth == nil {
+			continue
+		}
+		if _, ok := seen[service.OAuth.CredentialID]; ok {
+			continue
+		}
+		integrations = append(integrations, s.genericFrontendIntegration(r, cfg, serviceID, service))
+	}
 	sort.SliceStable(integrations, func(i, j int) bool {
 		return integrations[i].ID < integrations[j].ID
 	})
 	return integrations
+}
+
+func (s *Server) genericFrontendIntegration(r *http.Request, cfg *config.Config, serviceID string, service config.ServiceConfig) frontendIntegration {
+	metadata := oauthIntegrationMetadata(cfg, service.OAuth.CredentialID, serviceID)
+	if metadata.Name == "" {
+		metadata.Name = service.Name
+	}
+	if metadata.IconURL == "" {
+		metadata.IconURL = service.IconURL
+	}
+	if metadata.Description == "" {
+		metadata.Description = service.Description
+	}
+	if metadata.Released == nil {
+		metadata.Released = service.Released
+	}
+	callbackURL := service.OAuth.RedirectURL
+	if callbackURL == "" {
+		callbackURL = s.providerRedirectURL(r, serviceID)
+	}
+	return s.frontendIntegration(metadata, serviceID, service.OAuth.CredentialID, "service", "", callbackURL, service.OAuth.AuthURL, service.OAuth.TokenURL, service.OAuth.RevokeURL)
 }
 
 func (s *Server) googleFrontendIntegration(r *http.Request, cfg *config.Config, option googleOption) frontendIntegration {
@@ -1785,6 +2039,79 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func serviceClientValue(ctx context.Context, store secrets.Store, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, store, secretRef)
+}
+
+func genericTokenRequest(ctx context.Context, tokenURL string, cfg config.TokenRequestConfig, body map[string]string, clientID, clientSecret string) (*http.Request, error) {
+	if cfg.BodyFormat == "" {
+		cfg.BodyFormat = "form"
+	}
+	if cfg.ClientAuth == "" {
+		cfg.ClientAuth = "body"
+	}
+	if cfg.ClientAuth == "body" {
+		body["client_id"] = clientID
+		body["client_secret"] = clientSecret
+	}
+	var req *http.Request
+	var err error
+	switch cfg.BodyFormat {
+	case "json":
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(payload))
+		if err == nil {
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("Content-Type", "application/json")
+		}
+	default:
+		form := url.Values{}
+		for key, value := range body {
+			form.Set(key, value)
+		}
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ClientAuth == "basic" {
+		req.SetBasicAuth(clientID, clientSecret)
+	}
+	return req, nil
+}
+
+func stringifyTokenFields(raw map[string]any) map[string]string {
+	fields := map[string]string{}
+	for key, value := range raw {
+		switch v := value.(type) {
+		case string:
+			fields[key] = v
+		case float64:
+			fields[key] = strconv.FormatInt(int64(v), 10)
+		case bool:
+			fields[key] = strconv.FormatBool(v)
+		}
+	}
+	return fields
+}
+
+func parseInt64(raw string) int64 {
+	value, _ := strconv.ParseInt(raw, 10, 64)
+	return value
 }
 
 func (s *Server) googleOptions(cfg *config.Config) []googleOption {
@@ -2169,7 +2496,18 @@ func (s *Server) stateSigningKey(ctx context.Context, cfg *config.Config, provid
 		}
 		return secret, nil
 	default:
-		return "", fmt.Errorf("unknown provider %q", provider)
+		service, ok := cfg.Server.Services[provider]
+		if !ok || service.OAuth == nil || service.OAuth.CredentialID != credentialID {
+			return "", fmt.Errorf("unknown provider %q", provider)
+		}
+		secret, err := serviceClientValue(ctx, s.secrets, service.OAuth.ClientSecret, service.OAuth.ClientSecretRef)
+		if err != nil {
+			return "", err
+		}
+		if secret == "" {
+			return "", fmt.Errorf("service credential is missing client_secret")
+		}
+		return secret, nil
 	}
 }
 

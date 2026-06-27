@@ -1,0 +1,31 @@
+server:
+  services:
+    google-calendar:
+      name: "Google Calendar"
+      iconUrl: "https://www.gstatic.com/images/branding/product/1x/calendar_2020q4_48dp.png"
+      description: "Connect Google Calendar to read and update calendar events."
+      hosts:
+        - host: www.googleapis.com
+          pathPrefix: /calendar/
+          authMethod: bearer
+        - host: www.googleapis.com
+          pathPrefix: /batch/calendar/
+          authMethod: bearer
+      oauth:
+        credentialId: google-calendar
+        clientId: "env:GOOGLE_OAUTH_CLIENT_ID"
+        clientSecret: "env:GOOGLE_OAUTH_CLIENT_SECRET"
+        authUrl: "https://accounts.google.com/o/oauth2/v2/auth"
+        tokenUrl: "https://oauth2.googleapis.com/token"
+        revokeUrl: "https://oauth2.googleapis.com/revoke"
+        scopeParam:
+          name: scope
+          separator: " "
+        authorizationParams:
+          access_type: offline
+          prompt: consent
+        tokenRequest:
+          bodyFormat: form
+          clientAuth: body
+          codeGrantType: authorization_code
+          refreshGrantType: refresh_token

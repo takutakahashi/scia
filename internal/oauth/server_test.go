@@ -194,6 +194,122 @@ func TestGoogleOAuthStartRedirectsToGoogle(t *testing.T) {
 	}
 }
 
+func TestGenericOAuthStartRedirectsWithServiceConfig(t *testing.T) {
+	scopeName := "scope"
+	openIDEnabled := true
+	emailEnabled := true
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			OAuth: config.OAuthConfig{
+				Integrations: map[string]config.OAuthIntegrationMetadataConfig{
+					"mock-dex-api": {
+						Scopes: []config.OAuthIntegrationScopeConfig{
+							{ID: "openid", Value: "openid", Enabled: &openIDEnabled},
+							{ID: "email", Value: "email", Enabled: &emailEnabled},
+						},
+					},
+				},
+			},
+			Services: config.ServicesConfig{
+				"mock-dex-api": {
+					Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
+					OAuth: &config.ServiceOAuthConfig{
+						CredentialID:        "mock-dex-api",
+						ClientID:            "client-id",
+						ClientSecret:        "client-secret",
+						AuthURL:             "http://dex.example/dex/auth",
+						TokenURL:            "http://dex.example/dex/token",
+						RedirectURL:         "http://localhost:8081/oauth/mock-dex-api/callback",
+						ScopeParam:          config.ScopeParamConfig{Name: &scopeName, Separator: " "},
+						AuthorizationParams: map[string]string{"prompt": "login"},
+					},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/oauth/mock-dex-api/start", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	location := rec.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Scheme+"://"+parsed.Host+parsed.Path != "http://dex.example/dex/auth" {
+		t.Fatalf("unexpected redirect: %s", location)
+	}
+	query := parsed.Query()
+	assertQueryValue(t, query, "client_id", "client-id")
+	assertQueryValue(t, query, "redirect_uri", "http://localhost:8081/oauth/mock-dex-api/callback")
+	assertQueryValue(t, query, "response_type", "code")
+	assertQueryValue(t, query, "scope", "openid email")
+	assertQueryValue(t, query, "prompt", "login")
+	if query.Get("state") == "" {
+		t.Fatal("missing state")
+	}
+}
+
+func TestGenericOAuthCallbackStoresTokenFields(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "authorization_code")
+		assertFormValue(t, r, "client_id", "client-id")
+		assertFormValue(t, r, "client_secret", "client-secret")
+		assertFormValue(t, r, "code", "auth-code")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "access-token",
+			"id_token":      "id-token",
+			"refresh_token": "refresh-token",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Services: config.ServicesConfig{
+				"mock-dex-api": {
+					Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
+					OAuth: &config.ServiceOAuthConfig{
+						CredentialID: "mock-dex-api",
+						ClientID:     "client-id",
+						ClientSecret: "client-secret",
+						AuthURL:      "http://dex.example/dex/auth",
+						TokenURL:     tokenEndpoint.URL,
+						TokenRequest: config.TokenRequestConfig{BodyFormat: "form", ClientAuth: "body"},
+					},
+				},
+			},
+		},
+	})
+	secretStore := newMemorySecretStore()
+	srv := NewServer(store, secretStore, slog.Default())
+	state := "test-state"
+	srv.states.Store(state, stateInfo{CredentialID: "mock-dex-api", RedirectURI: "http://localhost:8081/oauth/mock-dex-api/callback", CreatedAt: time.Now()})
+	req := httptest.NewRequest(http.MethodGet, "/oauth/mock-dex-api/callback?state="+state+"&code=auth-code", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	for key, want := range map[string]string{"access_token": "access-token", "id_token": "id-token", "refresh_token": "refresh-token"} {
+		got, ok, err := secretStore.Get(context.Background(), "mock-dex-api", key)
+		if err != nil || !ok || got != want {
+			t.Fatalf("%s not stored: got=%q ok=%v err=%v", key, got, ok, err)
+		}
+	}
+}
+
 func TestGoogleOAuthStartUsesConfigGoogleClient(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{

@@ -1,0 +1,27 @@
+server:
+  services:
+    slack:
+      name: "Slack"
+      iconUrl: "https://a.slack-edge.com/80588/marketing/img/meta/favicon-32.png"
+      description: "Connect Slack as a user."
+      hosts:
+        - host: slack.com
+          pathPrefix: /api/
+          authMethod: bearer
+      oauth:
+        credentialId: slack
+        clientId: "env:SLACK_OAUTH_CLIENT_ID"
+        clientSecret: "env:SLACK_OAUTH_CLIENT_SECRET"
+        authUrl: "https://slack.com/oauth/v2_user/authorize"
+        tokenUrl: "https://slack.com/api/oauth.v2.user.access"
+        revokeUrl: "https://slack.com/api/auth.revoke"
+        scopeParam:
+          name: scope
+          separator: " "
+        tokenRequest:
+          bodyFormat: form
+          clientAuth: body
+          codeGrantType: ""
+          refreshGrantType: refresh_token
+          refreshTokenURL: "https://slack.com/api/oauth.v2.access"
+          successField: ok

@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/takutakahashi/scia/internal/config"
@@ -39,6 +42,34 @@ func (i *Injector) Apply(ctx context.Context, r *http.Request, cfg *config.Confi
 		}
 		if err := i.applyOne(ctx, r, cfg, cred); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (i *Injector) ApplyServices(ctx context.Context, r *http.Request, cfg *config.Config, ids []string) error {
+	for _, id := range ids {
+		service, ok := config.ServiceByID(cfg, id)
+		if !ok {
+			return fmt.Errorf("service %q not found", id)
+		}
+		rule, ok := serviceHostRule(service, r.URL.Host, r.URL.Path)
+		if !ok {
+			return fmt.Errorf("service %q does not match %s%s", id, r.URL.Host, r.URL.Path)
+		}
+		fields := map[string]string{}
+		if service.OAuth != nil {
+			var err error
+			fields, err = i.genericOAuthFields(ctx, cfg, service)
+			if err != nil {
+				return err
+			}
+			if err := applyAuthMethod(r, rule.AuthMethod, fields["access_token"]); err != nil {
+				return fmt.Errorf("service %q: %w", id, err)
+			}
+		}
+		if err := i.applyServiceInjection(ctx, r, cfg, id, service, fields); err != nil {
+			return fmt.Errorf("service %q: %w", id, err)
 		}
 	}
 	return nil
@@ -180,6 +211,89 @@ func (i *Injector) notionRefreshToken(ctx context.Context, cfg *config.Config, c
 type cachedToken struct {
 	accessToken string
 	expiresAt   time.Time
+}
+
+type cachedFields struct {
+	fields    map[string]string
+	expiresAt time.Time
+}
+
+func (i *Injector) genericOAuthFields(ctx context.Context, cfg *config.Config, service config.ServiceConfig) (map[string]string, error) {
+	oauthCfg := service.OAuth
+	if oauthCfg == nil {
+		return map[string]string{}, nil
+	}
+	credentialID := oauthCfg.CredentialID
+	if value, ok := i.cache.Load("service:" + credentialID); ok {
+		token := value.(cachedFields)
+		if time.Until(token.expiresAt) > 30*time.Second {
+			return token.fields, nil
+		}
+	}
+
+	lockValue, _ := i.locks.LoadOrStore("service:"+credentialID, &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if value, ok := i.cache.Load("service:" + credentialID); ok {
+		token := value.(cachedFields)
+		if time.Until(token.expiresAt) > 30*time.Second {
+			return token.fields, nil
+		}
+	}
+
+	cred := config.CredentialConfig{ID: credentialID, Type: "generic-oauth", Params: map[string]string{}}
+	fields := map[string]string{}
+	for _, key := range []string{"access_token", "id_token", "token_type", "expires_in", "refresh_token"} {
+		value, err := i.secretValue(ctx, cfg, cred, key)
+		if err != nil {
+			return nil, err
+		}
+		if value != "" {
+			fields[key] = value
+		}
+	}
+	if accessToken := fields["access_token"]; accessToken != "" && fields["refresh_token"] == "" {
+		i.cache.Store("service:"+credentialID, cachedFields{fields: fields, expiresAt: time.Now().Add(10 * 365 * 24 * time.Hour)})
+		return fields, nil
+	}
+	refreshToken := fields["refresh_token"]
+	if refreshToken == "" {
+		return nil, fmt.Errorf("service credential %q requires refresh_token or access_token", credentialID)
+	}
+	clientID, err := serviceClientValue(ctx, i.secrets, oauthCfg.ClientID, oauthCfg.ClientIDSecretRef)
+	if err != nil {
+		return nil, err
+	}
+	clientSecret, err := serviceClientValue(ctx, i.secrets, oauthCfg.ClientSecret, oauthCfg.ClientSecretRef)
+	if err != nil {
+		return nil, err
+	}
+	if clientID == "" || clientSecret == "" {
+		return nil, fmt.Errorf("service credential %q requires client_id and client_secret", credentialID)
+	}
+	refreshed, err := i.requestGenericOAuthToken(ctx, oauthCfg.TokenRequest.RefreshURL(oauthCfg.TokenURL), oauthCfg.TokenRequest, map[string]string{"refresh_token": refreshToken}, clientID, clientSecret, oauthCfg.TokenRequest.ResolvedRefreshGrantType())
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range refreshed {
+		fields[key] = value
+		if key == "refresh_token" && value != "" {
+			if err := i.putCredentialSecret(ctx, cfg, cred, key, value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if fields["access_token"] == "" && fields["id_token"] == "" {
+		return nil, fmt.Errorf("token endpoint response did not include access_token or id_token")
+	}
+	expiresAt := time.Now().Add(time.Hour)
+	if expiresIn, ok := parseExpiresIn(fields["expires_in"]); ok {
+		expiresAt = time.Now().Add(expiresIn)
+	}
+	i.cache.Store("service:"+credentialID, cachedFields{fields: fields, expiresAt: expiresAt})
+	return fields, nil
 }
 
 func (i *Injector) clientCredentialsToken(ctx context.Context, cred config.CredentialConfig) (string, error) {
@@ -860,4 +974,216 @@ func (i *Injector) decodeAndCacheToken(credentialID string, resp *http.Response)
 
 func supportedTokenType(tokenType string) bool {
 	return tokenType == "" || strings.EqualFold(tokenType, "bearer") || strings.EqualFold(tokenType, "user")
+}
+
+func serviceHostRule(service config.ServiceConfig, host, reqPath string) (config.ServiceHostRule, bool) {
+	hostOnly := strings.ToLower(host)
+	if splitHost, _, err := net.SplitHostPort(hostOnly); err == nil {
+		hostOnly = splitHost
+	}
+	for _, rule := range service.Hosts {
+		if rule.Host != "" && strings.ToLower(rule.Host) != hostOnly {
+			continue
+		}
+		if rule.HostSuffix != "" {
+			suffix := strings.ToLower(rule.HostSuffix)
+			if !strings.HasSuffix(hostOnly, suffix) || len(hostOnly) <= len(suffix) {
+				continue
+			}
+		}
+		if rule.PathPrefix != "" && !strings.HasPrefix(reqPath, rule.PathPrefix) {
+			continue
+		}
+		return rule, true
+	}
+	return config.ServiceHostRule{}, false
+}
+
+func applyAuthMethod(r *http.Request, method, token string) error {
+	switch method {
+	case "", "none":
+		return nil
+	case "bearer":
+		if token == "" {
+			return errors.New("bearer auth requires access_token")
+		}
+		r.Header.Set("Authorization", "Bearer "+token)
+	case "basic-x-access-token":
+		if token == "" {
+			return errors.New("basic-x-access-token auth requires access_token")
+		}
+		encoded := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+		r.Header.Set("Authorization", "Basic "+encoded)
+	case "basic":
+		if token == "" {
+			return errors.New("basic auth requires access_token")
+		}
+		encoded := base64.StdEncoding.EncodeToString([]byte(token))
+		r.Header.Set("Authorization", "Basic "+encoded)
+	default:
+		return fmt.Errorf("unsupported authMethod %q", method)
+	}
+	return nil
+}
+
+func (i *Injector) applyServiceInjection(ctx context.Context, r *http.Request, cfg *config.Config, serviceID string, service config.ServiceConfig, fields map[string]string) error {
+	credID := serviceID
+	if service.OAuth != nil {
+		credID = service.OAuth.CredentialID
+	}
+	for _, header := range service.Injection.Headers {
+		value, err := i.renderInjection(ctx, cfg, credID, header.Value, fields)
+		if err != nil {
+			return err
+		}
+		r.Header.Set(header.Name, value)
+	}
+	if len(service.Injection.Query) > 0 {
+		q := r.URL.Query()
+		for _, param := range service.Injection.Query {
+			value, err := i.renderInjection(ctx, cfg, credID, param.Value, fields)
+			if err != nil {
+				return err
+			}
+			q.Set(param.Name, value)
+		}
+		r.URL.RawQuery = q.Encode()
+	}
+	return nil
+}
+
+func (i *Injector) renderInjection(ctx context.Context, cfg *config.Config, credentialID, raw string, fields map[string]string) (string, error) {
+	tmpl, err := template.New("injection").Funcs(template.FuncMap{
+		"secret": func(key string) (string, error) {
+			if credentialID == "" {
+				return "", fmt.Errorf("secret %q requires oauth credential", key)
+			}
+			cred := config.CredentialConfig{ID: credentialID, Type: "generic-oauth", Params: map[string]string{}}
+			return i.secretValue(ctx, cfg, cred, key)
+		},
+	}).Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, fields); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func (i *Injector) requestGenericOAuthToken(ctx context.Context, tokenURL string, cfg config.TokenRequestConfig, extra map[string]string, clientID, clientSecret, grantType string) (map[string]string, error) {
+	if tokenURL == "" {
+		return nil, errors.New("tokenUrl is required")
+	}
+	body := map[string]string{}
+	for key, value := range extra {
+		if value != "" {
+			body[key] = value
+		}
+	}
+	if grantType != "" {
+		body["grant_type"] = grantType
+	}
+	req, err := newTokenRequest(ctx, tokenURL, cfg, body, clientID, clientSecret)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("token endpoint returned %s", resp.Status)
+	}
+	if cfg.SuccessField != "" {
+		ok, _ := raw[cfg.SuccessField].(bool)
+		if !ok {
+			return nil, fmt.Errorf("token endpoint response %s was not true", cfg.SuccessField)
+		}
+	}
+	fields := map[string]string{}
+	for key, value := range raw {
+		switch v := value.(type) {
+		case string:
+			fields[key] = v
+		case float64:
+			fields[key] = strconv.FormatInt(int64(v), 10)
+		case bool:
+			fields[key] = strconv.FormatBool(v)
+		}
+	}
+	if tokenType := fields["token_type"]; !supportedTokenType(tokenType) {
+		return nil, fmt.Errorf("unsupported token_type %q", tokenType)
+	}
+	return fields, nil
+}
+
+func newTokenRequest(ctx context.Context, tokenURL string, cfg config.TokenRequestConfig, body map[string]string, clientID, clientSecret string) (*http.Request, error) {
+	if cfg.BodyFormat == "" {
+		cfg.BodyFormat = "form"
+	}
+	if cfg.ClientAuth == "" {
+		cfg.ClientAuth = "body"
+	}
+	if cfg.ClientAuth == "body" {
+		body["client_id"] = clientID
+		body["client_secret"] = clientSecret
+	}
+	var req *http.Request
+	var err error
+	switch cfg.BodyFormat {
+	case "json":
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(payload))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+		}
+	default:
+		form := url.Values{}
+		for key, value := range body {
+			form.Set(key, value)
+		}
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewBufferString(form.Encode()))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ClientAuth == "basic" {
+		req.SetBasicAuth(clientID, clientSecret)
+	}
+	return req, nil
+}
+
+func serviceClientValue(ctx context.Context, store secrets.Store, literal, secretRef string) (string, error) {
+	if value := config.HeaderValueFromEnv(literal); value != "" {
+		return value, nil
+	}
+	if secretRef == "" {
+		return "", nil
+	}
+	return secrets.ResolveRef(ctx, store, secretRef)
+}
+
+func parseExpiresIn(raw string) (time.Duration, bool) {
+	if raw == "" {
+		return 0, false
+	}
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || seconds <= 0 {
+		return 0, false
+	}
+	return time.Duration(seconds) * time.Second, true
 }
