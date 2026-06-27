@@ -24,6 +24,7 @@ import (
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/policy"
 	"github.com/takutakahashi/scia/internal/secrets"
+	"github.com/takutakahashi/scia/internal/serviceinfo"
 )
 
 type Handler struct {
@@ -135,7 +136,7 @@ func (h *Handler) serveConnect(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeDecision(w, r, decision, r.Host) {
 		return
 	}
-	if !mitmHostAllowed(integrationMITMHosts(cfg), r.Host) {
+	if len(decision.Services) == 0 && !mitmHostAllowed(integrationMITMHosts(cfg), r.Host) {
 		h.serveTunnelConnect(w, r)
 		return
 	}
@@ -783,10 +784,30 @@ func (h *Handler) serveAdminPutToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credentialId, key, and token are required", http.StatusBadRequest)
 		return
 	}
+	var serviceToStore *config.ServiceConfig
+	if req.Service != nil {
+		service := *req.Service
+		if service.OAuth != nil && service.OAuth.CredentialID == "" {
+			service.OAuth.CredentialID = req.CredentialID
+		}
+		normalized, err := serviceinfo.Normalize(req.CredentialID, service)
+		if err != nil {
+			http.Error(w, "invalid service metadata: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		serviceToStore = &normalized
+	}
 	if err := h.secrets.Put(r.Context(), req.CredentialID, req.Key, value); err != nil {
 		h.logger.Error("failed to store token", "error", err, "credential_id", req.CredentialID, "key", req.Key)
 		http.Error(w, "failed to store token", http.StatusBadGateway)
 		return
+	}
+	if serviceToStore != nil {
+		if err := serviceinfo.Put(r.Context(), h.secrets, req.CredentialID, *serviceToStore); err != nil {
+			h.logger.Error("failed to store service metadata", "error", err, "credential_id", req.CredentialID)
+			http.Error(w, "failed to store service metadata", http.StatusBadRequest)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -916,12 +937,13 @@ func (h *Handler) revokeTokenWithBroker(ctx context.Context, cred config.Credent
 }
 
 type adminTokenRequest struct {
-	CredentialID      string `json:"credentialId"`
-	CredentialIDSnake string `json:"credential_id"`
-	Key               string `json:"key"`
-	Token             string `json:"token"`
-	Value             string `json:"value"`
-	User              string `json:"user"`
+	CredentialID      string                `json:"credentialId"`
+	CredentialIDSnake string                `json:"credential_id"`
+	Key               string                `json:"key"`
+	Token             string                `json:"token"`
+	Value             string                `json:"value"`
+	User              string                `json:"user"`
+	Service           *config.ServiceConfig `json:"service"`
 }
 
 type adminCredentialStatusResponse struct {

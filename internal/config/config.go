@@ -112,60 +112,60 @@ type IntegrationConfig struct {
 type ServicesConfig map[string]ServiceConfig
 
 type ServiceConfig struct {
-	Name        string                 `yaml:"name"`
-	IconURL     string                 `yaml:"iconUrl"`
-	Description string                 `yaml:"description"`
-	Released    *bool                  `yaml:"released"`
-	Hosts       []ServiceHostRule      `yaml:"hosts"`
-	OAuth       *ServiceOAuthConfig    `yaml:"oauth"`
-	Injection   ServiceInjectionConfig `yaml:"injection"`
+	Name        string                 `yaml:"name" json:"name,omitempty"`
+	IconURL     string                 `yaml:"iconUrl" json:"iconUrl,omitempty"`
+	Description string                 `yaml:"description" json:"description,omitempty"`
+	Released    *bool                  `yaml:"released" json:"released,omitempty"`
+	Hosts       []ServiceHostRule      `yaml:"hosts" json:"hosts,omitempty"`
+	OAuth       *ServiceOAuthConfig    `yaml:"oauth" json:"oauth,omitempty"`
+	Injection   ServiceInjectionConfig `yaml:"injection" json:"injection,omitempty"`
 }
 
 type ServiceHostRule struct {
-	Host                string `yaml:"host"`
-	HostSuffix          string `yaml:"hostSuffix"`
-	PathPrefix          string `yaml:"pathPrefix"`
-	AuthMethod          string `yaml:"authMethod"`
-	CredentialHostField string `yaml:"credentialHostField"`
+	Host                string `yaml:"host" json:"host,omitempty"`
+	HostSuffix          string `yaml:"hostSuffix" json:"hostSuffix,omitempty"`
+	PathPrefix          string `yaml:"pathPrefix" json:"pathPrefix,omitempty"`
+	AuthMethod          string `yaml:"authMethod" json:"authMethod,omitempty"`
+	CredentialHostField string `yaml:"credentialHostField" json:"credentialHostField,omitempty"`
 }
 
 type ServiceOAuthConfig struct {
-	CredentialID        string             `yaml:"credentialId"`
-	ClientID            string             `yaml:"clientId"`
-	ClientIDSecretRef   string             `yaml:"clientIdSecretRef"`
-	ClientSecret        string             `yaml:"clientSecret"`
-	ClientSecretRef     string             `yaml:"clientSecretRef"`
-	AuthURL             string             `yaml:"authUrl"`
-	TokenURL            string             `yaml:"tokenUrl"`
-	RevokeURL           string             `yaml:"revokeUrl"`
-	RedirectURL         string             `yaml:"redirectUrl"`
-	ScopeParam          ScopeParamConfig   `yaml:"scopeParam"`
-	AuthorizationParams map[string]string  `yaml:"authorizationParams"`
-	TokenRequest        TokenRequestConfig `yaml:"tokenRequest"`
+	CredentialID        string             `yaml:"credentialId" json:"credentialId,omitempty"`
+	ClientID            string             `yaml:"clientId" json:"clientId,omitempty"`
+	ClientIDSecretRef   string             `yaml:"clientIdSecretRef" json:"clientIdSecretRef,omitempty"`
+	ClientSecret        string             `yaml:"clientSecret" json:"clientSecret,omitempty"`
+	ClientSecretRef     string             `yaml:"clientSecretRef" json:"clientSecretRef,omitempty"`
+	AuthURL             string             `yaml:"authUrl" json:"authUrl,omitempty"`
+	TokenURL            string             `yaml:"tokenUrl" json:"tokenUrl,omitempty"`
+	RevokeURL           string             `yaml:"revokeUrl" json:"revokeUrl,omitempty"`
+	RedirectURL         string             `yaml:"redirectUrl" json:"redirectUrl,omitempty"`
+	ScopeParam          ScopeParamConfig   `yaml:"scopeParam" json:"scopeParam,omitempty"`
+	AuthorizationParams map[string]string  `yaml:"authorizationParams" json:"authorizationParams,omitempty"`
+	TokenRequest        TokenRequestConfig `yaml:"tokenRequest" json:"tokenRequest,omitempty"`
 }
 
 type ScopeParamConfig struct {
-	Name      *string `yaml:"name"`
-	Separator string  `yaml:"separator"`
+	Name      *string `yaml:"name" json:"name,omitempty"`
+	Separator string  `yaml:"separator" json:"separator,omitempty"`
 }
 
 type TokenRequestConfig struct {
-	BodyFormat       string  `yaml:"bodyFormat"`
-	ClientAuth       string  `yaml:"clientAuth"`
-	CodeGrantType    *string `yaml:"codeGrantType"`
-	RefreshGrantType *string `yaml:"refreshGrantType"`
-	RefreshTokenURL  string  `yaml:"refreshTokenURL"`
-	SuccessField     string  `yaml:"successField"`
+	BodyFormat       string  `yaml:"bodyFormat" json:"bodyFormat,omitempty"`
+	ClientAuth       string  `yaml:"clientAuth" json:"clientAuth,omitempty"`
+	CodeGrantType    *string `yaml:"codeGrantType" json:"codeGrantType,omitempty"`
+	RefreshGrantType *string `yaml:"refreshGrantType" json:"refreshGrantType,omitempty"`
+	RefreshTokenURL  string  `yaml:"refreshTokenURL" json:"refreshTokenURL,omitempty"`
+	SuccessField     string  `yaml:"successField" json:"successField,omitempty"`
 }
 
 type ServiceInjectionConfig struct {
-	Headers []InjectionTemplate `yaml:"headers"`
-	Query   []InjectionTemplate `yaml:"query"`
+	Headers []InjectionTemplate `yaml:"headers" json:"headers,omitempty"`
+	Query   []InjectionTemplate `yaml:"query" json:"query,omitempty"`
 }
 
 type InjectionTemplate struct {
-	Name  string `yaml:"name"`
-	Value string `yaml:"value"`
+	Name  string `yaml:"name" json:"name,omitempty"`
+	Value string `yaml:"value" json:"value,omitempty"`
 }
 
 type OAuthConfig struct {
@@ -533,8 +533,8 @@ func (c *Config) Validate() error {
 			}
 		}
 		for _, serviceID := range rule.Services {
-			if _, ok := c.Server.Services[serviceID]; !ok {
-				return fmt.Errorf("rule %q references unknown service %q", rule.Name, serviceID)
+			if serviceID == "" || !validServiceID(serviceID) {
+				return fmt.Errorf("rule %q references invalid service %q", rule.Name, serviceID)
 			}
 		}
 	}

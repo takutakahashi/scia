@@ -18,6 +18,7 @@ import (
 
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/secrets"
+	"github.com/takutakahashi/scia/internal/serviceinfo"
 )
 
 type Injector struct {
@@ -49,7 +50,10 @@ func (i *Injector) Apply(ctx context.Context, r *http.Request, cfg *config.Confi
 
 func (i *Injector) ApplyServices(ctx context.Context, r *http.Request, cfg *config.Config, ids []string) error {
 	for _, id := range ids {
-		service, ok := config.ServiceByID(cfg, id)
+		service, ok, err := i.serviceByID(ctx, cfg, id)
+		if err != nil {
+			return fmt.Errorf("service %q: %w", id, err)
+		}
 		if !ok {
 			return fmt.Errorf("service %q not found", id)
 		}
@@ -73,6 +77,17 @@ func (i *Injector) ApplyServices(ctx context.Context, r *http.Request, cfg *conf
 		}
 	}
 	return nil
+}
+
+func (i *Injector) serviceByID(ctx context.Context, cfg *config.Config, id string) (config.ServiceConfig, bool, error) {
+	if service, ok := config.ServiceByID(cfg, id); ok {
+		return service, true, nil
+	}
+	service, ok, err := serviceinfo.Get(ctx, i.secrets, id)
+	if err != nil || !ok {
+		return config.ServiceConfig{}, ok, err
+	}
+	return service, true, nil
 }
 
 func (i *Injector) applyOne(ctx context.Context, r *http.Request, cfg *config.Config, cred config.CredentialConfig) error {

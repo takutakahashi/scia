@@ -77,6 +77,31 @@ curl -X POST http://localhost:8080/_scia/tokens \
   -d '{"credentialId":"github","key":"access_token","token":"TOKEN_VALUE"}'
 ```
 
+The same request can include provider-derived service metadata. `scia` stores it
+beside the token in the secret store, so proxy config can reference the service
+ID in `rules[].services` without also defining `server.services.<id>`:
+
+```sh
+curl -X POST http://localhost:8080/_scia/tokens \
+  -H "Authorization: Bearer $SCIA_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "credentialId": "mock-dex-api",
+    "key": "access_token",
+    "token": "TOKEN_VALUE",
+    "service": {
+      "hosts": [{"host": "api.example.com", "authMethod": "bearer"}],
+      "oauth": {
+        "authUrl": "https://issuer.example.com/auth",
+        "tokenUrl": "https://issuer.example.com/token"
+      },
+      "injection": {
+        "headers": [{"name": "Authorization", "value": "Bearer {{ .access_token }}"}]
+      }
+    }
+  }'
+```
+
 `POST /_scia/tokens/revoke` revokes a stored token through a configured broker
 and deletes the local secret only after the broker succeeds. Configure the
 credential with `params.revoke_broker_url`; `params.revoke_broker_token` is sent
