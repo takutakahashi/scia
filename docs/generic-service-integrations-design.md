@@ -44,9 +44,9 @@ server:
       name: GitHub
       hosts:
         - host: api.github.com
-          auth: bearer
+          authMethod: bearer
         - host: github.com
-          auth: basic-x-access-token
+          authMethod: basic-x-access-token
       oauth:
         credentialId: github
         clientId: env:GITHUB_OAUTH_CLIENT_ID
@@ -73,7 +73,7 @@ server:
       name: Datadog
       hosts:
         - host: api.datadoghq.com
-          auth: none
+          authMethod: none
       injection:
         headers:
           - name: DD-API-KEY
@@ -91,7 +91,7 @@ server:
       name: Trello
       hosts:
         - host: api.trello.com
-          auth: none
+          authMethod: none
       injection:
         query:
           - name: key
@@ -133,7 +133,7 @@ type ServiceHostRule struct {
     Host       string
     HostSuffix string
     PathPrefix string
-    Auth       string // bearer, basic-x-access-token, basic, none
+    AuthMethod string // bearer, basic-x-access-token, basic, none
     CredentialHostField string
 }
 
@@ -172,7 +172,7 @@ Validation rules:
 - service ID must be non-empty, unique, and URL/path safe
 - each service must have at least one host rule
 - each host rule must use exactly one of `host` or `hostSuffix`
-- `auth` defaults to `bearer` when OAuth is configured, otherwise `none`
+- `authMethod` defaults to `bearer` when OAuth is configured, otherwise `none`
 - OAuth services must define `clientId`, `clientSecret`, `authUrl`, and `tokenUrl` directly or via secret refs
 - `tokenRequest.bodyFormat` defaults to `form`
 - `tokenRequest.clientAuth` defaults to `body`
