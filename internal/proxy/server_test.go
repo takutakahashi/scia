@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -860,6 +861,93 @@ func TestAdminPutTokenValidatesRequest(t *testing.T) {
 	}
 }
 
+func TestAdminCredentialStatusReportsStoredTokens(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "google-calendar", "refresh_token", "google-refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "github", "access_token", "github-token"); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, `
+credentials:
+  - id: google-calendar
+    type: google-oauth-refresh-token
+  - id: github
+    type: github-oauth-token
+  - id: slack
+    type: slack-user-oauth-token
+`, secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Get(proxyServer.URL + "/_scia/credentials/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	var body adminCredentialStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	got := credentialStatusByID(body.Credentials)
+	if !got["google-calendar"].Authenticated {
+		t.Fatalf("unexpected google status: %#v", got["google-calendar"])
+	}
+	if !got["github"].Authenticated {
+		t.Fatalf("unexpected github status: %#v", got["github"])
+	}
+	if got["slack"].Authenticated {
+		t.Fatalf("unexpected slack status: %#v", got["slack"])
+	}
+}
+
+func TestAdminCredentialStatusUsesKubernetesUserStorageKeys(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "alice", "google-calendar.refresh_token", "google-refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  secrets:
+    mode: kubernetes
+  users:
+    alice:
+      secretName: scia-oauth-alice
+credentials:
+  - id: google-calendar
+    type: google-oauth-refresh-token
+    params:
+      user: alice
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")), secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Get(proxyServer.URL + "/_scia/credentials/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	var body adminCredentialStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	got := credentialStatusByID(body.Credentials)
+	if !got["google-calendar"].Authenticated {
+		t.Fatalf("unexpected google status: %#v", got["google-calendar"])
+	}
+}
+
 func TestAdminRevokeTokenUsesBrokerAndDeletesSecret(t *testing.T) {
 	secretStore := newRecordingSecretStore()
 	if err := secretStore.Put(context.Background(), "github", "access_token", "github-token"); err != nil {
@@ -1077,4 +1165,12 @@ func (s *recordingSecretStore) Close() error {
 func (s *recordingSecretStore) value(credentialID, key string) string {
 	value, _, _ := s.Get(context.Background(), credentialID, key)
 	return value
+}
+
+func credentialStatusByID(statuses []adminCredentialStatus) map[string]adminCredentialStatus {
+	byID := map[string]adminCredentialStatus{}
+	for _, status := range statuses {
+		byID[status.CredentialID] = status
+	}
+	return byID
 }

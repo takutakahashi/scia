@@ -51,12 +51,21 @@ Admin endpoints:
 - `GET /_scia/healthz`
 - `GET /_scia/ca.pem`
 - `GET /_scia/approvals`
+- `GET /_scia/credentials/status`
 - `POST /_scia/tokens`
 - `POST /_scia/tokens/revoke`
 - `POST /_scia/approvals/{id}/approve`
 - `POST /_scia/approvals/{id}/deny`
 
 If `server.adminToken` is set, admin requests must include `Authorization: Bearer <token>`. Config values with the `env:` prefix are read from environment variables.
+
+`GET /_scia/credentials/status` returns configured credentials with an
+`authenticated` flag. Token values are not returned:
+
+```sh
+curl http://localhost:8080/_scia/credentials/status \
+  -H "Authorization: Bearer $SCIA_ADMIN_TOKEN"
+```
 
 `POST /_scia/tokens` stores a token in the configured secret store and returns
 `204 No Content` without echoing the token value:
