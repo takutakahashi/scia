@@ -234,6 +234,99 @@ func TestGoogleRefreshTokenUsesConfigGoogleClient(t *testing.T) {
 	}
 }
 
+func TestGenericServiceRefreshInjectsIDToken(t *testing.T) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "grant_type", "refresh_token")
+		assertFormValue(t, r, "client_id", "client-id")
+		assertFormValue(t, r, "client_secret", "client-secret")
+		assertFormValue(t, r, "refresh_token", "refresh-token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "access-token",
+			"id_token":     "id-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenEndpoint.Close()
+
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "refresh_token", "refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Services: config.ServicesConfig{
+				"mock-dex-api": {
+					Hosts: []config.ServiceHostRule{{Host: "mock-api.local", AuthMethod: "bearer"}},
+					OAuth: &config.ServiceOAuthConfig{
+						CredentialID: "mock-dex-api",
+						ClientID:     "client-id",
+						ClientSecret: "client-secret",
+						AuthURL:      "http://dex/dex/auth",
+						TokenURL:     tokenEndpoint.URL,
+						TokenRequest: config.TokenRequestConfig{BodyFormat: "form", ClientAuth: "body"},
+					},
+					Injection: config.ServiceInjectionConfig{
+						Headers: []config.InjectionTemplate{{Name: "X-ID-Token", Value: "{{ .id_token }}"}},
+					},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://mock-api.local/v1/items", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewInjector(secretStore).ApplyServices(context.Background(), req, cfg, []string{"mock-dex-api"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer access-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+	if got := req.Header.Get("X-ID-Token"); got != "id-token" {
+		t.Fatalf("unexpected id token header: %q", got)
+	}
+}
+
+func TestGenericServiceStaticSecretHeader(t *testing.T) {
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "datadog", "api_key", "dd-api-key"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Services: config.ServicesConfig{
+				"datadog": {
+					Hosts: []config.ServiceHostRule{{Host: "api.datadoghq.com", AuthMethod: "none"}},
+					Injection: config.ServiceInjectionConfig{
+						Headers: []config.InjectionTemplate{{Name: "DD-API-KEY", Value: "{{ secret \"api_key\" }}"}},
+					},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.datadoghq.com/api/v1/validate", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := NewInjector(secretStore).ApplyServices(context.Background(), req, cfg, []string{"datadog"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("DD-API-KEY"); got != "dd-api-key" {
+		t.Fatalf("unexpected api key header: %q", got)
+	}
+}
+
 func TestNotionRefreshTokenInjectsAccessTokenAndStoresRotatedRefreshToken(t *testing.T) {
 	var tokenRequests int
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

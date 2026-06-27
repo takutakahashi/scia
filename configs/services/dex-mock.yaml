@@ -1,0 +1,26 @@
+server:
+  services:
+    mock-dex-api:
+      name: "Mock Dex API"
+      description: "Connect a mock API protected by Dex OIDC."
+      hosts:
+        - host: mock-api.local
+          authMethod: bearer
+      oauth:
+        credentialId: mock-dex-api
+        clientId: "env:DEX_CLIENT_ID"
+        clientSecret: "env:DEX_CLIENT_SECRET"
+        authUrl: "http://dex:5556/dex/auth"
+        tokenUrl: "http://dex:5556/dex/token"
+        scopeParam:
+          name: scope
+          separator: " "
+        tokenRequest:
+          bodyFormat: form
+          clientAuth: body
+          codeGrantType: authorization_code
+          refreshGrantType: refresh_token
+      injection:
+        headers:
+          - name: Authorization
+            value: "Bearer {{ .id_token }}"

@@ -106,6 +106,11 @@ func (h *Handler) serveForward(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credential injection failed", http.StatusBadGateway)
 		return
 	}
+	if err := h.injector.ApplyServices(r.Context(), next, cfg, decision.Services); err != nil {
+		h.logger.Error("service injection failed", "error", err)
+		http.Error(w, "service injection failed", http.StatusBadGateway)
+		return
+	}
 
 	resp, err := h.transport.RoundTrip(next)
 	if err != nil {
@@ -264,6 +269,10 @@ func (h *Handler) roundTripMITMRequest(r *http.Request, connectHost string) *htt
 		h.logger.Error("credential injection failed", "error", err)
 		return textResponse(r, http.StatusBadGateway, "credential injection failed\n")
 	}
+	if err := h.injector.ApplyServices(r.Context(), next, cfg, decision.Services); err != nil {
+		h.logger.Error("service injection failed", "error", err)
+		return textResponse(r, http.StatusBadGateway, "service injection failed\n")
+	}
 
 	resp, err := h.transport.RoundTrip(next)
 	if err != nil {
@@ -287,6 +296,9 @@ func (h *Handler) handleMITMWebSocket(r *http.Request, connectHost string, cfg *
 	next.Host = connectHost
 	if err := h.injector.Apply(r.Context(), next, cfg, decision.Credentials); err != nil {
 		return fmt.Errorf("credential injection failed: %w", err)
+	}
+	if err := h.injector.ApplyServices(r.Context(), next, cfg, decision.Services); err != nil {
+		return fmt.Errorf("service injection failed: %w", err)
 	}
 
 	upstream, err := h.dialWebSocketUpstream(r, connectHost)
@@ -475,6 +487,16 @@ func integrationMITMHosts(cfg *config.Config) []string {
 	hosts = append(hosts, cfg.Server.Integrations.Google.Hosts...)
 	hosts = append(hosts, cfg.Server.Integrations.Notion.Hosts...)
 	hosts = append(hosts, cfg.Server.Integrations.Todoist.Hosts...)
+	for _, service := range cfg.Server.Services {
+		for _, rule := range service.Hosts {
+			if rule.Host != "" {
+				hosts = append(hosts, rule.Host)
+			}
+			if rule.HostSuffix != "" {
+				hosts = append(hosts, "*"+rule.HostSuffix)
+			}
+		}
+	}
 	return hosts
 }
 

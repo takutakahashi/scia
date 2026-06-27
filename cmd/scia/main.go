@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,11 +26,14 @@ var (
 )
 
 func main() {
-	var configPath string
+	var configPaths stringSliceFlag
 	var listenAddr string
-	flag.StringVar(&configPath, "config", "configs/example.yaml", "path to YAML configuration")
+	flag.Var(&configPaths, "config", "path to YAML configuration; repeat to merge multiple files")
 	flag.StringVar(&listenAddr, "listen", "", "listen address override")
 	flag.Parse()
+	if len(configPaths) == 0 {
+		configPaths = []string{"configs/example.yaml"}
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger.Info("starting scia", "version", version, "commit", commit, "date", date)
@@ -37,7 +41,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	provider := config.NewFileProvider(configPath, logger)
+	provider := config.NewFileProviderPaths(configPaths, logger)
 	store, err := config.NewStore(ctx, provider, logger)
 	if err != nil {
 		logger.Error("failed to load config", "error", err)
@@ -62,6 +66,17 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("stopped scia")
+}
+
+type stringSliceFlag []string
+
+func (f *stringSliceFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *stringSliceFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
 }
 
 func runProxy(ctx context.Context, store *config.Store, secretStore secrets.Store, listenAddr string, logger *slog.Logger) {

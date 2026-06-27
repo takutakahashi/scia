@@ -13,12 +13,13 @@ type Decision struct {
 	Rule        config.RuleConfig
 	Action      string
 	Credentials []string
+	Services    []string
 }
 
 func Evaluate(cfg *config.Config, r *http.Request, targetHost string) Decision {
 	for _, rule := range cfg.Rules {
 		if ruleMatches(rule, r.Method, targetHost, r.URL.Path) {
-			return Decision{Rule: rule, Action: rule.Action, Credentials: rule.Credentials}
+			return Decision{Rule: rule, Action: rule.Action, Credentials: rule.Credentials, Services: rule.Services}
 		}
 	}
 	return Decision{Action: "allow"}
