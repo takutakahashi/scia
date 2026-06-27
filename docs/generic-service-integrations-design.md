@@ -57,9 +57,12 @@ server:
         scopeParam:
           name: scope
           separator: " "
+        authorizationParams: {}
         tokenRequest:
           bodyFormat: form
           clientAuth: body
+          codeGrantType: ""
+          refreshGrantType: refresh_token
       injection:
         headers:
           - name: Authorization
@@ -150,17 +153,22 @@ type ServiceOAuthConfig struct {
     RevokeURL         string
     RedirectURL       string
     ScopeParam        ScopeParamConfig
+    AuthorizationParams map[string]string
     TokenRequest      TokenRequestConfig
 }
 
 type ScopeParamConfig struct {
-    Name      string // usually "scope"; empty disables scope query param
+    Name      *string // default "scope"; explicit empty disables scope query param
     Separator string // usually " "; sometimes "," depending on provider
 }
 
 type TokenRequestConfig struct {
     BodyFormat string // form, json
     ClientAuth string // body, basic
+    CodeGrantType *string // default "authorization_code"; explicit empty omits grant_type
+    RefreshGrantType *string // default "refresh_token"; explicit empty omits grant_type
+    RefreshTokenURL string // defaults to TokenURL
+    SuccessField string // optional bool field such as Slack's "ok"
 }
 
 type ServiceInjectionConfig struct {
@@ -181,10 +189,15 @@ Validation rules:
 - each host rule must use exactly one of `host` or `hostSuffix`
 - `authMethod` defaults to `bearer` when OAuth is configured, otherwise `none`
 - OAuth services must define `clientId`, `clientSecret`, `authUrl`, and `tokenUrl` directly or via secret refs
-- `scopeParam.name` defaults to `scope`; set it to an empty string only for providers that do not accept a scope parameter
+- `scopeParam.name` defaults to `scope`; set it to an explicit empty string only for providers that do not accept a scope parameter
 - `scopeParam.separator` defaults to a single space because most OAuth servers expect space-delimited scope values
+- `authorizationParams` are static extra query parameters for the authorization request
 - `tokenRequest.bodyFormat` defaults to `form`
 - `tokenRequest.clientAuth` defaults to `body`
+- `tokenRequest.codeGrantType` defaults to `authorization_code`; set it to an explicit empty string for providers that omit `grant_type` during code exchange
+- `tokenRequest.refreshGrantType` defaults to `refresh_token`
+- `tokenRequest.refreshTokenURL` defaults to `tokenUrl`
+- `tokenRequest.successField` is optional; when set, the JSON response must contain that boolean field with value `true`
 - reject templated header/query values that reference unsupported fields
 - reject ambiguous host rules where a catch-all and path-scoped rule share the same host for one service unless explicitly ordered
 
@@ -263,6 +276,93 @@ OAuth start flow:
 2. Generic OAuth service joins those values with `scopeParam.separator`.
 3. Generic OAuth service sends the joined value under `scopeParam.name`.
 4. If no scopes are selected or `scopeParam.name` is empty, no scope parameter is sent.
+
+## Google And Slack Fit Check
+
+The current generic model can express Google if the service definition supports static authorization request parameters. Google needs `access_type=offline` and `prompt=consent` so the callback reliably receives a refresh token.
+
+Example Google Calendar service:
+
+```yaml
+server:
+  services:
+    google-calendar:
+      name: Google Calendar
+      hosts:
+        - host: www.googleapis.com
+          pathPrefix: /calendar/
+          authMethod: bearer
+        - host: www.googleapis.com
+          pathPrefix: /batch/calendar/
+          authMethod: bearer
+      oauth:
+        credentialId: google-calendar
+        clientId: env:GOOGLE_OAUTH_CLIENT_ID
+        clientSecret: env:GOOGLE_OAUTH_CLIENT_SECRET
+        authUrl: https://accounts.google.com/o/oauth2/v2/auth
+        tokenUrl: https://oauth2.googleapis.com/token
+        revokeUrl: https://oauth2.googleapis.com/revoke
+        scopeParam:
+          name: scope
+          separator: " "
+        authorizationParams:
+          access_type: offline
+          prompt: consent
+        tokenRequest:
+          bodyFormat: form
+          clientAuth: body
+          codeGrantType: authorization_code
+          refreshGrantType: refresh_token
+      injection:
+        headers:
+          - name: Authorization
+            value: "Bearer {{ .access_token }}"
+```
+
+Slack is also expressible, but it needs token request knobs that are easy to miss:
+
+- authorization URL is `https://slack.com/oauth/v2_user/authorize`
+- code exchange URL is `https://slack.com/api/oauth.v2.user.access`
+- refresh URL is `https://slack.com/api/oauth.v2.access`
+- code exchange sends `client_id`, `client_secret`, `code`, and optional `redirect_uri`, but not `grant_type`
+- refresh sends `grant_type=refresh_token`
+- token responses include a boolean `ok` field that should be checked when present
+
+Example Slack user service:
+
+```yaml
+server:
+  services:
+    slack:
+      name: Slack
+      hosts:
+        - host: slack.com
+          pathPrefix: /api/
+          authMethod: bearer
+      oauth:
+        credentialId: slack
+        clientId: env:SLACK_OAUTH_CLIENT_ID
+        clientSecret: env:SLACK_OAUTH_CLIENT_SECRET
+        authUrl: https://slack.com/oauth/v2_user/authorize
+        tokenUrl: https://slack.com/api/oauth.v2.user.access
+        revokeUrl: https://slack.com/api/auth.revoke
+        scopeParam:
+          name: scope
+          separator: " "
+        tokenRequest:
+          bodyFormat: form
+          clientAuth: body
+          codeGrantType: ""
+          refreshGrantType: refresh_token
+          refreshTokenURL: https://slack.com/api/oauth.v2.access
+          successField: ok
+      injection:
+        headers:
+          - name: Authorization
+            value: "Bearer {{ .access_token }}"
+```
+
+Conclusion: Google and Slack are both representable with the generic service design, provided the first implementation includes `authorizationParams`, `codeGrantType`, `refreshGrantType`, `refreshTokenURL`, and optional `successField`.
 
 ## Runtime Design
 
