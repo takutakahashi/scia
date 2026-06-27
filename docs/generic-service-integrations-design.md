@@ -364,6 +364,36 @@ server:
 
 Conclusion: Google and Slack are both representable with the generic service design, provided the first implementation includes `authorizationParams`, `codeGrantType`, `refreshGrantType`, `refreshTokenURL`, and optional `successField`.
 
+## Comparison With OneCLI
+
+OneCLI splits integration responsibilities across two layers:
+
+- `packages/api/src/apps/*`: app definitions, OAuth scope defaults, permission display metadata, and provider-specific auth URL/code exchange helpers
+- `apps/gateway/src/apps.rs`: runtime provider registry for host/path matching, access-token refresh, and request injection
+
+The proposed `scia` split should follow the same boundary:
+
+- integrations decide selected scope values and UI-facing scope metadata
+- services decide host/path matching, token refresh mechanics, and request injection
+- `scopeParam` only describes how selected scope values are serialized into the authorization request
+
+Google alignment:
+
+- OneCLI's Google app definitions keep `defaultScopes` and `permissions` in `packages/api/src/apps/google-*.ts`, not in the gateway provider registry.
+- OneCLI's shared Google auth helper sends `scope` as a space-joined value and adds `access_type=offline` plus `prompt=consent`.
+- OneCLI's gateway `GOOGLE_REFRESH` uses `https://oauth2.googleapis.com/token`, form body, client credentials in body, and `grant_type=refresh_token`.
+- OneCLI's Google gateway providers use exact host rules plus path prefixes for shared hosts such as `www.googleapis.com`.
+
+The current `scia` service proposal matches those points with `scopeParam`, `authorizationParams`, `tokenRequest`, and path-scoped host rules.
+
+Slack alignment:
+
+- OneCLI currently has no Slack provider in `apps/gateway/src/apps.rs`, so there is no direct OneCLI Slack registry spec to copy.
+- The Slack requirements in this design come from `scia`'s existing Slack implementation: separate authorization, code exchange, and refresh endpoints; no `grant_type` during code exchange; `grant_type=refresh_token` during refresh; and an optional `ok` success field.
+- These are natural extensions of OneCLI's `RefreshConfig` idea, but they go beyond OneCLI's current gateway abstraction because OneCLI only models refresh-token requests, not generic code-exchange behavior in the gateway registry.
+
+Net result: the service design remains OneCLI-compatible for the runtime gateway concepts, while adding a few OAuth-helper fields that `scia` needs because it owns the OAuth helper flow in the same binary/config model.
+
 ## Runtime Design
 
 Introduce an internal service registry built from config:
