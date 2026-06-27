@@ -24,6 +24,8 @@ dockers:
     goos: linux
     goarch: amd64
     dockerfile: Dockerfile.goreleaser
+    extra_files:
+      - configs/services
     build_flag_templates:
       - --platform=linux/amd64
       - --build-arg=VERSION={{ .Version }}
@@ -35,6 +37,8 @@ dockers:
     goos: linux
     goarch: arm64
     dockerfile: Dockerfile.goreleaser
+    extra_files:
+      - configs/services
     build_flag_templates:
       - --platform=linux/arm64
       - --build-arg=VERSION={{ .Version }}
