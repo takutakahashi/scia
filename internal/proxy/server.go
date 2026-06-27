@@ -671,6 +671,8 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(ca.certPEM)
 	case r.Method == http.MethodGet && r.URL.Path == "/_scia/approvals":
 		writeJSON(w, h.approval.List())
+	case r.Method == http.MethodGet && r.URL.Path == "/_scia/credentials/status":
+		h.serveAdminCredentialStatus(w, r)
 	case r.Method == http.MethodPost && (r.URL.Path == "/_scia/tokens" || r.URL.Path == "/_scia/secrets"):
 		h.serveAdminPutToken(w, r)
 	case r.Method == http.MethodPost && (r.URL.Path == "/_scia/tokens/revoke" || r.URL.Path == "/_scia/secrets/revoke"):
@@ -699,6 +701,76 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (h *Handler) serveAdminCredentialStatus(w http.ResponseWriter, r *http.Request) {
+	cfg := h.store.Get()
+	statuses := make([]adminCredentialStatus, 0)
+	for _, cred := range adminStatusCredentials(cfg) {
+		storageID := config.CredentialUserID(cfg, cred)
+		found, err := h.adminCredentialStoredToken(r.Context(), cfg, cred, storageID)
+		if err != nil {
+			h.logger.Error("failed to read credential status", "error", err, "credential_id", cred.ID)
+			http.Error(w, "failed to read credential status", http.StatusBadGateway)
+			return
+		}
+		statuses = append(statuses, adminCredentialStatus{
+			CredentialID:  cred.ID,
+			Authenticated: found,
+		})
+	}
+	writeJSON(w, adminCredentialStatusResponse{Credentials: statuses})
+}
+
+func adminStatusCredentials(cfg *config.Config) []config.CredentialConfig {
+	credentials := make([]config.CredentialConfig, 0, len(cfg.Credentials)+len(cfg.Server.Services))
+	seen := map[string]struct{}{}
+	for _, cred := range cfg.Credentials {
+		if cred.ID == "" {
+			continue
+		}
+		credentials = append(credentials, cred)
+		seen[cred.ID] = struct{}{}
+	}
+	for _, service := range cfg.Server.Services {
+		if service.OAuth == nil || service.OAuth.CredentialID == "" {
+			continue
+		}
+		if _, ok := seen[service.OAuth.CredentialID]; ok {
+			continue
+		}
+		credentials = append(credentials, config.CredentialConfig{
+			ID:     service.OAuth.CredentialID,
+			Type:   "service-oauth",
+			Params: map[string]string{},
+		})
+		seen[service.OAuth.CredentialID] = struct{}{}
+	}
+	return credentials
+}
+
+func (h *Handler) adminCredentialStoredToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig, storageID string) (bool, error) {
+	keys := []string{"refresh_token", "access_token"}
+	for _, key := range keys {
+		storageKey := adminTokenStorageKey(cfg, storageID, cred.ID, key)
+		_, ok, err := h.secrets.Get(ctx, storageID, storageKey)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+		if storageKey != key && key == "refresh_token" && strings.HasSuffix(cred.ID, ".google") {
+			_, ok, err := h.secrets.Get(ctx, storageID, key)
+			if err != nil {
+				return false, err
+			}
+			if ok {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (h *Handler) serveAdminPutToken(w http.ResponseWriter, r *http.Request) {
@@ -850,6 +922,15 @@ type adminTokenRequest struct {
 	Token             string `json:"token"`
 	Value             string `json:"value"`
 	User              string `json:"user"`
+}
+
+type adminCredentialStatusResponse struct {
+	Credentials []adminCredentialStatus `json:"credentials"`
+}
+
+type adminCredentialStatus struct {
+	CredentialID  string `json:"credential_id"`
+	Authenticated bool   `json:"authenticated"`
 }
 
 func decodeAdminTokenRequest(w http.ResponseWriter, r *http.Request) (adminTokenRequest, bool) {
