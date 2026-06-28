@@ -121,7 +121,7 @@ server:
     metadataToken: "env:SCIA_ADMIN_TOKEN"
 ```
 
-The proxy first calls `GET /api/services` to cache all configured service
+On startup, the proxy calls `GET /api/services` to cache all configured service
 metadata, then matches requests against the cached hosts. The OAuth helper also
 serves `GET /api/services/{service}` and `GET /api/services/{service}/metadata`
 for rule-based lookups. If `server.adminToken` is set on the OAuth helper,

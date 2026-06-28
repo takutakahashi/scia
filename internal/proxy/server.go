@@ -70,6 +70,14 @@ func NewHandler(store *config.Store, secretStore secrets.Store, approvals *appro
 		caKeyPath:  cfg.Server.MITM.CAKeyPath,
 	}
 	handler.transport.Proxy = handler.backendProxy
+	if hMetadataURL := config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL); hMetadataURL != "" && !strings.Contains(hMetadataURL, "{service}") {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := handler.fetchAndCacheServiceMetadata(ctx, cfg); err != nil {
+			return nil, fmt.Errorf("prefetch service metadata: %w", err)
+		}
+		logger.Info("service metadata prefetched")
+	}
 	return handler, nil
 }
 
@@ -429,7 +437,7 @@ func (h *Handler) serviceIDsForRequest(ctx context.Context, cfg *config.Config, 
 		}
 		ids = append(ids, id)
 	}
-	if len(ids) == 0 && config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL) != "" {
+	if len(ids) == 0 && canFetchServiceMetadataList(cfg) {
 		if err := h.fetchAndCacheServiceMetadata(ctx, cfg); err != nil {
 			return nil, err
 		}
@@ -464,7 +472,7 @@ func (h *Handler) shouldMITMForServices(ctx context.Context, cfg *config.Config,
 			return true, nil
 		}
 	}
-	if config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL) != "" {
+	if canFetchServiceMetadataList(cfg) {
 		if err := h.fetchAndCacheServiceMetadata(ctx, cfg); err != nil {
 			return false, err
 		}
@@ -496,6 +504,11 @@ func (h *Handler) fetchAndCacheServiceMetadata(ctx context.Context, cfg *config.
 		}
 	}
 	return nil
+}
+
+func canFetchServiceMetadataList(cfg *config.Config) bool {
+	metadataURL := config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL)
+	return metadataURL != "" && !strings.Contains(metadataURL, "{service}")
 }
 
 func matchingConfiguredServiceIDs(cfg *config.Config, host, reqPath string) []string {

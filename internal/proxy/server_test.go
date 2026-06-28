@@ -1033,6 +1033,12 @@ server:
     metadataToken: "metadata-token"
 `, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem"), metadataServer.URL), secretStore)
 	defer proxyServer.Close()
+	if got := atomic.LoadInt32(&metadataCalls); got != 1 {
+		t.Fatalf("metadata was not fetched during startup: %d", got)
+	}
+	if _, ok, err := serviceinfo.Get(context.Background(), secretStore, "mock-dex-api"); err != nil || !ok {
+		t.Fatalf("startup metadata was not cached: ok=%v err=%v", ok, err)
+	}
 
 	client := proxiedClient(t, proxyServer.URL)
 	resp, err := client.Get(upstream.URL + "/userinfo")
@@ -1100,7 +1106,7 @@ server:
     caCertPath: "%s"
     caKeyPath: "%s"
   oauth:
-    metadataUrl: "%s/api/services"
+    metadataUrl: "%s/api/services/{service}"
     metadataToken: "metadata-token"
 rules:
   - name: inject-dex
