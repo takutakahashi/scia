@@ -875,6 +875,13 @@ server:
 	if len(service.Hosts) != 1 || service.Hosts[0].Host != "mock-api.local" || service.Hosts[0].AuthMethod != "bearer" {
 		t.Fatalf("unexpected service hosts: %#v", service.Hosts)
 	}
+	ids, err := serviceinfo.ListIDs(context.Background(), secretStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != "mock-dex-api" {
+		t.Fatalf("service metadata index was not updated: %#v", ids)
+	}
 	if got := secretStore.value("mock-dex-api", "access_token"); got != "dex-token" {
 		t.Fatalf("unexpected stored token: %q", got)
 	}
@@ -915,6 +922,49 @@ rules:
     action: allow
     services: ["mock-dex-api"]
 `, mustParseURL(t, upstream.URL).Host), secretStore)
+	defer proxyServer.Close()
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get(upstream.URL + "/userinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(body))
+	}
+}
+
+func TestForwardProxyAutoUsesSecretStoredServiceMetadataWithoutRules(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer dex-access-token" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		if got := r.Header.Get("X-ID-Token"); got != "dex-id-token" {
+			t.Fatalf("unexpected id token header: %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "access_token", "dex-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "id_token", "dex-id-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := serviceinfo.Put(context.Background(), secretStore, "mock-dex-api", config.ServiceConfig{
+		Hosts: []config.ServiceHostRule{{Host: mustParseURL(t, upstream.URL).Hostname()}},
+		OAuth: &config.ServiceOAuthConfig{CredentialID: "mock-dex-api"},
+		Injection: config.ServiceInjectionConfig{Headers: []config.InjectionTemplate{
+			{Name: "X-ID-Token", Value: "{{ .id_token }}"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
 	defer proxyServer.Close()
 
 	client := proxiedClient(t, proxyServer.URL)

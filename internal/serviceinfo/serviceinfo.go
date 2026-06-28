@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -14,6 +15,8 @@ import (
 )
 
 const SecretKey = "_scia_service_config_v1"
+const IndexCredentialID = "scia-service-metadata"
+const IndexSecretKey = "service_ids_v1"
 
 type storedService struct {
 	ID      string               `json:"id"`
@@ -38,7 +41,10 @@ func Put(ctx context.Context, store secrets.Store, serviceID string, service con
 	if err != nil {
 		return err
 	}
-	return store.Put(ctx, serviceID, SecretKey, string(payload))
+	if err := store.Put(ctx, serviceID, SecretKey, string(payload)); err != nil {
+		return err
+	}
+	return AddToIndex(ctx, store, serviceID)
 }
 
 func Get(ctx context.Context, store secrets.Store, serviceID string) (config.ServiceConfig, bool, error) {
@@ -62,6 +68,116 @@ func Get(ctx context.Context, store secrets.Store, serviceID string) (config.Ser
 		return config.ServiceConfig{}, true, err
 	}
 	return normalized, true, nil
+}
+
+func AddToIndex(ctx context.Context, store secrets.Store, serviceID string) error {
+	serviceID = strings.TrimSpace(serviceID)
+	if serviceID == "" {
+		return fmt.Errorf("service id is required")
+	}
+	ids, err := ListIDs(ctx, store)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if id == serviceID {
+			return nil
+		}
+	}
+	ids = append(ids, serviceID)
+	payload, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	return store.Put(ctx, IndexCredentialID, IndexSecretKey, string(payload))
+}
+
+func ListIDs(ctx context.Context, store secrets.Store) ([]string, error) {
+	raw, ok, err := store.Get(ctx, IndexCredentialID, IndexSecretKey)
+	if err != nil || !ok {
+		return nil, err
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return nil, err
+	}
+	out := ids[:0]
+	seen := map[string]struct{}{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func MatchingStoredIDs(ctx context.Context, store secrets.Store, host, reqPath string) ([]string, error) {
+	ids, err := ListIDs(ctx, store)
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]string, 0, len(ids))
+	for _, id := range ids {
+		service, ok, err := Get(ctx, store, id)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		if _, ok := HostRule(service, host, reqPath); ok {
+			matches = append(matches, id)
+		}
+	}
+	return matches, nil
+}
+
+func HostRule(service config.ServiceConfig, host, reqPath string) (config.ServiceHostRule, bool) {
+	hostOnly := strings.ToLower(host)
+	if splitHost, _, err := net.SplitHostPort(hostOnly); err == nil {
+		hostOnly = splitHost
+	}
+	for _, rule := range service.Hosts {
+		if rule.Host != "" && strings.ToLower(rule.Host) != hostOnly {
+			continue
+		}
+		if rule.HostSuffix != "" {
+			suffix := strings.ToLower(rule.HostSuffix)
+			if !strings.HasSuffix(hostOnly, suffix) || len(hostOnly) <= len(suffix) {
+				continue
+			}
+		}
+		if rule.PathPrefix != "" && !strings.HasPrefix(reqPath, rule.PathPrefix) {
+			continue
+		}
+		return rule, true
+	}
+	return config.ServiceHostRule{}, false
+}
+
+func HostMatches(service config.ServiceConfig, host string) bool {
+	hostOnly := strings.ToLower(host)
+	if splitHost, _, err := net.SplitHostPort(hostOnly); err == nil {
+		hostOnly = splitHost
+	}
+	for _, rule := range service.Hosts {
+		if rule.Host != "" && strings.ToLower(rule.Host) == hostOnly {
+			return true
+		}
+		if rule.HostSuffix != "" {
+			suffix := strings.ToLower(rule.HostSuffix)
+			if strings.HasSuffix(hostOnly, suffix) && len(hostOnly) > len(suffix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func Fetch(ctx context.Context, client *http.Client, metadataURL, token, serviceID string) (config.ServiceConfig, error) {

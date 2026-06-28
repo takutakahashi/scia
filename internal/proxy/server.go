@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -107,7 +108,13 @@ func (h *Handler) serveForward(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credential injection failed", http.StatusBadGateway)
 		return
 	}
-	if err := h.injector.ApplyServices(r.Context(), next, cfg, decision.Services); err != nil {
+	services, err := h.serviceIDsForRequest(r.Context(), cfg, decision.Services, target.Host, target.Path)
+	if err != nil {
+		h.logger.Error("service metadata lookup failed", "error", err)
+		http.Error(w, "service metadata lookup failed", http.StatusBadGateway)
+		return
+	}
+	if err := h.injector.ApplyServices(r.Context(), next, cfg, services); err != nil {
 		h.logger.Error("service injection failed", "error", err)
 		http.Error(w, "service injection failed", http.StatusBadGateway)
 		return
@@ -136,7 +143,13 @@ func (h *Handler) serveConnect(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeDecision(w, r, decision, r.Host) {
 		return
 	}
-	if len(decision.Services) == 0 && !mitmHostAllowed(integrationMITMHosts(cfg), r.Host) {
+	mitmForService, err := h.shouldMITMForServices(r.Context(), cfg, decision.Services, r.Host)
+	if err != nil {
+		h.logger.Error("service metadata lookup failed", "error", err)
+		http.Error(w, "service metadata lookup failed", http.StatusBadGateway)
+		return
+	}
+	if !mitmForService && !mitmHostAllowed(integrationMITMHosts(cfg), r.Host) {
 		h.serveTunnelConnect(w, r)
 		return
 	}
@@ -270,7 +283,12 @@ func (h *Handler) roundTripMITMRequest(r *http.Request, connectHost string) *htt
 		h.logger.Error("credential injection failed", "error", err)
 		return textResponse(r, http.StatusBadGateway, "credential injection failed\n")
 	}
-	if err := h.injector.ApplyServices(r.Context(), next, cfg, decision.Services); err != nil {
+	services, err := h.serviceIDsForRequest(r.Context(), cfg, decision.Services, connectHost, r.URL.Path)
+	if err != nil {
+		h.logger.Error("service metadata lookup failed", "error", err)
+		return textResponse(r, http.StatusBadGateway, "service metadata lookup failed\n")
+	}
+	if err := h.injector.ApplyServices(r.Context(), next, cfg, services); err != nil {
 		h.logger.Error("service injection failed", "error", err)
 		return textResponse(r, http.StatusBadGateway, "service injection failed\n")
 	}
@@ -298,7 +316,11 @@ func (h *Handler) handleMITMWebSocket(r *http.Request, connectHost string, cfg *
 	if err := h.injector.Apply(r.Context(), next, cfg, decision.Credentials); err != nil {
 		return fmt.Errorf("credential injection failed: %w", err)
 	}
-	if err := h.injector.ApplyServices(r.Context(), next, cfg, decision.Services); err != nil {
+	services, err := h.serviceIDsForRequest(r.Context(), cfg, decision.Services, connectHost, r.URL.Path)
+	if err != nil {
+		return fmt.Errorf("service metadata lookup failed: %w", err)
+	}
+	if err := h.injector.ApplyServices(r.Context(), next, cfg, services); err != nil {
 		return fmt.Errorf("service injection failed: %w", err)
 	}
 
@@ -385,6 +407,68 @@ func (h *Handler) dialWebSocketUpstream(r *http.Request, connectHost string) (ne
 		return nil, fmt.Errorf("upstream tls handshake: %w", err)
 	}
 	return tlsConn, nil
+}
+
+func (h *Handler) serviceIDsForRequest(ctx context.Context, cfg *config.Config, explicit []string, host, reqPath string) ([]string, error) {
+	if len(explicit) > 0 {
+		return explicit, nil
+	}
+	ids := make([]string, 0)
+	seen := map[string]struct{}{}
+	for _, id := range matchingConfiguredServiceIDs(cfg, host, reqPath) {
+		ids = append(ids, id)
+		seen[id] = struct{}{}
+	}
+	stored, err := serviceinfo.MatchingStoredIDs(ctx, h.secrets, host, reqPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range stored {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (h *Handler) shouldMITMForServices(ctx context.Context, cfg *config.Config, explicit []string, host string) (bool, error) {
+	if len(explicit) > 0 {
+		return true, nil
+	}
+	for _, service := range cfg.Server.Services {
+		if serviceinfo.HostMatches(service, host) {
+			return true, nil
+		}
+	}
+	ids, err := serviceinfo.ListIDs(ctx, h.secrets)
+	if err != nil {
+		return false, err
+	}
+	for _, id := range ids {
+		service, ok, err := serviceinfo.Get(ctx, h.secrets, id)
+		if err != nil {
+			return false, err
+		}
+		if ok && serviceinfo.HostMatches(service, host) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func matchingConfiguredServiceIDs(cfg *config.Config, host, reqPath string) []string {
+	if cfg == nil || len(cfg.Server.Services) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(cfg.Server.Services))
+	for id, service := range cfg.Server.Services {
+		if _, ok := serviceinfo.HostRule(service, host, reqPath); ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (h *Handler) dialRawTunnelUpstream(ctx context.Context, connectHost string) (net.Conn, *bufio.Reader, error) {

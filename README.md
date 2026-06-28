@@ -78,8 +78,16 @@ curl -X POST http://localhost:8080/_scia/tokens \
 ```
 
 The same request can include provider-derived service metadata. `scia` stores it
-beside the token in the secret store, so proxy config can reference the service
-ID in `rules[].services` without also defining `server.services.<id>`:
+beside the token in the secret store and indexes the service ID. After that, the
+proxy can match requests against the stored service hosts without defining
+`server.services.<id>` or `rules[].services` in proxy config:
+
+```yaml
+server:
+  adminToken: "env:SCIA_ADMIN_TOKEN"
+  secrets:
+    sqlitePath: "data/scia-proxy-secrets.db"
+```
 
 ```sh
 curl -X POST http://localhost:8080/_scia/tokens \
@@ -104,7 +112,8 @@ curl -X POST http://localhost:8080/_scia/tokens \
 
 If a proxy has neither `server.services.<id>` nor stored service metadata, it can
 fetch the metadata from the OAuth helper server and cache it in its own secret
-store. Configure the proxy with the OAuth helper metadata endpoint:
+store when a rule names the service. Configure the proxy with the OAuth helper
+metadata endpoint:
 
 ```yaml
 server:

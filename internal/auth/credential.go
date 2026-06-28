@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -57,7 +56,7 @@ func (i *Injector) ApplyServices(ctx context.Context, r *http.Request, cfg *conf
 		if !ok {
 			return fmt.Errorf("service %q not found", id)
 		}
-		rule, ok := serviceHostRule(service, r.URL.Host, r.URL.Path)
+		rule, ok := serviceinfo.HostRule(service, r.URL.Host, r.URL.Path)
 		if !ok {
 			return fmt.Errorf("service %q does not match %s%s", id, r.URL.Host, r.URL.Path)
 		}
@@ -999,29 +998,6 @@ func (i *Injector) decodeAndCacheToken(credentialID string, resp *http.Response)
 
 func supportedTokenType(tokenType string) bool {
 	return tokenType == "" || strings.EqualFold(tokenType, "bearer") || strings.EqualFold(tokenType, "user")
-}
-
-func serviceHostRule(service config.ServiceConfig, host, reqPath string) (config.ServiceHostRule, bool) {
-	hostOnly := strings.ToLower(host)
-	if splitHost, _, err := net.SplitHostPort(hostOnly); err == nil {
-		hostOnly = splitHost
-	}
-	for _, rule := range service.Hosts {
-		if rule.Host != "" && strings.ToLower(rule.Host) != hostOnly {
-			continue
-		}
-		if rule.HostSuffix != "" {
-			suffix := strings.ToLower(rule.HostSuffix)
-			if !strings.HasSuffix(hostOnly, suffix) || len(hostOnly) <= len(suffix) {
-				continue
-			}
-		}
-		if rule.PathPrefix != "" && !strings.HasPrefix(reqPath, rule.PathPrefix) {
-			continue
-		}
-		return rule, true
-	}
-	return config.ServiceHostRule{}, false
 }
 
 func applyAuthMethod(r *http.Request, method, token string) error {
