@@ -1260,6 +1260,90 @@ credentials:
 	}
 }
 
+func TestAdminCredentialStatusReportsSecretStoredServiceMetadata(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "access_token", "dex-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := serviceinfo.Put(context.Background(), secretStore, "mock-dex-api", config.ServiceConfig{
+		Hosts: []config.ServiceHostRule{{Host: "api.example.test"}},
+		OAuth: &config.ServiceOAuthConfig{CredentialID: "mock-dex-api"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Get(proxyServer.URL + "/_scia/credentials/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	var body adminCredentialStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	got := credentialStatusByID(body.Credentials)
+	if !got["mock-dex-api"].Authenticated {
+		t.Fatalf("unexpected stored service status: %#v", got["mock-dex-api"])
+	}
+}
+
+func TestAdminCredentialStatusReportsPrefetchedServiceMetadata(t *testing.T) {
+	metadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/services" {
+			t.Fatalf("unexpected metadata path: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(serviceinfo.ListResponse{Services: []serviceinfo.Response{
+			{
+				ID: "mock-dex-api",
+				Service: config.ServiceConfig{
+					Hosts: []config.ServiceHostRule{{Host: "api.example.test"}},
+					OAuth: &config.ServiceOAuthConfig{CredentialID: "mock-dex-api"},
+				},
+			},
+		}})
+	}))
+	defer metadataServer.Close()
+
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "access_token", "dex-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  oauth:
+    metadataUrl: "%s/api/services"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem"), metadataServer.URL), secretStore)
+	defer proxyServer.Close()
+
+	resp, err := http.Get(proxyServer.URL + "/_scia/credentials/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	var body adminCredentialStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	got := credentialStatusByID(body.Credentials)
+	if !got["mock-dex-api"].Authenticated {
+		t.Fatalf("unexpected prefetched service status: %#v", got["mock-dex-api"])
+	}
+}
+
 func TestAdminRevokeTokenUsesBrokerAndDeletesSecret(t *testing.T) {
 	secretStore := newRecordingSecretStore()
 	if err := secretStore.Put(context.Background(), "github", "access_token", "github-token"); err != nil {

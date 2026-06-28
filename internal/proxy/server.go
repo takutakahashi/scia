@@ -845,7 +845,13 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) serveAdminCredentialStatus(w http.ResponseWriter, r *http.Request) {
 	cfg := h.store.Get()
 	statuses := make([]adminCredentialStatus, 0)
-	for _, cred := range adminStatusCredentials(cfg) {
+	credentials, err := h.adminStatusCredentials(r.Context(), cfg)
+	if err != nil {
+		h.logger.Error("failed to list credential status", "error", err)
+		http.Error(w, "failed to list credential status", http.StatusBadGateway)
+		return
+	}
+	for _, cred := range credentials {
 		storageID := config.CredentialUserID(cfg, cred)
 		found, err := h.adminCredentialStoredToken(r.Context(), cfg, cred, storageID)
 		if err != nil {
@@ -861,7 +867,7 @@ func (h *Handler) serveAdminCredentialStatus(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, adminCredentialStatusResponse{Credentials: statuses})
 }
 
-func adminStatusCredentials(cfg *config.Config) []config.CredentialConfig {
+func (h *Handler) adminStatusCredentials(ctx context.Context, cfg *config.Config) ([]config.CredentialConfig, error) {
 	credentials := make([]config.CredentialConfig, 0, len(cfg.Credentials)+len(cfg.Server.Services))
 	seen := map[string]struct{}{}
 	for _, cred := range cfg.Credentials {
@@ -885,7 +891,29 @@ func adminStatusCredentials(cfg *config.Config) []config.CredentialConfig {
 		})
 		seen[service.OAuth.CredentialID] = struct{}{}
 	}
-	return credentials
+	storedIDs, err := serviceinfo.ListIDs(ctx, h.secrets)
+	if err != nil {
+		return nil, err
+	}
+	for _, serviceID := range storedIDs {
+		service, ok, err := serviceinfo.Get(ctx, h.secrets, serviceID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || service.OAuth == nil || service.OAuth.CredentialID == "" {
+			continue
+		}
+		if _, ok := seen[service.OAuth.CredentialID]; ok {
+			continue
+		}
+		credentials = append(credentials, config.CredentialConfig{
+			ID:     service.OAuth.CredentialID,
+			Type:   "generic-oauth",
+			Params: map[string]string{},
+		})
+		seen[service.OAuth.CredentialID] = struct{}{}
+	}
+	return credentials, nil
 }
 
 func (h *Handler) adminCredentialStoredToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig, storageID string) (bool, error) {
@@ -960,7 +988,12 @@ func (h *Handler) serveAdminRevokeToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cfg := h.store.Get()
-	cred, ok := config.CredentialByID(cfg, req.CredentialID)
+	cred, ok, err := h.adminCredentialByID(r.Context(), cfg, req.CredentialID)
+	if err != nil {
+		h.logger.Error("failed to resolve credential", "error", err, "credential_id", req.CredentialID)
+		http.Error(w, "failed to resolve credential", http.StatusBadGateway)
+		return
+	}
 	if !ok {
 		http.Error(w, "unknown credential", http.StatusBadRequest)
 		return
@@ -995,6 +1028,42 @@ func (h *Handler) serveAdminRevokeToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) adminCredentialByID(ctx context.Context, cfg *config.Config, credentialID string) (config.CredentialConfig, bool, error) {
+	if cred, ok := config.CredentialByID(cfg, credentialID); ok {
+		return cred, true, nil
+	}
+	if _, service, ok := config.ServiceByCredentialID(cfg, credentialID); ok && service.OAuth != nil {
+		return config.CredentialConfig{ID: credentialID, Type: "generic-oauth", Params: map[string]string{}}, true, nil
+	}
+	storedIDs, err := serviceinfo.ListIDs(ctx, h.secrets)
+	if err != nil {
+		return config.CredentialConfig{}, false, err
+	}
+	for _, serviceID := range storedIDs {
+		service, ok, err := serviceinfo.Get(ctx, h.secrets, serviceID)
+		if err != nil {
+			return config.CredentialConfig{}, false, err
+		}
+		if ok && service.OAuth != nil && service.OAuth.CredentialID == credentialID {
+			return config.CredentialConfig{ID: credentialID, Type: "generic-oauth", Params: map[string]string{}}, true, nil
+		}
+	}
+	if config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL) == "" {
+		return config.CredentialConfig{}, false, nil
+	}
+	service, err := serviceinfo.Fetch(ctx, h.client, config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL), config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataToken), credentialID)
+	if err != nil {
+		return config.CredentialConfig{}, false, err
+	}
+	if err := serviceinfo.Put(ctx, h.secrets, credentialID, service); err != nil {
+		return config.CredentialConfig{}, false, err
+	}
+	if service.OAuth != nil && service.OAuth.CredentialID == credentialID {
+		return config.CredentialConfig{ID: credentialID, Type: "generic-oauth", Params: map[string]string{}}, true, nil
+	}
+	return config.CredentialConfig{}, false, nil
 }
 
 func (h *Handler) adminTokenToRevoke(ctx context.Context, cfg *config.Config, cred config.CredentialConfig, storageID, requestedKey string) (string, string, bool, error) {
