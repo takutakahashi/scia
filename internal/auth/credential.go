@@ -85,7 +85,17 @@ func (i *Injector) serviceByID(ctx context.Context, cfg *config.Config, id strin
 	}
 	service, ok, err := serviceinfo.Get(ctx, i.secrets, id)
 	if err != nil || !ok {
-		return config.ServiceConfig{}, ok, err
+		if err != nil || config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL) == "" {
+			return config.ServiceConfig{}, ok, err
+		}
+		fetched, fetchErr := serviceinfo.Fetch(ctx, i.client, config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL), config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataToken), id)
+		if fetchErr != nil {
+			return config.ServiceConfig{}, false, fetchErr
+		}
+		if putErr := serviceinfo.Put(ctx, i.secrets, id, fetched); putErr != nil {
+			return config.ServiceConfig{}, false, putErr
+		}
+		return fetched, true, nil
 	}
 	return service, true, nil
 }

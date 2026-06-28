@@ -23,6 +23,7 @@ import (
 
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/secrets"
+	"github.com/takutakahashi/scia/internal/serviceinfo"
 )
 
 const googleAuthURL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -148,6 +149,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.index)
 	mux.HandleFunc("/_scia/healthz", s.healthz)
 	mux.HandleFunc("/api/integrations", s.frontendIntegrations)
+	mux.HandleFunc("/api/services/", s.serviceMetadata)
 	mux.HandleFunc("/oauth/google/start", s.startGoogle)
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
 	mux.HandleFunc("/oauth/google/token", s.googleToken)
@@ -202,6 +204,45 @@ func (s *Server) frontendIntegrations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, integrationsResponse{Integrations: s.frontendIntegrationList(r, s.store.Get())})
+}
+
+func (s *Server) serviceMetadata(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := s.store.Get()
+	adminToken := config.HeaderValueFromEnv(cfg.Server.AdminToken)
+	if adminToken != "" && r.Header.Get("Authorization") != "Bearer "+adminToken {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/services/")
+	rest = strings.Trim(rest, "/")
+	if rest == "" {
+		http.NotFound(w, r)
+		return
+	}
+	serviceID := rest
+	if id, tail, ok := strings.Cut(rest, "/"); ok {
+		if tail != "metadata" {
+			http.NotFound(w, r)
+			return
+		}
+		serviceID = id
+	}
+	service, ok := config.ServiceByID(cfg, serviceID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	normalized, err := serviceinfo.Normalize(serviceID, service)
+	if err != nil {
+		s.logger.Error("configured service metadata is invalid", "error", err, "service", serviceID)
+		http.Error(w, "service metadata is invalid", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, serviceinfo.Response{ID: serviceID, Service: normalized})
 }
 
 func (s *Server) genericOAuth(w http.ResponseWriter, r *http.Request) {

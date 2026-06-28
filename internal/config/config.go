@@ -169,14 +169,16 @@ type InjectionTemplate struct {
 }
 
 type OAuthConfig struct {
-	Listen       string                                    `yaml:"listen"`
-	RedirectURL  string                                    `yaml:"redirectUrl"`
-	Integrations map[string]OAuthIntegrationMetadataConfig `yaml:"integrations"`
-	Google       GoogleOAuthConfig                         `yaml:"google"`
-	Notion       NotionOAuthConfig                         `yaml:"notion"`
-	Todoist      TodoistOAuthConfig                        `yaml:"todoist"`
-	Slack        SlackOAuthConfig                          `yaml:"slack"`
-	GitHub       GitHubOAuthConfig                         `yaml:"github"`
+	Listen        string                                    `yaml:"listen"`
+	RedirectURL   string                                    `yaml:"redirectUrl"`
+	MetadataURL   string                                    `yaml:"metadataUrl"`
+	MetadataToken string                                    `yaml:"metadataToken"`
+	Integrations  map[string]OAuthIntegrationMetadataConfig `yaml:"integrations"`
+	Google        GoogleOAuthConfig                         `yaml:"google"`
+	Notion        NotionOAuthConfig                         `yaml:"notion"`
+	Todoist       TodoistOAuthConfig                        `yaml:"todoist"`
+	Slack         SlackOAuthConfig                          `yaml:"slack"`
+	GitHub        GitHubOAuthConfig                         `yaml:"github"`
 }
 
 type OAuthIntegrationMetadataConfig struct {
@@ -405,6 +407,18 @@ func (c *Config) Validate() error {
 		}
 		if parsed.Host == "" {
 			return fmt.Errorf("server.backendProxy.url must include a host")
+		}
+	}
+	if rawMetadataURL := HeaderValueFromEnv(c.Server.OAuth.MetadataURL); rawMetadataURL != "" {
+		parsed, err := url.Parse(rawMetadataURL)
+		if err != nil {
+			return fmt.Errorf("server.oauth.metadataUrl is invalid: %w", err)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return fmt.Errorf("server.oauth.metadataUrl must use http or https scheme")
+		}
+		if parsed.Host == "" {
+			return fmt.Errorf("server.oauth.metadataUrl must include a host")
 		}
 	}
 	seenCreds := map[string]struct{}{}

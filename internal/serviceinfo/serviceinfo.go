@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
+	"path"
 	"strings"
 
 	"github.com/takutakahashi/scia/internal/config"
@@ -14,6 +16,11 @@ import (
 const SecretKey = "_scia_service_config_v1"
 
 type storedService struct {
+	ID      string               `json:"id"`
+	Service config.ServiceConfig `json:"service"`
+}
+
+type Response struct {
 	ID      string               `json:"id"`
 	Service config.ServiceConfig `json:"service"`
 }
@@ -55,6 +62,46 @@ func Get(ctx context.Context, store secrets.Store, serviceID string) (config.Ser
 		return config.ServiceConfig{}, true, err
 	}
 	return normalized, true, nil
+}
+
+func Fetch(ctx context.Context, client *http.Client, metadataURL, token, serviceID string) (config.ServiceConfig, error) {
+	serviceID = strings.TrimSpace(serviceID)
+	if serviceID == "" {
+		return config.ServiceConfig{}, fmt.Errorf("service id is required")
+	}
+	endpoint, err := serviceMetadataURL(metadataURL, serviceID)
+	if err != nil {
+		return config.ServiceConfig{}, err
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return config.ServiceConfig{}, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return config.ServiceConfig{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return config.ServiceConfig{}, fmt.Errorf("metadata service %q not found", serviceID)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return config.ServiceConfig{}, fmt.Errorf("metadata endpoint returned %s", resp.Status)
+	}
+	var payload Response
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return config.ServiceConfig{}, err
+	}
+	if payload.ID != "" && payload.ID != serviceID {
+		return config.ServiceConfig{}, fmt.Errorf("metadata service id %q does not match %q", payload.ID, serviceID)
+	}
+	return Normalize(serviceID, payload.Service)
 }
 
 func Normalize(serviceID string, service config.ServiceConfig) (config.ServiceConfig, error) {
@@ -132,6 +179,29 @@ func Normalize(serviceID string, service config.ServiceConfig) (config.ServiceCo
 		}
 	}
 	return service, nil
+}
+
+func serviceMetadataURL(metadataURL, serviceID string) (string, error) {
+	metadataURL = strings.TrimSpace(metadataURL)
+	if metadataURL == "" {
+		return "", fmt.Errorf("metadataUrl is required")
+	}
+	escaped := url.PathEscape(serviceID)
+	if strings.Contains(metadataURL, "{service}") {
+		return strings.ReplaceAll(metadataURL, "{service}", escaped), nil
+	}
+	parsed, err := url.Parse(metadataURL)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("metadataUrl must use http or https scheme")
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("metadataUrl must include a host")
+	}
+	parsed.Path = path.Join(parsed.Path, escaped)
+	return parsed.String(), nil
 }
 
 func validateURL(field, raw string) error {
