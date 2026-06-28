@@ -13,6 +13,7 @@ import (
 
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/secrets"
+	"github.com/takutakahashi/scia/internal/serviceinfo"
 )
 
 type staticProvider struct {
@@ -195,6 +196,49 @@ func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 	}
 	if len(body.Service.Injection.Headers) != 1 || body.Service.Injection.Headers[0].Name != "X-ID-Token" {
 		t.Fatalf("unexpected injection metadata: %#v", body.Service.Injection)
+	}
+}
+
+func TestServiceMetadataListReturnsConfiguredServices(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Services: config.ServicesConfig{
+				"mock-dex-api": {
+					Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
+					OAuth: &config.ServiceOAuthConfig{
+						ClientID:     "client-id",
+						ClientSecret: "client-secret",
+						AuthURL:      "http://dex.example/dex/auth",
+						TokenURL:     "http://dex.example/dex/token",
+					},
+				},
+				"other-api": {
+					Hosts: []config.ServiceHostRule{{Host: "other.local", AuthMethod: "none"}},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/api/services", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body serviceinfo.ListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Services) != 2 {
+		t.Fatalf("unexpected services: %#v", body.Services)
+	}
+	if body.Services[0].ID != "mock-dex-api" || body.Services[1].ID != "other-api" {
+		t.Fatalf("services were not sorted by id: %#v", body.Services)
+	}
+	if body.Services[0].Service.OAuth == nil || body.Services[0].Service.OAuth.CredentialID != "mock-dex-api" {
+		t.Fatalf("credential id was not defaulted: %#v", body.Services[0].Service.OAuth)
 	}
 }
 

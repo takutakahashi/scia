@@ -149,6 +149,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.index)
 	mux.HandleFunc("/_scia/healthz", s.healthz)
 	mux.HandleFunc("/api/integrations", s.frontendIntegrations)
+	mux.HandleFunc("/api/services", s.serviceMetadataList)
 	mux.HandleFunc("/api/services/", s.serviceMetadata)
 	mux.HandleFunc("/oauth/google/start", s.startGoogle)
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
@@ -243,6 +244,39 @@ func (s *Server) serviceMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, serviceinfo.Response{ID: serviceID, Service: normalized})
+}
+
+func (s *Server) serviceMetadataList(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/services" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := s.store.Get()
+	adminToken := config.HeaderValueFromEnv(cfg.Server.AdminToken)
+	if adminToken != "" && r.Header.Get("Authorization") != "Bearer "+adminToken {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	ids := make([]string, 0, len(cfg.Server.Services))
+	for id := range cfg.Server.Services {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	services := make([]serviceinfo.Response, 0, len(ids))
+	for _, id := range ids {
+		normalized, err := serviceinfo.Normalize(id, cfg.Server.Services[id])
+		if err != nil {
+			s.logger.Error("configured service metadata is invalid", "error", err, "service", id)
+			http.Error(w, "service metadata is invalid", http.StatusInternalServerError)
+			return
+		}
+		services = append(services, serviceinfo.Response{ID: id, Service: normalized})
+	}
+	writeJSON(w, http.StatusOK, serviceinfo.ListResponse{Services: services})
 }
 
 func (s *Server) genericOAuth(w http.ResponseWriter, r *http.Request) {

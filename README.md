@@ -112,24 +112,20 @@ curl -X POST http://localhost:8080/_scia/tokens \
 
 If a proxy has neither `server.services.<id>` nor stored service metadata, it can
 fetch the metadata from the OAuth helper server and cache it in its own secret
-store when a rule names the service. Configure the proxy with the OAuth helper
-metadata endpoint:
+store. Configure the proxy with the OAuth helper metadata endpoint:
 
 ```yaml
 server:
   oauth:
     metadataUrl: "http://localhost:8081/api/services"
     metadataToken: "env:SCIA_ADMIN_TOKEN"
-rules:
-  - name: inject-dex
-    hosts: ["api.example.com"]
-    action: allow
-    services: ["mock-dex-api"]
 ```
 
-The OAuth helper serves `GET /api/services/{service}` and
-`GET /api/services/{service}/metadata`. If `server.adminToken` is set on the
-OAuth helper, callers must send `Authorization: Bearer <token>`.
+The proxy first calls `GET /api/services` to cache all configured service
+metadata, then matches requests against the cached hosts. The OAuth helper also
+serves `GET /api/services/{service}` and `GET /api/services/{service}/metadata`
+for rule-based lookups. If `server.adminToken` is set on the OAuth helper,
+callers must send `Authorization: Bearer <token>`.
 
 `POST /_scia/tokens/revoke` revokes a stored token through a configured broker
 and deletes the local secret only after the broker succeeds. Configure the

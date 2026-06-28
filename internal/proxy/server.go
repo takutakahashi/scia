@@ -429,6 +429,16 @@ func (h *Handler) serviceIDsForRequest(ctx context.Context, cfg *config.Config, 
 		}
 		ids = append(ids, id)
 	}
+	if len(ids) == 0 && config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL) != "" {
+		if err := h.fetchAndCacheServiceMetadata(ctx, cfg); err != nil {
+			return nil, err
+		}
+		stored, err := serviceinfo.MatchingStoredIDs(ctx, h.secrets, host, reqPath)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, stored...)
+	}
 	return ids, nil
 }
 
@@ -454,7 +464,38 @@ func (h *Handler) shouldMITMForServices(ctx context.Context, cfg *config.Config,
 			return true, nil
 		}
 	}
+	if config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL) != "" {
+		if err := h.fetchAndCacheServiceMetadata(ctx, cfg); err != nil {
+			return false, err
+		}
+		ids, err := serviceinfo.ListIDs(ctx, h.secrets)
+		if err != nil {
+			return false, err
+		}
+		for _, id := range ids {
+			service, ok, err := serviceinfo.Get(ctx, h.secrets, id)
+			if err != nil {
+				return false, err
+			}
+			if ok && serviceinfo.HostMatches(service, host) {
+				return true, nil
+			}
+		}
+	}
 	return false, nil
+}
+
+func (h *Handler) fetchAndCacheServiceMetadata(ctx context.Context, cfg *config.Config) error {
+	services, err := serviceinfo.FetchAll(ctx, h.client, config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL), config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataToken))
+	if err != nil {
+		return err
+	}
+	for _, item := range services {
+		if err := serviceinfo.Put(ctx, h.secrets, item.ID, item.Service); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func matchingConfiguredServiceIDs(cfg *config.Config, host, reqPath string) []string {

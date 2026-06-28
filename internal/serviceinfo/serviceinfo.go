@@ -28,6 +28,10 @@ type Response struct {
 	Service config.ServiceConfig `json:"service"`
 }
 
+type ListResponse struct {
+	Services []Response `json:"services"`
+}
+
 func Put(ctx context.Context, store secrets.Store, serviceID string, service config.ServiceConfig) error {
 	serviceID = strings.TrimSpace(serviceID)
 	if serviceID == "" {
@@ -220,6 +224,48 @@ func Fetch(ctx context.Context, client *http.Client, metadataURL, token, service
 	return Normalize(serviceID, payload.Service)
 }
 
+func FetchAll(ctx context.Context, client *http.Client, metadataURL, token string) ([]Response, error) {
+	endpoint, err := serviceListURL(metadataURL)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("metadata endpoint returned %s", resp.Status)
+	}
+	var payload ListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	services := make([]Response, 0, len(payload.Services))
+	for _, item := range payload.Services {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			return nil, fmt.Errorf("metadata service id is required")
+		}
+		normalized, err := Normalize(id, item.Service)
+		if err != nil {
+			return nil, err
+		}
+		services = append(services, Response{ID: id, Service: normalized})
+	}
+	return services, nil
+}
+
 func Normalize(serviceID string, service config.ServiceConfig) (config.ServiceConfig, error) {
 	if serviceID == "" {
 		return config.ServiceConfig{}, fmt.Errorf("service id is required")
@@ -295,6 +341,27 @@ func Normalize(serviceID string, service config.ServiceConfig) (config.ServiceCo
 		}
 	}
 	return service, nil
+}
+
+func serviceListURL(metadataURL string) (string, error) {
+	metadataURL = strings.TrimSpace(metadataURL)
+	if metadataURL == "" {
+		return "", fmt.Errorf("metadataUrl is required")
+	}
+	if strings.Contains(metadataURL, "{service}") {
+		return "", fmt.Errorf("metadataUrl with {service} cannot be used for service list")
+	}
+	parsed, err := url.Parse(metadataURL)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("metadataUrl must use http or https scheme")
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("metadataUrl must include a host")
+	}
+	return parsed.String(), nil
 }
 
 func serviceMetadataURL(metadataURL, serviceID string) (string, error) {
