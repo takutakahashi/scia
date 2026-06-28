@@ -23,6 +23,7 @@ import (
 	"github.com/takutakahashi/scia/internal/approval"
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/secrets"
+	"github.com/takutakahashi/scia/internal/serviceinfo"
 )
 
 func TestForwardProxyInjectsCredential(t *testing.T) {
@@ -819,6 +820,317 @@ server:
 	got := secretStore.value("github", "access_token")
 	if got != "github-token" {
 		t.Fatalf("unexpected stored token: %q", got)
+	}
+}
+
+func TestAdminPutTokenStoresServiceMetadata(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")), secretStore)
+	defer proxyServer.Close()
+
+	body := strings.NewReader(`{
+  "credentialId": "mock-dex-api",
+  "key": "access_token",
+  "token": "dex-token",
+  "service": {
+    "hosts": [{"host": "mock-api.local", "authMethod": "bearer"}],
+    "oauth": {
+      "authUrl": "http://dex.local/dex/auth",
+      "tokenUrl": "http://dex.local/dex/token"
+    },
+    "injection": {
+      "headers": [{"name": "X-ID-Token", "value": "{{ .id_token }}"}]
+    }
+  }
+}`)
+	req, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/_scia/tokens", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	service, ok, err := serviceinfo.Get(context.Background(), secretStore, "mock-dex-api")
+	if err != nil || !ok {
+		t.Fatalf("service metadata was not stored: ok=%v err=%v", ok, err)
+	}
+	if service.OAuth == nil || service.OAuth.CredentialID != "mock-dex-api" {
+		t.Fatalf("credential id was not defaulted: %#v", service.OAuth)
+	}
+	if len(service.Hosts) != 1 || service.Hosts[0].Host != "mock-api.local" || service.Hosts[0].AuthMethod != "bearer" {
+		t.Fatalf("unexpected service hosts: %#v", service.Hosts)
+	}
+	ids, err := serviceinfo.ListIDs(context.Background(), secretStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != "mock-dex-api" {
+		t.Fatalf("service metadata index was not updated: %#v", ids)
+	}
+	if got := secretStore.value("mock-dex-api", "access_token"); got != "dex-token" {
+		t.Fatalf("unexpected stored token: %q", got)
+	}
+}
+
+func TestForwardProxyUsesSecretStoredServiceMetadata(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer dex-access-token" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		if got := r.Header.Get("X-ID-Token"); got != "dex-id-token" {
+			t.Fatalf("unexpected id token header: %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "access_token", "dex-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "id_token", "dex-id-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := serviceinfo.Put(context.Background(), secretStore, "mock-dex-api", config.ServiceConfig{
+		Hosts: []config.ServiceHostRule{{Host: mustParseURL(t, upstream.URL).Hostname()}},
+		OAuth: &config.ServiceOAuthConfig{CredentialID: "mock-dex-api"},
+		Injection: config.ServiceInjectionConfig{Headers: []config.InjectionTemplate{
+			{Name: "X-ID-Token", Value: "{{ .id_token }}"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+rules:
+  - name: inject-dex
+    hosts: ["%s"]
+    action: allow
+    services: ["mock-dex-api"]
+`, mustParseURL(t, upstream.URL).Host), secretStore)
+	defer proxyServer.Close()
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get(upstream.URL + "/userinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(body))
+	}
+}
+
+func TestForwardProxyAutoUsesSecretStoredServiceMetadataWithoutRules(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer dex-access-token" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		if got := r.Header.Get("X-ID-Token"); got != "dex-id-token" {
+			t.Fatalf("unexpected id token header: %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "access_token", "dex-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "id_token", "dex-id-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := serviceinfo.Put(context.Background(), secretStore, "mock-dex-api", config.ServiceConfig{
+		Hosts: []config.ServiceHostRule{{Host: mustParseURL(t, upstream.URL).Hostname()}},
+		OAuth: &config.ServiceOAuthConfig{CredentialID: "mock-dex-api"},
+		Injection: config.ServiceInjectionConfig{Headers: []config.InjectionTemplate{
+			{Name: "X-ID-Token", Value: "{{ .id_token }}"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
+	defer proxyServer.Close()
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get(upstream.URL + "/userinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(body))
+	}
+}
+
+func TestForwardProxyFetchesServiceMetadataListWithoutRules(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer dex-access-token" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		if got := r.Header.Get("X-ID-Token"); got != "dex-id-token" {
+			t.Fatalf("unexpected id token header: %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	metadataCalls := int32(0)
+	metadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&metadataCalls, 1)
+		if got := r.Header.Get("Authorization"); got != "Bearer metadata-token" {
+			t.Fatalf("unexpected metadata authorization header: %q", got)
+		}
+		if r.URL.Path != "/api/services" {
+			t.Fatalf("unexpected metadata path: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(serviceinfo.ListResponse{Services: []serviceinfo.Response{
+			{
+				ID: "mock-dex-api",
+				Service: config.ServiceConfig{
+					Hosts: []config.ServiceHostRule{{Host: mustParseURL(t, upstream.URL).Hostname()}},
+					OAuth: &config.ServiceOAuthConfig{CredentialID: "mock-dex-api"},
+					Injection: config.ServiceInjectionConfig{Headers: []config.InjectionTemplate{
+						{Name: "X-ID-Token", Value: "{{ .id_token }}"},
+					}},
+				},
+			},
+		}})
+	}))
+	defer metadataServer.Close()
+
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "access_token", "dex-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "id_token", "dex-id-token"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  oauth:
+    metadataUrl: "%s/api/services"
+    metadataToken: "metadata-token"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem"), metadataServer.URL), secretStore)
+	defer proxyServer.Close()
+	if got := atomic.LoadInt32(&metadataCalls); got != 1 {
+		t.Fatalf("metadata was not fetched during startup: %d", got)
+	}
+	if _, ok, err := serviceinfo.Get(context.Background(), secretStore, "mock-dex-api"); err != nil || !ok {
+		t.Fatalf("startup metadata was not cached: ok=%v err=%v", ok, err)
+	}
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get(upstream.URL + "/userinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(body))
+	}
+	if got := atomic.LoadInt32(&metadataCalls); got != 1 {
+		t.Fatalf("unexpected metadata call count: %d", got)
+	}
+	if _, ok, err := serviceinfo.Get(context.Background(), secretStore, "mock-dex-api"); err != nil || !ok {
+		t.Fatalf("fetched metadata was not cached: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestForwardProxyFetchesMissingServiceMetadataFromOAuthServer(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer dex-access-token" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		if got := r.Header.Get("X-ID-Token"); got != "dex-id-token" {
+			t.Fatalf("unexpected id token header: %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	metadataCalls := int32(0)
+	metadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&metadataCalls, 1)
+		if got := r.Header.Get("Authorization"); got != "Bearer metadata-token" {
+			t.Fatalf("unexpected metadata authorization header: %q", got)
+		}
+		if r.URL.Path != "/api/services/mock-dex-api" {
+			t.Fatalf("unexpected metadata path: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(serviceinfo.Response{
+			ID: "mock-dex-api",
+			Service: config.ServiceConfig{
+				Hosts: []config.ServiceHostRule{{Host: mustParseURL(t, upstream.URL).Hostname()}},
+				OAuth: &config.ServiceOAuthConfig{CredentialID: "mock-dex-api"},
+				Injection: config.ServiceInjectionConfig{Headers: []config.InjectionTemplate{
+					{Name: "X-ID-Token", Value: "{{ .id_token }}"},
+				}},
+			},
+		})
+	}))
+	defer metadataServer.Close()
+
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "access_token", "dex-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "id_token", "dex-id-token"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  oauth:
+    metadataUrl: "%s/api/services/{service}"
+    metadataToken: "metadata-token"
+rules:
+  - name: inject-dex
+    hosts: ["%s"]
+    action: allow
+    services: ["mock-dex-api"]
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem"), metadataServer.URL, mustParseURL(t, upstream.URL).Host), secretStore)
+	defer proxyServer.Close()
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get(upstream.URL + "/userinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(body))
+	}
+	if got := atomic.LoadInt32(&metadataCalls); got != 1 {
+		t.Fatalf("unexpected metadata call count: %d", got)
+	}
+	if _, ok, err := serviceinfo.Get(context.Background(), secretStore, "mock-dex-api"); err != nil || !ok {
+		t.Fatalf("fetched metadata was not cached: ok=%v err=%v", ok, err)
 	}
 }
 

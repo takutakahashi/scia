@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/policy"
 	"github.com/takutakahashi/scia/internal/secrets"
+	"github.com/takutakahashi/scia/internal/serviceinfo"
 )
 
 type Handler struct {
@@ -68,6 +70,14 @@ func NewHandler(store *config.Store, secretStore secrets.Store, approvals *appro
 		caKeyPath:  cfg.Server.MITM.CAKeyPath,
 	}
 	handler.transport.Proxy = handler.backendProxy
+	if hMetadataURL := config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL); hMetadataURL != "" && !strings.Contains(hMetadataURL, "{service}") {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := handler.fetchAndCacheServiceMetadata(ctx, cfg); err != nil {
+			return nil, fmt.Errorf("prefetch service metadata: %w", err)
+		}
+		logger.Info("service metadata prefetched")
+	}
 	return handler, nil
 }
 
@@ -106,7 +116,13 @@ func (h *Handler) serveForward(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credential injection failed", http.StatusBadGateway)
 		return
 	}
-	if err := h.injector.ApplyServices(r.Context(), next, cfg, decision.Services); err != nil {
+	services, err := h.serviceIDsForRequest(r.Context(), cfg, decision.Services, target.Host, target.Path)
+	if err != nil {
+		h.logger.Error("service metadata lookup failed", "error", err)
+		http.Error(w, "service metadata lookup failed", http.StatusBadGateway)
+		return
+	}
+	if err := h.injector.ApplyServices(r.Context(), next, cfg, services); err != nil {
 		h.logger.Error("service injection failed", "error", err)
 		http.Error(w, "service injection failed", http.StatusBadGateway)
 		return
@@ -135,7 +151,13 @@ func (h *Handler) serveConnect(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeDecision(w, r, decision, r.Host) {
 		return
 	}
-	if !mitmHostAllowed(integrationMITMHosts(cfg), r.Host) {
+	mitmForService, err := h.shouldMITMForServices(r.Context(), cfg, decision.Services, r.Host)
+	if err != nil {
+		h.logger.Error("service metadata lookup failed", "error", err)
+		http.Error(w, "service metadata lookup failed", http.StatusBadGateway)
+		return
+	}
+	if !mitmForService && !mitmHostAllowed(integrationMITMHosts(cfg), r.Host) {
 		h.serveTunnelConnect(w, r)
 		return
 	}
@@ -269,7 +291,12 @@ func (h *Handler) roundTripMITMRequest(r *http.Request, connectHost string) *htt
 		h.logger.Error("credential injection failed", "error", err)
 		return textResponse(r, http.StatusBadGateway, "credential injection failed\n")
 	}
-	if err := h.injector.ApplyServices(r.Context(), next, cfg, decision.Services); err != nil {
+	services, err := h.serviceIDsForRequest(r.Context(), cfg, decision.Services, connectHost, r.URL.Path)
+	if err != nil {
+		h.logger.Error("service metadata lookup failed", "error", err)
+		return textResponse(r, http.StatusBadGateway, "service metadata lookup failed\n")
+	}
+	if err := h.injector.ApplyServices(r.Context(), next, cfg, services); err != nil {
 		h.logger.Error("service injection failed", "error", err)
 		return textResponse(r, http.StatusBadGateway, "service injection failed\n")
 	}
@@ -297,7 +324,11 @@ func (h *Handler) handleMITMWebSocket(r *http.Request, connectHost string, cfg *
 	if err := h.injector.Apply(r.Context(), next, cfg, decision.Credentials); err != nil {
 		return fmt.Errorf("credential injection failed: %w", err)
 	}
-	if err := h.injector.ApplyServices(r.Context(), next, cfg, decision.Services); err != nil {
+	services, err := h.serviceIDsForRequest(r.Context(), cfg, decision.Services, connectHost, r.URL.Path)
+	if err != nil {
+		return fmt.Errorf("service metadata lookup failed: %w", err)
+	}
+	if err := h.injector.ApplyServices(r.Context(), next, cfg, services); err != nil {
 		return fmt.Errorf("service injection failed: %w", err)
 	}
 
@@ -384,6 +415,114 @@ func (h *Handler) dialWebSocketUpstream(r *http.Request, connectHost string) (ne
 		return nil, fmt.Errorf("upstream tls handshake: %w", err)
 	}
 	return tlsConn, nil
+}
+
+func (h *Handler) serviceIDsForRequest(ctx context.Context, cfg *config.Config, explicit []string, host, reqPath string) ([]string, error) {
+	if len(explicit) > 0 {
+		return explicit, nil
+	}
+	ids := make([]string, 0)
+	seen := map[string]struct{}{}
+	for _, id := range matchingConfiguredServiceIDs(cfg, host, reqPath) {
+		ids = append(ids, id)
+		seen[id] = struct{}{}
+	}
+	stored, err := serviceinfo.MatchingStoredIDs(ctx, h.secrets, host, reqPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range stored {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 && canFetchServiceMetadataList(cfg) {
+		if err := h.fetchAndCacheServiceMetadata(ctx, cfg); err != nil {
+			return nil, err
+		}
+		stored, err := serviceinfo.MatchingStoredIDs(ctx, h.secrets, host, reqPath)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, stored...)
+	}
+	return ids, nil
+}
+
+func (h *Handler) shouldMITMForServices(ctx context.Context, cfg *config.Config, explicit []string, host string) (bool, error) {
+	if len(explicit) > 0 {
+		return true, nil
+	}
+	for _, service := range cfg.Server.Services {
+		if serviceinfo.HostMatches(service, host) {
+			return true, nil
+		}
+	}
+	ids, err := serviceinfo.ListIDs(ctx, h.secrets)
+	if err != nil {
+		return false, err
+	}
+	for _, id := range ids {
+		service, ok, err := serviceinfo.Get(ctx, h.secrets, id)
+		if err != nil {
+			return false, err
+		}
+		if ok && serviceinfo.HostMatches(service, host) {
+			return true, nil
+		}
+	}
+	if canFetchServiceMetadataList(cfg) {
+		if err := h.fetchAndCacheServiceMetadata(ctx, cfg); err != nil {
+			return false, err
+		}
+		ids, err := serviceinfo.ListIDs(ctx, h.secrets)
+		if err != nil {
+			return false, err
+		}
+		for _, id := range ids {
+			service, ok, err := serviceinfo.Get(ctx, h.secrets, id)
+			if err != nil {
+				return false, err
+			}
+			if ok && serviceinfo.HostMatches(service, host) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (h *Handler) fetchAndCacheServiceMetadata(ctx context.Context, cfg *config.Config) error {
+	services, err := serviceinfo.FetchAll(ctx, h.client, config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL), config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataToken))
+	if err != nil {
+		return err
+	}
+	for _, item := range services {
+		if err := serviceinfo.Put(ctx, h.secrets, item.ID, item.Service); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func canFetchServiceMetadataList(cfg *config.Config) bool {
+	metadataURL := config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL)
+	return metadataURL != "" && !strings.Contains(metadataURL, "{service}")
+}
+
+func matchingConfiguredServiceIDs(cfg *config.Config, host, reqPath string) []string {
+	if cfg == nil || len(cfg.Server.Services) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(cfg.Server.Services))
+	for id, service := range cfg.Server.Services {
+		if _, ok := serviceinfo.HostRule(service, host, reqPath); ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (h *Handler) dialRawTunnelUpstream(ctx context.Context, connectHost string) (net.Conn, *bufio.Reader, error) {
@@ -783,10 +922,30 @@ func (h *Handler) serveAdminPutToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credentialId, key, and token are required", http.StatusBadRequest)
 		return
 	}
+	var serviceToStore *config.ServiceConfig
+	if req.Service != nil {
+		service := *req.Service
+		if service.OAuth != nil && service.OAuth.CredentialID == "" {
+			service.OAuth.CredentialID = req.CredentialID
+		}
+		normalized, err := serviceinfo.Normalize(req.CredentialID, service)
+		if err != nil {
+			http.Error(w, "invalid service metadata: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		serviceToStore = &normalized
+	}
 	if err := h.secrets.Put(r.Context(), req.CredentialID, req.Key, value); err != nil {
 		h.logger.Error("failed to store token", "error", err, "credential_id", req.CredentialID, "key", req.Key)
 		http.Error(w, "failed to store token", http.StatusBadGateway)
 		return
+	}
+	if serviceToStore != nil {
+		if err := serviceinfo.Put(r.Context(), h.secrets, req.CredentialID, *serviceToStore); err != nil {
+			h.logger.Error("failed to store service metadata", "error", err, "credential_id", req.CredentialID)
+			http.Error(w, "failed to store service metadata", http.StatusBadRequest)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -916,12 +1075,13 @@ func (h *Handler) revokeTokenWithBroker(ctx context.Context, cred config.Credent
 }
 
 type adminTokenRequest struct {
-	CredentialID      string `json:"credentialId"`
-	CredentialIDSnake string `json:"credential_id"`
-	Key               string `json:"key"`
-	Token             string `json:"token"`
-	Value             string `json:"value"`
-	User              string `json:"user"`
+	CredentialID      string                `json:"credentialId"`
+	CredentialIDSnake string                `json:"credential_id"`
+	Key               string                `json:"key"`
+	Token             string                `json:"token"`
+	Value             string                `json:"value"`
+	User              string                `json:"user"`
+	Service           *config.ServiceConfig `json:"service"`
 }
 
 type adminCredentialStatusResponse struct {

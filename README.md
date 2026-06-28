@@ -77,6 +77,56 @@ curl -X POST http://localhost:8080/_scia/tokens \
   -d '{"credentialId":"github","key":"access_token","token":"TOKEN_VALUE"}'
 ```
 
+The same request can include provider-derived service metadata. `scia` stores it
+beside the token in the secret store and indexes the service ID. After that, the
+proxy can match requests against the stored service hosts without defining
+`server.services.<id>` or `rules[].services` in proxy config:
+
+```yaml
+server:
+  adminToken: "env:SCIA_ADMIN_TOKEN"
+  secrets:
+    sqlitePath: "data/scia-proxy-secrets.db"
+```
+
+```sh
+curl -X POST http://localhost:8080/_scia/tokens \
+  -H "Authorization: Bearer $SCIA_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "credentialId": "mock-dex-api",
+    "key": "access_token",
+    "token": "TOKEN_VALUE",
+    "service": {
+      "hosts": [{"host": "api.example.com", "authMethod": "bearer"}],
+      "oauth": {
+        "authUrl": "https://issuer.example.com/auth",
+        "tokenUrl": "https://issuer.example.com/token"
+      },
+      "injection": {
+        "headers": [{"name": "Authorization", "value": "Bearer {{ .access_token }}"}]
+      }
+    }
+  }'
+```
+
+If a proxy has neither `server.services.<id>` nor stored service metadata, it can
+fetch the metadata from the OAuth helper server and cache it in its own secret
+store. Configure the proxy with the OAuth helper metadata endpoint:
+
+```yaml
+server:
+  oauth:
+    metadataUrl: "http://localhost:8081/api/services"
+    metadataToken: "env:SCIA_ADMIN_TOKEN"
+```
+
+On startup, the proxy calls `GET /api/services` to cache all configured service
+metadata, then matches requests against the cached hosts. The OAuth helper also
+serves `GET /api/services/{service}` and `GET /api/services/{service}/metadata`
+for rule-based lookups. If `server.adminToken` is set on the OAuth helper,
+callers must send `Authorization: Bearer <token>`.
+
 `POST /_scia/tokens/revoke` revokes a stored token through a configured broker
 and deletes the local secret only after the broker succeeds. Configure the
 credential with `params.revoke_broker_url`; `params.revoke_broker_token` is sent

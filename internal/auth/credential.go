@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/takutakahashi/scia/internal/config"
 	"github.com/takutakahashi/scia/internal/secrets"
+	"github.com/takutakahashi/scia/internal/serviceinfo"
 )
 
 type Injector struct {
@@ -49,11 +49,14 @@ func (i *Injector) Apply(ctx context.Context, r *http.Request, cfg *config.Confi
 
 func (i *Injector) ApplyServices(ctx context.Context, r *http.Request, cfg *config.Config, ids []string) error {
 	for _, id := range ids {
-		service, ok := config.ServiceByID(cfg, id)
+		service, ok, err := i.serviceByID(ctx, cfg, id)
+		if err != nil {
+			return fmt.Errorf("service %q: %w", id, err)
+		}
 		if !ok {
 			return fmt.Errorf("service %q not found", id)
 		}
-		rule, ok := serviceHostRule(service, r.URL.Host, r.URL.Path)
+		rule, ok := serviceinfo.HostRule(service, r.URL.Host, r.URL.Path)
 		if !ok {
 			return fmt.Errorf("service %q does not match %s%s", id, r.URL.Host, r.URL.Path)
 		}
@@ -73,6 +76,27 @@ func (i *Injector) ApplyServices(ctx context.Context, r *http.Request, cfg *conf
 		}
 	}
 	return nil
+}
+
+func (i *Injector) serviceByID(ctx context.Context, cfg *config.Config, id string) (config.ServiceConfig, bool, error) {
+	if service, ok := config.ServiceByID(cfg, id); ok {
+		return service, true, nil
+	}
+	service, ok, err := serviceinfo.Get(ctx, i.secrets, id)
+	if err != nil || !ok {
+		if err != nil || config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL) == "" {
+			return config.ServiceConfig{}, ok, err
+		}
+		fetched, fetchErr := serviceinfo.Fetch(ctx, i.client, config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL), config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataToken), id)
+		if fetchErr != nil {
+			return config.ServiceConfig{}, false, fetchErr
+		}
+		if putErr := serviceinfo.Put(ctx, i.secrets, id, fetched); putErr != nil {
+			return config.ServiceConfig{}, false, putErr
+		}
+		return fetched, true, nil
+	}
+	return service, true, nil
 }
 
 func (i *Injector) applyOne(ctx context.Context, r *http.Request, cfg *config.Config, cred config.CredentialConfig) error {
@@ -974,29 +998,6 @@ func (i *Injector) decodeAndCacheToken(credentialID string, resp *http.Response)
 
 func supportedTokenType(tokenType string) bool {
 	return tokenType == "" || strings.EqualFold(tokenType, "bearer") || strings.EqualFold(tokenType, "user")
-}
-
-func serviceHostRule(service config.ServiceConfig, host, reqPath string) (config.ServiceHostRule, bool) {
-	hostOnly := strings.ToLower(host)
-	if splitHost, _, err := net.SplitHostPort(hostOnly); err == nil {
-		hostOnly = splitHost
-	}
-	for _, rule := range service.Hosts {
-		if rule.Host != "" && strings.ToLower(rule.Host) != hostOnly {
-			continue
-		}
-		if rule.HostSuffix != "" {
-			suffix := strings.ToLower(rule.HostSuffix)
-			if !strings.HasSuffix(hostOnly, suffix) || len(hostOnly) <= len(suffix) {
-				continue
-			}
-		}
-		if rule.PathPrefix != "" && !strings.HasPrefix(reqPath, rule.PathPrefix) {
-			continue
-		}
-		return rule, true
-	}
-	return config.ServiceHostRule{}, false
 }
 
 func applyAuthMethod(r *http.Request, method, token string) error {
