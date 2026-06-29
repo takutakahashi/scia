@@ -32,6 +32,86 @@ func TestHeaderValueFromEnv(t *testing.T) {
 	}
 }
 
+func TestValidateExpandsEnvInAllStringFields(t *testing.T) {
+	t.Setenv("SCIA_TEST_SERVICE_NAME", "Calendar")
+	t.Setenv("SCIA_TEST_HOST", "api.example.com")
+	t.Setenv("SCIA_TEST_CLIENT_ID", "client-id")
+	t.Setenv("SCIA_TEST_CLIENT_SECRET", "client-secret")
+	t.Setenv("SCIA_TEST_SCOPE_NAME", "requested_scope")
+	t.Setenv("SCIA_TEST_SUCCESS_FIELD", "access_token")
+	t.Setenv("SCIA_TEST_AUTH_PARAM", "offline")
+	t.Setenv("SCIA_TEST_HEADER_NAME", "X-API-Key")
+	t.Setenv("SCIA_TEST_HEADER_VALUE", "{{ secret \"api-key\" }}")
+	t.Setenv("SCIA_TEST_RULE_NAME", "calendar-read")
+
+	scopeName := "env:SCIA_TEST_SCOPE_NAME"
+	cfg := &Config{
+		Server: ServerConfig{
+			Services: ServicesConfig{
+				"calendar": {
+					Name: "env:SCIA_TEST_SERVICE_NAME",
+					Hosts: []ServiceHostRule{
+						{Host: "env:SCIA_TEST_HOST"},
+					},
+					OAuth: &ServiceOAuthConfig{
+						ClientID:     "env:SCIA_TEST_CLIENT_ID",
+						ClientSecret: "env:SCIA_TEST_CLIENT_SECRET",
+						AuthURL:      "https://auth.example.com/oauth/authorize",
+						TokenURL:     "https://auth.example.com/oauth/token",
+						ScopeParam: ScopeParamConfig{
+							Name: &scopeName,
+						},
+						AuthorizationParams: map[string]string{
+							"access_type": "env:SCIA_TEST_AUTH_PARAM",
+						},
+						TokenRequest: TokenRequestConfig{
+							SuccessField: "env:SCIA_TEST_SUCCESS_FIELD",
+						},
+					},
+					Injection: ServiceInjectionConfig{
+						Headers: []InjectionTemplate{
+							{Name: "env:SCIA_TEST_HEADER_NAME", Value: "env:SCIA_TEST_HEADER_VALUE"},
+						},
+					},
+				},
+			},
+		},
+		Rules: []RuleConfig{
+			{Name: "env:SCIA_TEST_RULE_NAME", Action: "allow", Services: []string{"calendar"}},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	service := cfg.Server.Services["calendar"]
+	if service.Name != "Calendar" {
+		t.Fatalf("service name was not expanded: %q", service.Name)
+	}
+	if service.Hosts[0].Host != "api.example.com" {
+		t.Fatalf("host was not expanded: %q", service.Hosts[0].Host)
+	}
+	if service.OAuth.ClientID != "client-id" || service.OAuth.ClientSecret != "client-secret" {
+		t.Fatalf("oauth client config was not expanded: %#v", service.OAuth)
+	}
+	if service.OAuth.ScopeParamName() != "requested_scope" {
+		t.Fatalf("scope param name was not expanded: %q", service.OAuth.ScopeParamName())
+	}
+	if service.OAuth.AuthorizationParams["access_type"] != "offline" {
+		t.Fatalf("authorization param was not expanded: %q", service.OAuth.AuthorizationParams["access_type"])
+	}
+	if service.OAuth.TokenRequest.SuccessField != "access_token" {
+		t.Fatalf("token request field was not expanded: %q", service.OAuth.TokenRequest.SuccessField)
+	}
+	if service.Injection.Headers[0].Name != "X-API-Key" || service.Injection.Headers[0].Value != "{{ secret \"api-key\" }}" {
+		t.Fatalf("injection template was not expanded: %#v", service.Injection.Headers[0])
+	}
+	if cfg.Rules[0].Name != "calendar-read" {
+		t.Fatalf("rule name was not expanded: %q", cfg.Rules[0].Name)
+	}
+}
+
 func TestValidateDefaultsServerModeToProxy(t *testing.T) {
 	cfg := &Config{}
 

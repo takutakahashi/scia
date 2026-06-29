@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -328,6 +329,8 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 }
 
 func (c *Config) Validate() error {
+	c.ExpandEnv()
+
 	if c.Server.Mode == "" {
 		c.Server.Mode = "proxy"
 	}
@@ -782,6 +785,54 @@ func HeaderValueFromEnv(value string) string {
 		return os.Getenv(strings.TrimPrefix(value, "env:"))
 	}
 	return value
+}
+
+func (c *Config) ExpandEnv() {
+	if c == nil {
+		return
+	}
+	expandEnvStrings(reflect.ValueOf(c))
+}
+
+func expandEnvStrings(value reflect.Value) {
+	if !value.IsValid() {
+		return
+	}
+	switch value.Kind() {
+	case reflect.Pointer:
+		if value.IsNil() {
+			return
+		}
+		expandEnvStrings(value.Elem())
+	case reflect.Interface:
+		if value.IsNil() {
+			return
+		}
+		expandEnvStrings(value.Elem())
+	case reflect.Struct:
+		for i := 0; i < value.NumField(); i++ {
+			field := value.Field(i)
+			if field.CanSet() {
+				expandEnvStrings(field)
+			}
+		}
+	case reflect.Slice:
+		for i := 0; i < value.Len(); i++ {
+			expandEnvStrings(value.Index(i))
+		}
+	case reflect.Map:
+		for _, key := range value.MapKeys() {
+			item := value.MapIndex(key)
+			next := reflect.New(item.Type()).Elem()
+			next.Set(item)
+			expandEnvStrings(next)
+			value.SetMapIndex(key, next)
+		}
+	case reflect.String:
+		if value.CanSet() {
+			value.SetString(HeaderValueFromEnv(value.String()))
+		}
+	}
 }
 
 func (c *Config) UserSecretNames() map[string]string {
