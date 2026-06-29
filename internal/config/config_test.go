@@ -37,6 +37,8 @@ func TestValidateExpandsEnvInAllStringFields(t *testing.T) {
 	t.Setenv("SCIA_TEST_HOST", "api.example.com")
 	t.Setenv("SCIA_TEST_CLIENT_ID", "client-id")
 	t.Setenv("SCIA_TEST_CLIENT_SECRET", "client-secret")
+	t.Setenv("SCIA_TEST_AUTH_URL", "https://auth.example.com/oauth/authorize")
+	t.Setenv("SCIA_TEST_TOKEN_URL", "https://auth.example.com/oauth/token")
 	t.Setenv("SCIA_TEST_SCOPE_NAME", "requested_scope")
 	t.Setenv("SCIA_TEST_SUCCESS_FIELD", "access_token")
 	t.Setenv("SCIA_TEST_AUTH_PARAM", "offline")
@@ -56,8 +58,8 @@ func TestValidateExpandsEnvInAllStringFields(t *testing.T) {
 					OAuth: &ServiceOAuthConfig{
 						ClientID:     "env:SCIA_TEST_CLIENT_ID",
 						ClientSecret: "env:SCIA_TEST_CLIENT_SECRET",
-						AuthURL:      "https://auth.example.com/oauth/authorize",
-						TokenURL:     "https://auth.example.com/oauth/token",
+						AuthURL:      "env:SCIA_TEST_AUTH_URL",
+						TokenURL:     "env:SCIA_TEST_TOKEN_URL",
 						ScopeParam: ScopeParamConfig{
 							Name: &scopeName,
 						},
@@ -94,6 +96,9 @@ func TestValidateExpandsEnvInAllStringFields(t *testing.T) {
 	}
 	if service.OAuth.ClientID != "client-id" || service.OAuth.ClientSecret != "client-secret" {
 		t.Fatalf("oauth client config was not expanded: %#v", service.OAuth)
+	}
+	if service.OAuth.AuthURL != "https://auth.example.com/oauth/authorize" || service.OAuth.TokenURL != "https://auth.example.com/oauth/token" {
+		t.Fatalf("oauth URL config was not expanded: %#v", service.OAuth)
 	}
 	if service.OAuth.ScopeParamName() != "requested_scope" {
 		t.Fatalf("scope param name was not expanded: %q", service.OAuth.ScopeParamName())
