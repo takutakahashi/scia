@@ -563,22 +563,38 @@ func (h *Handler) dialBackendProxyTunnel(ctx context.Context, rawProxy, connectH
 		}
 		conn = tlsConn
 	}
-	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", connectHost, connectHost); err != nil {
+	connectReq := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: connectHost},
+		Host:   connectHost,
+		Header: make(http.Header),
+	}
+	setProxyAuthorization(connectReq, proxyURL)
+	if err := connectReq.Write(conn); err != nil {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("write backend proxy connect: %w", err)
 	}
 	reader := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
+	resp, err := http.ReadResponse(reader, connectReq)
 	if err != nil {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("read backend proxy connect response: %w", err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("backend proxy connect failed: %s", resp.Status)
 	}
 	return conn, reader, nil
+}
+
+func setProxyAuthorization(req *http.Request, proxyURL *url.URL) {
+	if proxyURL == nil || proxyURL.User == nil {
+		return
+	}
+	password, _ := proxyURL.User.Password()
+	credential := proxyURL.User.Username() + ":" + password
+	req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(credential)))
 }
 
 type bufferedConn struct {
