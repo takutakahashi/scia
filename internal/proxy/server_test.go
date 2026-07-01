@@ -328,12 +328,17 @@ func TestForwardProxyUsesConfiguredBackendProxy(t *testing.T) {
 		if got := r.URL.Host; got != "api.example.test" {
 			t.Fatalf("unexpected target host: %q", got)
 		}
+		if got := r.Header.Get("Proxy-Authorization"); got != "Basic dXNlcjpzZWNyZXQ=" {
+			t.Fatalf("unexpected proxy authorization header: %q", got)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer backend-token" {
 			t.Fatalf("unexpected authorization header: %q", got)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
+	backendURL := mustParseURL(t, backend.URL)
+	backendURL.User = url.UserPassword("user", "secret")
 
 	proxyServer := newTestProxy(t, fmt.Sprintf(`
 server:
@@ -353,7 +358,7 @@ rules:
     paths: ["/v1/items"]
     action: allow
     credentials: ["backend-token"]
-`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem"), backend.URL))
+`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem"), backendURL.String()))
 	defer proxyServer.Close()
 
 	client := proxiedClient(t, proxyServer.URL)
@@ -405,6 +410,9 @@ func TestConnectTunnelsNonIntegrationHostsThroughBackendProxy(t *testing.T) {
 		if r.Method != http.MethodConnect {
 			t.Fatalf("backend expected CONNECT, got %s", r.Method)
 		}
+		if got := r.Header.Get("Proxy-Authorization"); got != "Basic dXNlcjpzZWNyZXQ=" {
+			t.Fatalf("unexpected proxy authorization header: %q", got)
+		}
 		backendCalled.Store(true)
 		upstreamConn, err := net.Dial("tcp", r.Host)
 		if err != nil {
@@ -427,6 +435,8 @@ func TestConnectTunnelsNonIntegrationHostsThroughBackendProxy(t *testing.T) {
 		}()
 	}))
 	defer backend.Close()
+	backendURL := mustParseURL(t, backend.URL)
+	backendURL.User = url.UserPassword("user", "secret")
 
 	targetHost := upstreamListener.Addr().String()
 	proxyServer := newTestProxy(t, fmt.Sprintf(`
@@ -443,7 +453,7 @@ rules:
   - name: allow-target
     hosts: ["%s"]
     action: allow
-`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem"), backend.URL, targetHost))
+`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem"), backendURL.String(), targetHost))
 	defer proxyServer.Close()
 
 	proxyURL := mustParseURL(t, proxyServer.URL)
