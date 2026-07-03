@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -549,6 +550,16 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("rule %q references unknown credential %q", rule.Name, credentialID)
 			}
 		}
+		if len(rule.Credentials) > 0 {
+			if len(rule.Hosts) == 0 {
+				return fmt.Errorf("rule %q with credentials requires hosts", rule.Name)
+			}
+			for _, host := range rule.Hosts {
+				if strings.TrimSpace(host) == "" || strings.TrimSpace(host) == "*" {
+					return fmt.Errorf("rule %q with credentials must not use wildcard host %q", rule.Name, host)
+				}
+			}
+		}
 		for _, serviceID := range rule.Services {
 			if serviceID == "" || !validServiceID(serviceID) {
 				return fmt.Errorf("rule %q references invalid service %q", rule.Name, serviceID)
@@ -771,13 +782,23 @@ func TargetURL(r *http.Request) (*url.URL, error) {
 		return nil, errors.New("missing request URL")
 	}
 	if r.URL.IsAbs() {
-		return r.URL, nil
+		target := *r.URL
+		target.Path = NormalizePath(target.Path)
+		target.RawPath = ""
+		return &target, nil
 	}
 	if r.Host == "" {
 		return nil, errors.New("missing host")
 	}
 	scheme := "http"
-	return &url.URL{Scheme: scheme, Host: r.Host, Path: r.URL.Path, RawQuery: r.URL.RawQuery}, nil
+	return &url.URL{Scheme: scheme, Host: r.Host, Path: NormalizePath(r.URL.Path), RawQuery: r.URL.RawQuery}, nil
+}
+
+func NormalizePath(value string) string {
+	if value == "" {
+		return "/"
+	}
+	return path.Clean("/" + strings.TrimPrefix(value, "/"))
 }
 
 func HeaderValueFromEnv(value string) string {

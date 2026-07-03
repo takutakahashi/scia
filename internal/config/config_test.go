@@ -21,6 +21,34 @@ func TestValidateRejectsUnknownCredentialReference(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsCredentialRuleWithoutHosts(t *testing.T) {
+	cfg := &Config{
+		Credentials: []CredentialConfig{{ID: "token", Type: "bearer", Value: "secret"}},
+		Rules: []RuleConfig{
+			{Name: "inject-all", Action: "allow", Credentials: []string{"token"}},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateRejectsCredentialRuleWildcardHosts(t *testing.T) {
+	cfg := &Config{
+		Credentials: []CredentialConfig{{ID: "token", Type: "bearer", Value: "secret"}},
+		Rules: []RuleConfig{
+			{Name: "inject-all", Hosts: []string{"*"}, Action: "allow", Credentials: []string{"token"}},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
 func TestHeaderValueFromEnv(t *testing.T) {
 	t.Setenv("SCIA_TEST_SECRET", "secret-value")
 

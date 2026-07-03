@@ -17,8 +17,12 @@ type Decision struct {
 }
 
 func Evaluate(cfg *config.Config, r *http.Request, targetHost string) Decision {
+	reqPath := "/"
+	if r.URL != nil {
+		reqPath = config.NormalizePath(r.URL.Path)
+	}
 	for _, rule := range cfg.Rules {
-		if ruleMatches(rule, r.Method, targetHost, r.URL.Path) {
+		if ruleMatches(rule, r.Method, targetHost, reqPath) {
 			return Decision{Rule: rule, Action: rule.Action, Credentials: rule.Credentials, Services: rule.Services}
 		}
 	}
@@ -29,7 +33,7 @@ func ruleMatches(rule config.RuleConfig, method, host, reqPath string) bool {
 	if len(rule.Methods) > 0 && !containsFold(rule.Methods, method) {
 		return false
 	}
-	if len(rule.Hosts) > 0 && !matchHostAny(rule.Hosts, host) {
+	if len(rule.Hosts) > 0 && !MatchHostAny(rule.Hosts, host) {
 		return false
 	}
 	if len(rule.Paths) > 0 && !matchAny(rule.Paths, reqPath) {
@@ -56,7 +60,7 @@ func matchAny(patterns []string, value string) bool {
 	return false
 }
 
-func matchHostAny(patterns []string, host string) bool {
+func MatchHostAny(patterns []string, host string) bool {
 	normalized := strings.ToLower(host)
 	hostOnly := normalized
 	if splitHost, _, err := net.SplitHostPort(normalized); err == nil {
