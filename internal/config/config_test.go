@@ -3,6 +3,8 @@ package config
 import (
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,6 +59,36 @@ func TestHeaderValueFromEnv(t *testing.T) {
 	}
 	if got := HeaderValueFromEnv("literal"); got != "literal" {
 		t.Fatalf("unexpected literal value: %q", got)
+	}
+}
+
+func TestAdminTokenRequiresNonEmptyResolvedValue(t *testing.T) {
+	t.Setenv("SCIA_EMPTY_ADMIN_TOKEN", "")
+	t.Setenv("SCIA_ADMIN_TOKEN", "secret-token")
+
+	if token, ok := AdminToken(""); ok || token != "" {
+		t.Fatalf("unexpected empty literal token: token=%q ok=%v", token, ok)
+	}
+	if token, ok := AdminToken("env:SCIA_EMPTY_ADMIN_TOKEN"); ok || token != "" {
+		t.Fatalf("unexpected empty env token: token=%q ok=%v", token, ok)
+	}
+	if token, ok := AdminToken("env:SCIA_ADMIN_TOKEN"); !ok || token != "secret-token" {
+		t.Fatalf("unexpected env token: token=%q ok=%v", token, ok)
+	}
+}
+
+func TestIsAuthorizedBearerToken(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer secret-token")
+
+	if !IsAuthorizedBearerToken(req, "secret-token") {
+		t.Fatal("expected bearer token to authorize")
+	}
+	if IsAuthorizedBearerToken(req, "") {
+		t.Fatal("empty admin token must not authorize")
+	}
+	if IsAuthorizedBearerToken(req, "other-token") {
+		t.Fatal("wrong bearer token authorized")
 	}
 }
 

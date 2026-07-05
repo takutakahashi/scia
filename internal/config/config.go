@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -806,6 +807,19 @@ func HeaderValueFromEnv(value string) string {
 		return os.Getenv(strings.TrimPrefix(value, "env:"))
 	}
 	return value
+}
+
+func AdminToken(value string) (string, bool) {
+	token := HeaderValueFromEnv(value)
+	return token, token != ""
+}
+
+func IsAuthorizedBearerToken(r *http.Request, token string) bool {
+	if token == "" {
+		return false
+	}
+	expected := "Bearer " + token
+	return subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(expected)) == 1
 }
 
 func (c *Config) ExpandEnv() {
