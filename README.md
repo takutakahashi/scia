@@ -41,7 +41,7 @@ String config values with the `env:` prefix are expanded from environment variab
 ## Run locally
 
 ```sh
-go run ./cmd/scia -config configs/example.yaml -listen :8080
+SCIA_ADMIN_TOKEN="$(openssl rand -hex 32)" go run ./cmd/scia -config configs/example.yaml
 ```
 
 Configure an HTTP client to use `http://127.0.0.1:8080` as its proxy.
@@ -57,7 +57,7 @@ Admin endpoints:
 - `POST /_scia/approvals/{id}/approve`
 - `POST /_scia/approvals/{id}/deny`
 
-If `server.adminToken` is set, admin requests must include `Authorization: Bearer <token>`. Config values with the `env:` prefix are read from environment variables.
+Admin endpoints are only served when `server.adminToken` resolves to a non-empty value. Admin requests must include `Authorization: Bearer <token>`. Config values with the `env:` prefix are read from environment variables; if the referenced environment variable is unset or empty, admin endpoints return `404 Not Found`.
 
 `GET /_scia/credentials/status` returns configured credentials with an
 `authenticated` flag. Token values are not returned:
@@ -84,6 +84,7 @@ proxy can match requests against the stored service hosts without defining
 
 ```yaml
 server:
+  listen: "127.0.0.1:8080"
   adminToken: "env:SCIA_ADMIN_TOKEN"
   secrets:
     sqlitePath: "data/scia-proxy-secrets.db"
@@ -124,8 +125,9 @@ server:
 On startup, the proxy calls `GET /api/services` to cache all configured service
 metadata, then matches requests against the cached hosts. The OAuth helper also
 serves `GET /api/services/{service}` and `GET /api/services/{service}/metadata`
-for rule-based lookups. If `server.adminToken` is set on the OAuth helper,
-callers must send `Authorization: Bearer <token>`.
+for rule-based lookups. The OAuth helper only serves these endpoints when
+`server.adminToken` resolves to a non-empty value; callers must send
+`Authorization: Bearer <token>`.
 
 `POST /_scia/tokens/revoke` revokes a stored token through a configured broker
 and deletes the local secret only after the broker succeeds. Configure the

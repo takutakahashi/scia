@@ -1222,12 +1222,39 @@ server:
 	}
 }
 
+func TestAdminEndpointsDisabledWithoutResolvedAdminToken(t *testing.T) {
+	t.Setenv("SCIA_EMPTY_ADMIN_TOKEN", "")
+	dir := t.TempDir()
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+server:
+  adminToken: env:SCIA_EMPTY_ADMIN_TOKEN
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")))
+	defer proxyServer.Close()
+
+	req, err := http.NewRequest(http.MethodGet, proxyServer.URL+"/_scia/credentials/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer any-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+}
+
 func TestAdminPutTokenValidatesRequest(t *testing.T) {
 	secretStore := newRecordingSecretStore()
 	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
 	defer proxyServer.Close()
 
-	resp, err := http.Post(proxyServer.URL+"/_scia/tokens", "application/json", strings.NewReader(`{"credentialId":"github","token":"github-token"}`))
+	resp, err := adminPost(proxyServer.URL+"/_scia/tokens", "application/json", strings.NewReader(`{"credentialId":"github","token":"github-token"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1259,7 +1286,7 @@ credentials:
 `, secretStore)
 	defer proxyServer.Close()
 
-	resp, err := http.Get(proxyServer.URL + "/_scia/credentials/status")
+	resp, err := adminGet(proxyServer.URL + "/_scia/credentials/status")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1292,6 +1319,7 @@ func TestAdminCredentialStatusUsesKubernetesUserStorageKeys(t *testing.T) {
 	dir := t.TempDir()
 	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
 server:
+  adminToken: test-admin-token
   mitm:
     caCertPath: "%s"
     caKeyPath: "%s"
@@ -1308,7 +1336,7 @@ credentials:
 `, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")), secretStore)
 	defer proxyServer.Close()
 
-	resp, err := http.Get(proxyServer.URL + "/_scia/credentials/status")
+	resp, err := adminGet(proxyServer.URL + "/_scia/credentials/status")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1341,7 +1369,7 @@ func TestAdminCredentialStatusReportsSecretStoredServiceMetadata(t *testing.T) {
 	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
 	defer proxyServer.Close()
 
-	resp, err := http.Get(proxyServer.URL + "/_scia/credentials/status")
+	resp, err := adminGet(proxyServer.URL + "/_scia/credentials/status")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1384,6 +1412,7 @@ func TestAdminCredentialStatusReportsPrefetchedServiceMetadata(t *testing.T) {
 	dir := t.TempDir()
 	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
 server:
+  adminToken: test-admin-token
   mitm:
     caCertPath: "%s"
     caKeyPath: "%s"
@@ -1392,7 +1421,7 @@ server:
 `, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem"), metadataServer.URL), secretStore)
 	defer proxyServer.Close()
 
-	resp, err := http.Get(proxyServer.URL + "/_scia/credentials/status")
+	resp, err := adminGet(proxyServer.URL + "/_scia/credentials/status")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1455,7 +1484,7 @@ credentials:
 `, broker.URL), secretStore)
 	defer proxyServer.Close()
 
-	resp, err := http.Post(proxyServer.URL+"/_scia/tokens/revoke", "application/json", strings.NewReader(`{"credentialId":"github","key":"access_token"}`))
+	resp, err := adminPost(proxyServer.URL+"/_scia/tokens/revoke", "application/json", strings.NewReader(`{"credentialId":"github","key":"access_token"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1484,7 +1513,7 @@ credentials:
 `, secretStore)
 	defer proxyServer.Close()
 
-	resp, err := http.Post(proxyServer.URL+"/_scia/tokens/revoke", "application/json", strings.NewReader(`{"credentialId":"github","key":"access_token"}`))
+	resp, err := adminPost(proxyServer.URL+"/_scia/tokens/revoke", "application/json", strings.NewReader(`{"credentialId":"github","key":"access_token"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1516,7 +1545,7 @@ credentials:
 `, broker.URL), secretStore)
 	defer proxyServer.Close()
 
-	resp, err := http.Post(proxyServer.URL+"/_scia/tokens/revoke", "application/json", strings.NewReader(`{"credentialId":"github","key":"access_token"}`))
+	resp, err := adminPost(proxyServer.URL+"/_scia/tokens/revoke", "application/json", strings.NewReader(`{"credentialId":"github","key":"access_token"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1550,6 +1579,7 @@ func newTestProxyWithPathAndSecretStore(t *testing.T, cfg string, secretStore se
 	if !strings.Contains(cfg, "caCertPath:") {
 		cfg = fmt.Sprintf(`
 server:
+  adminToken: test-admin-token
   mitm:
     caCertPath: "%s"
     caKeyPath: "%s"
@@ -1569,6 +1599,25 @@ server:
 		t.Fatal(err)
 	}
 	return httptest.NewServer(handler), path
+}
+
+func adminGet(url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	return http.DefaultClient.Do(req)
+}
+
+func adminPost(url, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	req.Header.Set("Content-Type", contentType)
+	return http.DefaultClient.Do(req)
 }
 
 func loadTestConfig(t *testing.T, path string) *config.Config {

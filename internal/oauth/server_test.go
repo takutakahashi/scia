@@ -153,6 +153,7 @@ func TestFrontendIntegrationsRequiresGet(t *testing.T) {
 func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{
+			AdminToken: "admin-token",
 			Services: config.ServicesConfig{
 				"mock-dex-api": {
 					Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
@@ -171,6 +172,7 @@ func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 	})
 	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
 	req := httptest.NewRequest(http.MethodGet, "/api/services/mock-dex-api", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
 	rec := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rec, req)
@@ -202,6 +204,7 @@ func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 func TestServiceMetadataListReturnsConfiguredServices(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{
+			AdminToken: "admin-token",
 			Services: config.ServicesConfig{
 				"mock-dex-api": {
 					Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
@@ -220,6 +223,7 @@ func TestServiceMetadataListReturnsConfiguredServices(t *testing.T) {
 	})
 	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
 	req := httptest.NewRequest(http.MethodGet, "/api/services", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
 	rec := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rec, req)
@@ -275,6 +279,36 @@ func TestServiceMetadataRequiresAdminTokenWhenConfigured(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status with token: %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServiceMetadataDisabledWithoutResolvedAdminToken(t *testing.T) {
+	t.Setenv("SCIA_EMPTY_ADMIN_TOKEN", "")
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			AdminToken: "env:SCIA_EMPTY_ADMIN_TOKEN",
+			Services: config.ServicesConfig{
+				"mock-dex-api": {
+					Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
+					OAuth: &config.ServiceOAuthConfig{
+						ClientID:     "client-id",
+						ClientSecret: "client-secret",
+						AuthURL:      "http://dex.example/dex/auth",
+						TokenURL:     "http://dex.example/dex/token",
+					},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/api/services/mock-dex-api/metadata", nil)
+	req.Header.Set("Authorization", "Bearer any-token")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

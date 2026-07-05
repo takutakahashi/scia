@@ -833,8 +833,12 @@ func (h *Handler) denialResponse(r *http.Request, decision policy.Decision, targ
 
 func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 	cfg := h.store.Get()
-	adminToken := config.HeaderValueFromEnv(cfg.Server.AdminToken)
-	if adminToken != "" && r.Header.Get("Authorization") != "Bearer "+adminToken {
+	adminToken, ok := config.AdminToken(cfg.Server.AdminToken)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if !config.IsAuthorizedBearerToken(r, adminToken) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
