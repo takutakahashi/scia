@@ -104,13 +104,20 @@ func (h *Handler) serveForward(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "proxy self-target denied", http.StatusLoopDetected)
 		return
 	}
-	decision := policy.Evaluate(cfg, r, target.Host)
+	policyReq := r.Clone(r.Context())
+	policyReq.URL = target
+	decision := policy.Evaluate(cfg, policyReq, target.Host)
 	if !h.authorizeDecision(w, r, decision, target.String()) {
 		return
 	}
 
 	next := config.CloneRequestWithoutProxyHeaders(r)
 	next.URL = target
+	if err := validateCredentialInjectionTarget(decision, target.Host); err != nil {
+		h.logger.Error("credential injection target rejected", "error", err)
+		http.Error(w, "credential injection target rejected", http.StatusBadGateway)
+		return
+	}
 	if err := h.injector.Apply(r.Context(), next, cfg, decision.Credentials); err != nil {
 		h.logger.Error("credential injection failed", "error", err)
 		http.Error(w, "credential injection failed", http.StatusBadGateway)
@@ -268,10 +275,12 @@ func (h *Handler) roundTripMITMRequest(r *http.Request, connectHost string) *htt
 	target := &url.URL{
 		Scheme:   "https",
 		Host:     connectHost,
-		Path:     r.URL.Path,
+		Path:     config.NormalizePath(r.URL.Path),
 		RawQuery: r.URL.RawQuery,
 	}
-	decision := policy.Evaluate(cfg, r, connectHost)
+	policyReq := r.Clone(r.Context())
+	policyReq.URL = target
+	decision := policy.Evaluate(cfg, policyReq, connectHost)
 	if denial := h.denialResponse(r, decision, target.String()); denial != nil {
 		return denial
 	}
@@ -287,11 +296,15 @@ func (h *Handler) roundTripMITMRequest(r *http.Request, connectHost string) *htt
 	next := config.CloneRequestWithoutProxyHeaders(r)
 	next.URL = target
 	next.Host = connectHost
+	if err := validateCredentialInjectionTarget(decision, connectHost); err != nil {
+		h.logger.Error("credential injection target rejected", "error", err)
+		return textResponse(r, http.StatusBadGateway, "credential injection target rejected\n")
+	}
 	if err := h.injector.Apply(r.Context(), next, cfg, decision.Credentials); err != nil {
 		h.logger.Error("credential injection failed", "error", err)
 		return textResponse(r, http.StatusBadGateway, "credential injection failed\n")
 	}
-	services, err := h.serviceIDsForRequest(r.Context(), cfg, decision.Services, connectHost, r.URL.Path)
+	services, err := h.serviceIDsForRequest(r.Context(), cfg, decision.Services, connectHost, target.Path)
 	if err != nil {
 		h.logger.Error("service metadata lookup failed", "error", err)
 		return textResponse(r, http.StatusBadGateway, "service metadata lookup failed\n")
@@ -319,12 +332,15 @@ func (h *Handler) handleMITMWebSocket(r *http.Request, connectHost string, cfg *
 		return errors.New("missing mitm client reader")
 	}
 	next := cloneWebSocketRequest(r)
-	next.URL = &url.URL{Scheme: "https", Host: connectHost, Path: r.URL.Path, RawQuery: r.URL.RawQuery}
+	next.URL = &url.URL{Scheme: "https", Host: connectHost, Path: config.NormalizePath(r.URL.Path), RawQuery: r.URL.RawQuery}
 	next.Host = connectHost
+	if err := validateCredentialInjectionTarget(decision, connectHost); err != nil {
+		return fmt.Errorf("credential injection target rejected: %w", err)
+	}
 	if err := h.injector.Apply(r.Context(), next, cfg, decision.Credentials); err != nil {
 		return fmt.Errorf("credential injection failed: %w", err)
 	}
-	services, err := h.serviceIDsForRequest(r.Context(), cfg, decision.Services, connectHost, r.URL.Path)
+	services, err := h.serviceIDsForRequest(r.Context(), cfg, decision.Services, connectHost, next.URL.Path)
 	if err != nil {
 		return fmt.Errorf("service metadata lookup failed: %w", err)
 	}
@@ -648,14 +664,40 @@ func isProxySelfTarget(listenAddr, targetHost, scheme string) bool {
 	if targetPort != listenPort {
 		return false
 	}
-	host := strings.ToLower(stripPort(targetHost))
-	return host == "" ||
-		host == "localhost" ||
-		host == "127.0.0.1" ||
-		host == "::1" ||
-		host == "::" ||
-		host == "0.0.0.0" ||
-		host == "[::]"
+	host := normalizeSelfTargetHost(stripPort(targetHost))
+	if host == "" || host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() {
+		return true
+	}
+	if ipv4 := ip.To4(); ipv4 != nil && ipv4[0] == 127 {
+		return true
+	}
+	return false
+}
+
+func validateCredentialInjectionTarget(decision policy.Decision, targetHost string) error {
+	if len(decision.Credentials) == 0 {
+		return nil
+	}
+	if len(decision.Rule.Hosts) == 0 {
+		return fmt.Errorf("rule %q has credentials without hosts", decision.Rule.Name)
+	}
+	if !policy.MatchHostAny(decision.Rule.Hosts, targetHost) {
+		return fmt.Errorf("rule %q credentials do not match target host %q", decision.Rule.Name, targetHost)
+	}
+	return nil
+}
+
+func normalizeSelfTargetHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimSuffix(host, ".")
+	return host
 }
 
 func defaultListenAddr(listenAddr string) string {

@@ -94,6 +94,52 @@ rules:
 	}
 }
 
+func TestForwardProxyNormalizesPathForPolicyAndUpstream(t *testing.T) {
+	var gotPath atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath.Store(r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+rules:
+  - name: deny-admin
+    hosts: ["%s"]
+    methods: ["GET"]
+    paths: ["/admin/*"]
+    action: deny
+  - name: allow-all
+    action: allow
+`, mustParseURL(t, upstream.URL).Host))
+	defer proxyServer.Close()
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get(upstream.URL + "/public/../admin/secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if got := gotPath.Load(); got != nil {
+		t.Fatalf("upstream should not be called, got path %q", got)
+	}
+
+	resp, err = client.Get(upstream.URL + "/public/../v1/items")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if got := gotPath.Load(); got != "/v1/items" {
+		t.Fatalf("unexpected upstream path: %q", got)
+	}
+}
+
 func TestForwardProxyRejectsSelfTarget(t *testing.T) {
 	proxyServer := newTestProxy(t, fmt.Sprintf(`
 server:
@@ -106,6 +152,27 @@ server:
 
 	client := proxiedClient(t, proxyServer.URL)
 	resp, err := client.Get("http://127.0.0.1:18081/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusLoopDetected {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+}
+
+func TestForwardProxyRejectsLoopbackAliasSelfTarget(t *testing.T) {
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+server:
+  listen: "0.0.0.0:18081"
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(t.TempDir(), "ca.pem"), filepath.Join(t.TempDir(), "ca-key.pem")))
+	defer proxyServer.Close()
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get("http://127.0.0.2:18081/")
 	if err != nil {
 		t.Fatal(err)
 	}
