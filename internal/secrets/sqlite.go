@@ -23,13 +23,28 @@ func NewSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
 	store := &SQLiteStore{db: db}
+	if err := store.configure(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := store.init(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	_ = os.Chmod(path, 0o600)
 	return store, nil
+}
+
+func (s *SQLiteStore) configure(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `PRAGMA busy_timeout = 5000;`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode = WAL;`); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *SQLiteStore) init(ctx context.Context) error {

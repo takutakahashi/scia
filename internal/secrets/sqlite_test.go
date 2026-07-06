@@ -28,3 +28,32 @@ func TestSQLiteStorePutGet(t *testing.T) {
 		t.Fatalf("unexpected secret: %q", got)
 	}
 }
+
+func TestSQLiteStoreConfiguresLockHandling(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(ctx, filepath.Join(t.TempDir(), "secrets.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if got := store.db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("unexpected max open connections: %d", got)
+	}
+
+	var busyTimeout int
+	if err := store.db.QueryRowContext(ctx, `PRAGMA busy_timeout;`).Scan(&busyTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if busyTimeout != 5000 {
+		t.Fatalf("unexpected busy timeout: %d", busyTimeout)
+	}
+
+	var journalMode string
+	if err := store.db.QueryRowContext(ctx, `PRAGMA journal_mode;`).Scan(&journalMode); err != nil {
+		t.Fatal(err)
+	}
+	if journalMode != "wal" {
+		t.Fatalf("unexpected journal mode: %q", journalMode)
+	}
+}
