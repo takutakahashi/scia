@@ -215,10 +215,12 @@ func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 				"mock-dex-api": {
 					Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
 					OAuth: &config.ServiceOAuthConfig{
-						ClientID:     "client-id",
-						ClientSecret: "client-secret",
-						AuthURL:      "http://dex.example/dex/auth",
-						TokenURL:     "http://dex.example/dex/token",
+						ClientID:          "client-id",
+						ClientIDSecretRef: "env:DEX_CLIENT_ID",
+						ClientSecret:      "client-secret",
+						ClientSecretRef:   "env:DEX_CLIENT_SECRET",
+						AuthURL:           "http://dex.example/dex/auth",
+						TokenURL:          "http://dex.example/dex/token",
 					},
 					Injection: config.ServiceInjectionConfig{Headers: []config.InjectionTemplate{
 						{Name: "X-ID-Token", Value: "{{ .id_token }}"},
@@ -250,7 +252,7 @@ func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 	if body.Service.OAuth == nil || body.Service.OAuth.CredentialID != "mock-dex-api" {
 		t.Fatalf("credential id was not defaulted: %#v", body.Service.OAuth)
 	}
-	if body.Service.OAuth.ClientID != "" || body.Service.OAuth.ClientSecret != "" {
+	if body.Service.OAuth.ClientID != "" || body.Service.OAuth.ClientIDSecretRef != "" || body.Service.OAuth.ClientSecret != "" || body.Service.OAuth.ClientSecretRef != "" {
 		t.Fatalf("oauth client values leaked in metadata response: %#v", body.Service.OAuth)
 	}
 	if body.Service.OAuth.RevokeURL != "http://example.com/oauth/mock-dex-api/revoke?credential=mock-dex-api" {
@@ -272,10 +274,12 @@ func TestServiceMetadataListReturnsConfiguredServices(t *testing.T) {
 				"mock-dex-api": {
 					Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
 					OAuth: &config.ServiceOAuthConfig{
-						ClientID:     "client-id",
-						ClientSecret: "client-secret",
-						AuthURL:      "http://dex.example/dex/auth",
-						TokenURL:     "http://dex.example/dex/token",
+						ClientID:          "client-id",
+						ClientIDSecretRef: "env:DEX_CLIENT_ID",
+						ClientSecret:      "client-secret",
+						ClientSecretRef:   "env:DEX_CLIENT_SECRET",
+						AuthURL:           "http://dex.example/dex/auth",
+						TokenURL:          "http://dex.example/dex/token",
 					},
 				},
 				"other-api": {
@@ -307,7 +311,7 @@ func TestServiceMetadataListReturnsConfiguredServices(t *testing.T) {
 	if body.Services[0].Service.OAuth == nil || body.Services[0].Service.OAuth.CredentialID != "mock-dex-api" {
 		t.Fatalf("credential id was not defaulted: %#v", body.Services[0].Service.OAuth)
 	}
-	if body.Services[0].Service.OAuth.ClientID != "" || body.Services[0].Service.OAuth.ClientSecret != "" {
+	if body.Services[0].Service.OAuth.ClientID != "" || body.Services[0].Service.OAuth.ClientIDSecretRef != "" || body.Services[0].Service.OAuth.ClientSecret != "" || body.Services[0].Service.OAuth.ClientSecretRef != "" {
 		t.Fatalf("oauth client values leaked in metadata list response: %#v", body.Services[0].Service.OAuth)
 	}
 	if body.Services[0].Service.OAuth.RevokeURL != "http://example.com/oauth/mock-dex-api/revoke?credential=mock-dex-api" {

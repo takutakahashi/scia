@@ -16,12 +16,13 @@ func TestPutDoesNotStoreOAuthClientValues(t *testing.T) {
 	err := Put(ctx, store, "example", config.ServiceConfig{
 		Hosts: []config.ServiceHostRule{{Host: "api.example.com"}},
 		OAuth: &config.ServiceOAuthConfig{
-			CredentialID:    "example",
-			ClientID:        "client-id",
-			ClientSecret:    "client-secret",
-			AuthURL:         "https://auth.example.com/oauth/authorize",
-			TokenURL:        "https://auth.example.com/oauth/token",
-			ClientSecretRef: "env:EXAMPLE_CLIENT_SECRET",
+			CredentialID:      "example",
+			ClientID:          "client-id",
+			ClientIDSecretRef: "env:EXAMPLE_CLIENT_ID",
+			ClientSecret:      "client-secret",
+			ClientSecretRef:   "env:EXAMPLE_CLIENT_SECRET",
+			AuthURL:           "https://auth.example.com/oauth/authorize",
+			TokenURL:          "https://auth.example.com/oauth/token",
 		},
 	})
 	if err != nil {
@@ -35,8 +36,8 @@ func TestPutDoesNotStoreOAuthClientValues(t *testing.T) {
 	if !ok {
 		t.Fatal("expected stored service metadata")
 	}
-	if strings.Contains(raw, "client-id") || strings.Contains(raw, "client-secret") {
-		t.Fatalf("stored service metadata includes oauth client values: %s", raw)
+	if strings.Contains(raw, "client-id") || strings.Contains(raw, "client-secret") || strings.Contains(raw, "EXAMPLE_CLIENT") {
+		t.Fatalf("stored service metadata includes oauth client values or refs: %s", raw)
 	}
 
 	var stored storedService
@@ -46,11 +47,8 @@ func TestPutDoesNotStoreOAuthClientValues(t *testing.T) {
 	if stored.Service.OAuth == nil {
 		t.Fatal("expected stored oauth metadata")
 	}
-	if stored.Service.OAuth.ClientID != "" || stored.Service.OAuth.ClientSecret != "" {
+	if stored.Service.OAuth.ClientID != "" || stored.Service.OAuth.ClientIDSecretRef != "" || stored.Service.OAuth.ClientSecret != "" || stored.Service.OAuth.ClientSecretRef != "" {
 		t.Fatalf("unexpected stored oauth client values: %#v", stored.Service.OAuth)
-	}
-	if stored.Service.OAuth.ClientSecretRef != "env:EXAMPLE_CLIENT_SECRET" {
-		t.Fatalf("unexpected client secret ref: %q", stored.Service.OAuth.ClientSecretRef)
 	}
 }
 

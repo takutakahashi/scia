@@ -347,7 +347,9 @@ func SanitizeForClient(service config.ServiceConfig) config.ServiceConfig {
 	if service.OAuth != nil {
 		oauth := *service.OAuth
 		oauth.ClientID = ""
+		oauth.ClientIDSecretRef = ""
 		oauth.ClientSecret = ""
+		oauth.ClientSecretRef = ""
 		service.OAuth = &oauth
 	}
 	return service
