@@ -1745,7 +1745,7 @@ func (s *Server) genericFrontendIntegration(r *http.Request, cfg *config.Config,
 	if callbackURL == "" {
 		callbackURL = s.providerRedirectURL(r, serviceID)
 	}
-	return s.frontendIntegration(metadata, serviceID, service.OAuth.CredentialID, "service", "", callbackURL, service.OAuth.AuthURL, service.OAuth.TokenURL, service.OAuth.RevokeURL)
+	return s.frontendIntegration(metadata, serviceID, service.OAuth.CredentialID, "service", "", callbackURL)
 }
 
 func (s *Server) googleFrontendIntegration(r *http.Request, cfg *config.Config, option googleOption) frontendIntegration {
@@ -1756,46 +1756,22 @@ func (s *Server) googleFrontendIntegration(r *http.Request, cfg *config.Config, 
 	if scope == "" {
 		scope = "openid email profile"
 	}
-	authURL := firstNonEmpty(cred.Params["auth_url"], googleCfg.AuthURL)
-	if authURL == "" {
-		authURL = googleAuthURL
-	}
-	tokenURL := firstNonEmpty(cred.Params["token_url"], googleCfg.TokenURL)
-	if tokenURL == "" {
-		tokenURL = googleTokenURL
-	}
-	revokeURL := firstNonEmpty(cred.Params["revoke_url"], googleCfg.RevokeURL)
-	if revokeURL == "" {
-		revokeURL = googleRevokeURL
-	}
 	callbackURL := firstNonEmpty(cred.Params["redirect_uri"], googleCfg.RedirectURL)
 	if callbackURL == "" {
 		callbackURL = s.redirectURL(r)
 	}
-	return s.frontendIntegration(metadata, "google", option.CredentialID, option.Source, scope, callbackURL, authURL, tokenURL, revokeURL)
+	return s.frontendIntegration(metadata, "google", option.CredentialID, option.Source, scope, callbackURL)
 }
 
 func (s *Server) notionFrontendIntegration(r *http.Request, cfg *config.Config, option notionOption) frontendIntegration {
 	metadata := oauthIntegrationMetadata(cfg, option.CredentialID, "notion")
 	notionCfg, _ := config.NotionOAuthConfigForCredential(cfg, option.CredentialID)
 	cred, _ := config.CredentialByID(cfg, option.CredentialID)
-	authURL := firstNonEmpty(cred.Params["auth_url"], notionCfg.AuthURL)
-	if authURL == "" {
-		authURL = notionAuthURL
-	}
-	tokenURL := firstNonEmpty(cred.Params["token_url"], notionCfg.TokenURL)
-	if tokenURL == "" {
-		tokenURL = notionTokenURL
-	}
-	revokeURL := firstNonEmpty(cred.Params["revoke_url"], notionCfg.RevokeURL)
-	if revokeURL == "" {
-		revokeURL = notionRevokeURL
-	}
 	callbackURL := firstNonEmpty(cred.Params["redirect_uri"], notionCfg.RedirectURL)
 	if callbackURL == "" {
 		callbackURL = s.providerRedirectURL(r, "notion")
 	}
-	return s.frontendIntegration(metadata, "notion", option.CredentialID, option.Source, "", callbackURL, authURL, tokenURL, revokeURL)
+	return s.frontendIntegration(metadata, "notion", option.CredentialID, option.Source, "", callbackURL)
 }
 
 func (s *Server) todoistFrontendIntegration(_ *http.Request, cfg *config.Config, option todoistOption) frontendIntegration {
@@ -1806,19 +1782,7 @@ func (s *Server) todoistFrontendIntegration(_ *http.Request, cfg *config.Config,
 	if scope == "" {
 		scope = "data:read"
 	}
-	authURL := firstNonEmpty(cred.Params["auth_url"], todoistCfg.AuthURL)
-	if authURL == "" {
-		authURL = todoistAuthURL
-	}
-	tokenURL := firstNonEmpty(cred.Params["token_url"], todoistCfg.TokenURL)
-	if tokenURL == "" {
-		tokenURL = todoistTokenURL
-	}
-	revokeURL := firstNonEmpty(cred.Params["revoke_url"], todoistCfg.RevokeURL)
-	if revokeURL == "" {
-		revokeURL = todoistRevokeURL
-	}
-	return s.frontendIntegration(metadata, "todoist", option.CredentialID, option.Source, scope, firstNonEmpty(cred.Params["redirect_uri"], todoistCfg.RedirectURL), authURL, tokenURL, revokeURL)
+	return s.frontendIntegration(metadata, "todoist", option.CredentialID, option.Source, scope, firstNonEmpty(cred.Params["redirect_uri"], todoistCfg.RedirectURL))
 }
 
 func (s *Server) slackFrontendIntegration(_ *http.Request, cfg *config.Config, option slackOption) frontendIntegration {
@@ -1829,19 +1793,7 @@ func (s *Server) slackFrontendIntegration(_ *http.Request, cfg *config.Config, o
 	if scope == "" {
 		scope = "users:read"
 	}
-	authURL := firstNonEmpty(cred.Params["auth_url"], slackCfg.AuthURL)
-	if authURL == "" {
-		authURL = slackAuthURL
-	}
-	tokenURL := firstNonEmpty(cred.Params["token_url"], slackCfg.TokenURL)
-	if tokenURL == "" {
-		tokenURL = slackTokenURL
-	}
-	revokeURL := firstNonEmpty(cred.Params["revoke_url"], slackCfg.RevokeURL)
-	if revokeURL == "" {
-		revokeURL = slackRevokeURL
-	}
-	return s.frontendIntegration(metadata, "slack", option.CredentialID, option.Source, scope, firstNonEmpty(cred.Params["redirect_uri"], slackCfg.RedirectURL), authURL, tokenURL, revokeURL)
+	return s.frontendIntegration(metadata, "slack", option.CredentialID, option.Source, scope, firstNonEmpty(cred.Params["redirect_uri"], slackCfg.RedirectURL))
 }
 
 func (s *Server) githubFrontendIntegration(_ *http.Request, cfg *config.Config, option githubOption) frontendIntegration {
@@ -1852,30 +1804,15 @@ func (s *Server) githubFrontendIntegration(_ *http.Request, cfg *config.Config, 
 	if scope == "" {
 		scope = "read:user"
 	}
-	authURL := firstNonEmpty(cred.Params["auth_url"], githubCfg.AuthURL)
-	if authURL == "" {
-		authURL = githubAuthURL
-	}
-	tokenURL := firstNonEmpty(cred.Params["token_url"], githubCfg.TokenURL)
-	if tokenURL == "" {
-		tokenURL = githubTokenURL
-	}
-	revokeURL := firstNonEmpty(cred.Params["revoke_url"], githubCfg.RevokeURL)
-	if revokeURL == "" {
-		revokeURL = githubRevokeURL
-	}
-	return s.frontendIntegration(metadata, "github", option.CredentialID, option.Source, scope, firstNonEmpty(cred.Params["redirect_uri"], githubCfg.RedirectURL), authURL, tokenURL, revokeURL)
+	return s.frontendIntegration(metadata, "github", option.CredentialID, option.Source, scope, firstNonEmpty(cred.Params["redirect_uri"], githubCfg.RedirectURL))
 }
 
-func (s *Server) frontendIntegration(metadata config.OAuthIntegrationMetadataConfig, provider, credentialID, source, configuredScope, callbackURL, authURL, tokenURL, revokeURL string) frontendIntegration {
+func (s *Server) frontendIntegration(metadata config.OAuthIntegrationMetadataConfig, provider, credentialID, source, configuredScope, callbackURL string) frontendIntegration {
 	setup := map[string]string{
 		"callback_url": callbackURL,
-		"auth_url":     authURL,
-		"token_url":    tokenURL,
-		"revoke_url":   revokeURL,
 	}
-	for key, value := range metadata.Setup {
-		setup[key] = value
+	if callbackURL := metadata.Setup["callback_url"]; callbackURL != "" {
+		setup["callback_url"] = callbackURL
 	}
 	startURL := "/oauth/" + provider + "/start?credential=" + url.QueryEscape(credentialID)
 	return frontendIntegration{

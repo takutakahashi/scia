@@ -285,7 +285,7 @@ The SQLite store is local persistence, not encryption. Keep the database path on
 
 - `GET /api/integrations` returns configured OAuth integrations as JSON for a frontend.
 - The response is generated from the current config on every request, so config reloads are reflected without frontend changes.
-- Secrets and raw OAuth scope values are not returned. The response includes provider IDs, display metadata, setup URLs such as callback/auth/token/revoke URLs, start endpoints, and scope display metadata.
+- Secrets, upstream OAuth endpoints, and raw OAuth scope values are not returned. The response includes provider IDs, display metadata, broker callback/start endpoints, and scope display metadata.
 - `server.oauth.integrations.<provider-or-credential-id>.released: false` can be used to configure an integration before exposing it in the frontend.
 - `scopes[].enabled` means the scope is selected by default. Frontends can pass a `scope` query parameter containing `scopes[].id` values to OAuth `start` or `authorization-url` endpoints to authorize a different subset.
 - When integration metadata scopes are configured, requested scopes must match `scopes[].id`; unknown scopes are rejected with `400 Bad Request`. Raw `value` strings are accepted for backward compatibility but do not need to be exposed to frontends.

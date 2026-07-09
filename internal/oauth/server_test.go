@@ -120,11 +120,17 @@ func TestFrontendIntegrationsReturnsConfiguredOAuthIntegrations(t *testing.T) {
 	if got.Setup["callback_url"] != "http://localhost:8081/oauth/google/callback" {
 		t.Fatalf("unexpected callback_url: %#v", got.Setup)
 	}
-	if got.Setup["auth_url"] != googleAuthURL || got.Setup["token_url"] != googleTokenURL || got.Setup["revoke_url"] != googleRevokeURL {
-		t.Fatalf("unexpected setup URLs: %#v", got.Setup)
+	if _, ok := got.Setup["auth_url"]; ok {
+		t.Fatalf("upstream auth URL leaked in setup: %#v", got.Setup)
 	}
-	if got.Setup["project"] != "Google Cloud OAuth client" {
-		t.Fatalf("custom setup metadata missing: %#v", got.Setup)
+	if _, ok := got.Setup["token_url"]; ok {
+		t.Fatalf("upstream token URL leaked in setup: %#v", got.Setup)
+	}
+	if _, ok := got.Setup["revoke_url"]; ok {
+		t.Fatalf("upstream revoke URL leaked in setup: %#v", got.Setup)
+	}
+	if _, ok := got.Setup["project"]; ok {
+		t.Fatalf("non-broker setup metadata leaked in setup: %#v", got.Setup)
 	}
 	if len(got.Scopes) != 2 {
 		t.Fatalf("unexpected scopes: %#v", got.Scopes)
