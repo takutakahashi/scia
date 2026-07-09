@@ -193,6 +193,9 @@ func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 	if body.Service.OAuth == nil || body.Service.OAuth.CredentialID != "mock-dex-api" {
 		t.Fatalf("credential id was not defaulted: %#v", body.Service.OAuth)
 	}
+	if body.Service.OAuth.ClientID != "" || body.Service.OAuth.ClientSecret != "" {
+		t.Fatalf("oauth client values leaked in metadata response: %#v", body.Service.OAuth)
+	}
 	if len(body.Service.Hosts) != 1 || body.Service.Hosts[0].AuthMethod != "bearer" {
 		t.Fatalf("host defaults were not applied: %#v", body.Service.Hosts)
 	}
@@ -243,6 +246,9 @@ func TestServiceMetadataListReturnsConfiguredServices(t *testing.T) {
 	}
 	if body.Services[0].Service.OAuth == nil || body.Services[0].Service.OAuth.CredentialID != "mock-dex-api" {
 		t.Fatalf("credential id was not defaulted: %#v", body.Services[0].Service.OAuth)
+	}
+	if body.Services[0].Service.OAuth.ClientID != "" || body.Services[0].Service.OAuth.ClientSecret != "" {
+		t.Fatalf("oauth client values leaked in metadata list response: %#v", body.Services[0].Service.OAuth)
 	}
 }
 

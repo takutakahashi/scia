@@ -247,7 +247,7 @@ func (s *Server) serviceMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service metadata is invalid", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, serviceinfo.Response{ID: serviceID, Service: normalized})
+	writeJSON(w, http.StatusOK, serviceinfo.Response{ID: serviceID, Service: serviceinfo.SanitizeForClient(normalized)})
 }
 
 func (s *Server) serviceMetadataList(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +282,7 @@ func (s *Server) serviceMetadataList(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "service metadata is invalid", http.StatusInternalServerError)
 			return
 		}
-		services = append(services, serviceinfo.Response{ID: id, Service: normalized})
+		services = append(services, serviceinfo.Response{ID: id, Service: serviceinfo.SanitizeForClient(normalized)})
 	}
 	writeJSON(w, http.StatusOK, serviceinfo.ListResponse{Services: services})
 }
