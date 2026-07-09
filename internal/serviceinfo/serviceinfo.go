@@ -41,7 +41,7 @@ func Put(ctx context.Context, store secrets.Store, serviceID string, service con
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(storedService{ID: serviceID, Service: normalized})
+	payload, err := json.Marshal(storedService{ID: serviceID, Service: sanitizeForStorage(normalized)})
 	if err != nil {
 		return err
 	}
@@ -341,6 +341,16 @@ func Normalize(serviceID string, service config.ServiceConfig) (config.ServiceCo
 		}
 	}
 	return service, nil
+}
+
+func sanitizeForStorage(service config.ServiceConfig) config.ServiceConfig {
+	if service.OAuth != nil {
+		oauth := *service.OAuth
+		oauth.ClientID = ""
+		oauth.ClientSecret = ""
+		service.OAuth = &oauth
+	}
+	return service
 }
 
 func serviceListURL(metadataURL string) (string, error) {
