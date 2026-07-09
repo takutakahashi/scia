@@ -117,14 +117,23 @@ func TestFrontendIntegrationsReturnsConfiguredOAuthIntegrations(t *testing.T) {
 	if got.StartURL != "/oauth/google/start?credential=google-calendar" {
 		t.Fatalf("unexpected start_url: %q", got.StartURL)
 	}
+	if got.RevokeURL != "/oauth/google/revoke?credential=google-calendar" {
+		t.Fatalf("unexpected revoke_url: %q", got.RevokeURL)
+	}
 	if got.Setup["callback_url"] != "http://localhost:8081/oauth/google/callback" {
 		t.Fatalf("unexpected callback_url: %#v", got.Setup)
 	}
-	if got.Setup["auth_url"] != googleAuthURL || got.Setup["token_url"] != googleTokenURL || got.Setup["revoke_url"] != googleRevokeURL {
-		t.Fatalf("unexpected setup URLs: %#v", got.Setup)
+	if _, ok := got.Setup["auth_url"]; ok {
+		t.Fatalf("upstream auth URL leaked in setup: %#v", got.Setup)
 	}
-	if got.Setup["project"] != "Google Cloud OAuth client" {
-		t.Fatalf("custom setup metadata missing: %#v", got.Setup)
+	if _, ok := got.Setup["token_url"]; ok {
+		t.Fatalf("upstream token URL leaked in setup: %#v", got.Setup)
+	}
+	if _, ok := got.Setup["revoke_url"]; ok {
+		t.Fatalf("upstream revoke URL leaked in setup: %#v", got.Setup)
+	}
+	if _, ok := got.Setup["project"]; ok {
+		t.Fatalf("non-broker setup metadata leaked in setup: %#v", got.Setup)
 	}
 	if len(got.Scopes) != 2 {
 		t.Fatalf("unexpected scopes: %#v", got.Scopes)
@@ -134,6 +143,54 @@ func TestFrontendIntegrationsReturnsConfiguredOAuthIntegrations(t *testing.T) {
 	}
 	if got.Scopes[1].ID != "drive" || got.Scopes[1].Name != "Drive" || got.Scopes[1].Enabled {
 		t.Fatalf("unexpected second scope: %#v", got.Scopes[1])
+	}
+}
+
+func TestOAuthRevokeUsesConfiguredBrokerCredential(t *testing.T) {
+	revokeEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "token", "refresh-token")
+		assertFormValue(t, r, "token_type_hint", "refresh_token")
+		assertFormValue(t, r, "client_id", "client-id")
+		assertFormValue(t, r, "client_secret", "client-secret")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer revokeEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Credentials: []config.CredentialConfig{
+			{
+				ID:   "google-calendar",
+				Type: "google-oauth-refresh-token",
+				Params: map[string]string{
+					"revoke_url":    revokeEndpoint.URL,
+					"client_id":     "client-id",
+					"client_secret": "client-secret",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/google/revoke?credential=google-calendar", strings.NewReader("token=refresh-token&token_type_hint=refresh_token"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]bool
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !body["ok"] {
+		t.Fatalf("unexpected response: %#v", body)
 	}
 }
 
@@ -158,10 +215,12 @@ func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 				"mock-dex-api": {
 					Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
 					OAuth: &config.ServiceOAuthConfig{
-						ClientID:     "client-id",
-						ClientSecret: "client-secret",
-						AuthURL:      "http://dex.example/dex/auth",
-						TokenURL:     "http://dex.example/dex/token",
+						ClientID:          "client-id",
+						ClientIDSecretRef: "env:DEX_CLIENT_ID",
+						ClientSecret:      "client-secret",
+						ClientSecretRef:   "env:DEX_CLIENT_SECRET",
+						AuthURL:           "http://dex.example/dex/auth",
+						TokenURL:          "http://dex.example/dex/token",
 					},
 					Injection: config.ServiceInjectionConfig{Headers: []config.InjectionTemplate{
 						{Name: "X-ID-Token", Value: "{{ .id_token }}"},
@@ -193,6 +252,12 @@ func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 	if body.Service.OAuth == nil || body.Service.OAuth.CredentialID != "mock-dex-api" {
 		t.Fatalf("credential id was not defaulted: %#v", body.Service.OAuth)
 	}
+	if body.Service.OAuth.ClientID != "" || body.Service.OAuth.ClientIDSecretRef != "" || body.Service.OAuth.ClientSecret != "" || body.Service.OAuth.ClientSecretRef != "" {
+		t.Fatalf("oauth client values leaked in metadata response: %#v", body.Service.OAuth)
+	}
+	if body.Service.OAuth.RevokeURL != "http://example.com/oauth/mock-dex-api/revoke?credential=mock-dex-api" {
+		t.Fatalf("unexpected broker revoke url: %q", body.Service.OAuth.RevokeURL)
+	}
 	if len(body.Service.Hosts) != 1 || body.Service.Hosts[0].AuthMethod != "bearer" {
 		t.Fatalf("host defaults were not applied: %#v", body.Service.Hosts)
 	}
@@ -209,10 +274,12 @@ func TestServiceMetadataListReturnsConfiguredServices(t *testing.T) {
 				"mock-dex-api": {
 					Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
 					OAuth: &config.ServiceOAuthConfig{
-						ClientID:     "client-id",
-						ClientSecret: "client-secret",
-						AuthURL:      "http://dex.example/dex/auth",
-						TokenURL:     "http://dex.example/dex/token",
+						ClientID:          "client-id",
+						ClientIDSecretRef: "env:DEX_CLIENT_ID",
+						ClientSecret:      "client-secret",
+						ClientSecretRef:   "env:DEX_CLIENT_SECRET",
+						AuthURL:           "http://dex.example/dex/auth",
+						TokenURL:          "http://dex.example/dex/token",
 					},
 				},
 				"other-api": {
@@ -243,6 +310,12 @@ func TestServiceMetadataListReturnsConfiguredServices(t *testing.T) {
 	}
 	if body.Services[0].Service.OAuth == nil || body.Services[0].Service.OAuth.CredentialID != "mock-dex-api" {
 		t.Fatalf("credential id was not defaulted: %#v", body.Services[0].Service.OAuth)
+	}
+	if body.Services[0].Service.OAuth.ClientID != "" || body.Services[0].Service.OAuth.ClientIDSecretRef != "" || body.Services[0].Service.OAuth.ClientSecret != "" || body.Services[0].Service.OAuth.ClientSecretRef != "" {
+		t.Fatalf("oauth client values leaked in metadata list response: %#v", body.Services[0].Service.OAuth)
+	}
+	if body.Services[0].Service.OAuth.RevokeURL != "http://example.com/oauth/mock-dex-api/revoke?credential=mock-dex-api" {
+		t.Fatalf("unexpected broker revoke url: %q", body.Services[0].Service.OAuth.RevokeURL)
 	}
 }
 

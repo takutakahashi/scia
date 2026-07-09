@@ -1044,7 +1044,12 @@ func (h *Handler) serveAdminRevokeToken(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "unknown credential", http.StatusBadRequest)
 		return
 	}
-	brokerURL := config.HeaderValueFromEnv(cred.Params["revoke_broker_url"])
+	brokerURL, err := h.adminRevokeBrokerURL(r.Context(), cfg, req.CredentialID, cred)
+	if err != nil {
+		h.logger.Error("failed to resolve revoke broker", "error", err, "credential_id", req.CredentialID)
+		http.Error(w, "failed to resolve revoke broker", http.StatusBadGateway)
+		return
+	}
 	if brokerURL == "" {
 		http.Error(w, "credential requires revoke_broker_url", http.StatusBadRequest)
 		return
@@ -1074,6 +1079,42 @@ func (h *Handler) serveAdminRevokeToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) adminRevokeBrokerURL(ctx context.Context, cfg *config.Config, credentialID string, cred config.CredentialConfig) (string, error) {
+	if brokerURL := config.HeaderValueFromEnv(cred.Params["revoke_broker_url"]); brokerURL != "" {
+		return brokerURL, nil
+	}
+	if _, service, ok := config.ServiceByCredentialID(cfg, credentialID); ok && service.OAuth != nil {
+		return service.OAuth.RevokeURL, nil
+	}
+	storedIDs, err := serviceinfo.ListIDs(ctx, h.secrets)
+	if err != nil {
+		return "", err
+	}
+	for _, serviceID := range storedIDs {
+		service, ok, err := serviceinfo.Get(ctx, h.secrets, serviceID)
+		if err != nil {
+			return "", err
+		}
+		if ok && service.OAuth != nil && service.OAuth.CredentialID == credentialID {
+			return service.OAuth.RevokeURL, nil
+		}
+	}
+	if config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL) == "" {
+		return "", nil
+	}
+	service, err := serviceinfo.Fetch(ctx, h.client, config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataURL), config.HeaderValueFromEnv(cfg.Server.OAuth.MetadataToken), credentialID)
+	if err != nil {
+		return "", err
+	}
+	if err := serviceinfo.Put(ctx, h.secrets, credentialID, service); err != nil {
+		return "", err
+	}
+	if service.OAuth != nil && service.OAuth.CredentialID == credentialID {
+		return service.OAuth.RevokeURL, nil
+	}
+	return "", nil
 }
 
 func (h *Handler) adminCredentialByID(ctx context.Context, cfg *config.Config, credentialID string) (config.CredentialConfig, bool, error) {

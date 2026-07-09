@@ -1526,6 +1526,64 @@ credentials:
 	}
 }
 
+func TestAdminRevokeTokenUsesStoredServiceBrokerURL(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "mock-dex-api", "access_token", "dex-token"); err != nil {
+		t.Fatal(err)
+	}
+	brokerCalled := atomic.Bool{}
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		brokerCalled.Store(true)
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected broker method: %s", r.Method)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.Form.Get("credential_id"); got != "mock-dex-api" {
+			t.Fatalf("unexpected credential_id: %q", got)
+		}
+		if got := r.Form.Get("credential_type"); got != "generic-oauth" {
+			t.Fatalf("unexpected credential_type: %q", got)
+		}
+		if got := r.Form.Get("token_type_hint"); got != "access_token" {
+			t.Fatalf("unexpected token_type_hint: %q", got)
+		}
+		if got := r.Form.Get("token"); got != "dex-token" {
+			t.Fatalf("unexpected token: %q", got)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer broker.Close()
+	if err := serviceinfo.Put(context.Background(), secretStore, "mock-dex-api", config.ServiceConfig{
+		Hosts: []config.ServiceHostRule{{Host: "mock-api.local"}},
+		OAuth: &config.ServiceOAuthConfig{
+			CredentialID: "mock-dex-api",
+			RevokeURL:    broker.URL,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
+	defer proxyServer.Close()
+
+	resp, err := adminPost(proxyServer.URL+"/_scia/tokens/revoke", "application/json", strings.NewReader(`{"credentialId":"mock-dex-api","key":"access_token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	if !brokerCalled.Load() {
+		t.Fatal("broker was not called")
+	}
+	if got := secretStore.value("mock-dex-api", "access_token"); got != "" {
+		t.Fatalf("unexpected stored token after revoke: %q", got)
+	}
+}
+
 func TestAdminRevokeTokenKeepsSecretWhenBrokerFails(t *testing.T) {
 	secretStore := newRecordingSecretStore()
 	if err := secretStore.Put(context.Background(), "github", "access_token", "github-token"); err != nil {
