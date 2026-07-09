@@ -253,6 +253,9 @@ func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 	if body.Service.OAuth.ClientID != "" || body.Service.OAuth.ClientSecret != "" {
 		t.Fatalf("oauth client values leaked in metadata response: %#v", body.Service.OAuth)
 	}
+	if body.Service.OAuth.RevokeURL != "http://example.com/oauth/mock-dex-api/revoke?credential=mock-dex-api" {
+		t.Fatalf("unexpected broker revoke url: %q", body.Service.OAuth.RevokeURL)
+	}
 	if len(body.Service.Hosts) != 1 || body.Service.Hosts[0].AuthMethod != "bearer" {
 		t.Fatalf("host defaults were not applied: %#v", body.Service.Hosts)
 	}
@@ -306,6 +309,9 @@ func TestServiceMetadataListReturnsConfiguredServices(t *testing.T) {
 	}
 	if body.Services[0].Service.OAuth.ClientID != "" || body.Services[0].Service.OAuth.ClientSecret != "" {
 		t.Fatalf("oauth client values leaked in metadata list response: %#v", body.Services[0].Service.OAuth)
+	}
+	if body.Services[0].Service.OAuth.RevokeURL != "http://example.com/oauth/mock-dex-api/revoke?credential=mock-dex-api" {
+		t.Fatalf("unexpected broker revoke url: %q", body.Services[0].Service.OAuth.RevokeURL)
 	}
 }
 

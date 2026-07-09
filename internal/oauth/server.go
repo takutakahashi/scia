@@ -255,7 +255,7 @@ func (s *Server) serviceMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service metadata is invalid", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, serviceinfo.Response{ID: serviceID, Service: serviceinfo.SanitizeForClient(normalized)})
+	writeJSON(w, http.StatusOK, serviceinfo.Response{ID: serviceID, Service: s.serviceMetadataForClient(r, serviceID, normalized)})
 }
 
 func (s *Server) serviceMetadataList(w http.ResponseWriter, r *http.Request) {
@@ -290,9 +290,19 @@ func (s *Server) serviceMetadataList(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "service metadata is invalid", http.StatusInternalServerError)
 			return
 		}
-		services = append(services, serviceinfo.Response{ID: id, Service: serviceinfo.SanitizeForClient(normalized)})
+		services = append(services, serviceinfo.Response{ID: id, Service: s.serviceMetadataForClient(r, id, normalized)})
 	}
 	writeJSON(w, http.StatusOK, serviceinfo.ListResponse{Services: services})
+}
+
+func (s *Server) serviceMetadataForClient(r *http.Request, serviceID string, service config.ServiceConfig) config.ServiceConfig {
+	service = serviceinfo.SanitizeForClient(service)
+	if service.OAuth != nil {
+		oauth := *service.OAuth
+		oauth.RevokeURL = s.brokerURL(r, "/oauth/"+url.PathEscape(serviceID)+"/revoke", url.Values{"credential": []string{oauth.CredentialID}})
+		service.OAuth = &oauth
+	}
+	return service
 }
 
 func (s *Server) genericOAuth(w http.ResponseWriter, r *http.Request) {
@@ -1871,6 +1881,32 @@ func (s *Server) providerRedirectURL(r *http.Request, provider string) string {
 		host = "localhost" + host
 	}
 	return "http://" + host + "/oauth/" + provider + "/callback"
+}
+
+func (s *Server) brokerURL(r *http.Request, path string, query url.Values) string {
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	if host == "" {
+		host = "localhost" + s.ListenAddr()
+	}
+	if strings.HasPrefix(host, ":") {
+		host = "localhost" + host
+	}
+	u := url.URL{Scheme: scheme, Host: host, Path: path}
+	if len(query) > 0 {
+		u.RawQuery = query.Encode()
+	}
+	return u.String()
 }
 
 func (s *Server) authorizeDynamicUserRequest(w http.ResponseWriter, r *http.Request, cfg *config.Config, userID string) bool {
