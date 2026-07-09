@@ -117,6 +117,9 @@ func TestFrontendIntegrationsReturnsConfiguredOAuthIntegrations(t *testing.T) {
 	if got.StartURL != "/oauth/google/start?credential=google-calendar" {
 		t.Fatalf("unexpected start_url: %q", got.StartURL)
 	}
+	if got.RevokeURL != "/oauth/google/revoke?credential=google-calendar" {
+		t.Fatalf("unexpected revoke_url: %q", got.RevokeURL)
+	}
 	if got.Setup["callback_url"] != "http://localhost:8081/oauth/google/callback" {
 		t.Fatalf("unexpected callback_url: %#v", got.Setup)
 	}
@@ -140,6 +143,54 @@ func TestFrontendIntegrationsReturnsConfiguredOAuthIntegrations(t *testing.T) {
 	}
 	if got.Scopes[1].ID != "drive" || got.Scopes[1].Name != "Drive" || got.Scopes[1].Enabled {
 		t.Fatalf("unexpected second scope: %#v", got.Scopes[1])
+	}
+}
+
+func TestOAuthRevokeUsesConfiguredBrokerCredential(t *testing.T) {
+	revokeEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		assertFormValue(t, r, "token", "refresh-token")
+		assertFormValue(t, r, "token_type_hint", "refresh_token")
+		assertFormValue(t, r, "client_id", "client-id")
+		assertFormValue(t, r, "client_secret", "client-secret")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer revokeEndpoint.Close()
+
+	store := newOAuthTestStore(t, &config.Config{
+		Credentials: []config.CredentialConfig{
+			{
+				ID:   "google-calendar",
+				Type: "google-oauth-refresh-token",
+				Params: map[string]string{
+					"revoke_url":    revokeEndpoint.URL,
+					"client_id":     "client-id",
+					"client_secret": "client-secret",
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodPost, "/oauth/google/revoke?credential=google-calendar", strings.NewReader("token=refresh-token&token_type_hint=refresh_token"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]bool
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !body["ok"] {
+		t.Fatalf("unexpected response: %#v", body)
 	}
 }
 
