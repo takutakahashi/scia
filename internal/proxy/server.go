@@ -1167,6 +1167,9 @@ func (h *Handler) revokeTokenWithBroker(ctx context.Context, cred config.Credent
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		if bodySnippet := revokeBrokerErrorBody(body, token); bodySnippet != "" {
+			return fmt.Errorf("revoke broker returned %s: %s", resp.Status, bodySnippet)
+		}
 		return fmt.Errorf("revoke broker returned %s", resp.Status)
 	}
 	if len(strings.TrimSpace(string(body))) == 0 {
@@ -1187,6 +1190,21 @@ func (h *Handler) revokeTokenWithBroker(ctx context.Context, cred config.Credent
 		return errors.New("revoke broker returned ok=false")
 	}
 	return nil
+}
+
+func revokeBrokerErrorBody(body []byte, token string) string {
+	bodyText := strings.TrimSpace(string(body))
+	if bodyText == "" {
+		return ""
+	}
+	if token != "" {
+		bodyText = strings.ReplaceAll(bodyText, token, "[redacted]")
+	}
+	const maxRevokeBrokerErrorBodyLen = 512
+	if len(bodyText) > maxRevokeBrokerErrorBodyLen {
+		bodyText = bodyText[:maxRevokeBrokerErrorBodyLen]
+	}
+	return bodyText
 }
 
 type adminTokenRequest struct {

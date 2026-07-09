@@ -1558,6 +1558,38 @@ credentials:
 	}
 }
 
+func TestRevokeTokenWithBrokerIncludesErrorBody(t *testing.T) {
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"invalid_token"}`, http.StatusBadRequest)
+	}))
+	defer broker.Close()
+
+	h := &Handler{client: broker.Client()}
+	err := h.revokeTokenWithBroker(context.Background(), config.CredentialConfig{ID: "google-workspace", Type: "google-oauth-refresh-token"}, broker.URL, "refresh_token", "refresh-token")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); !strings.Contains(got, `revoke broker returned 400 Bad Request: {"error":"invalid_token"}`) {
+		t.Fatalf("unexpected error: %s", got)
+	}
+}
+
+func TestRevokeTokenWithBrokerRedactsTokenFromErrorBody(t *testing.T) {
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"invalid_token","token":"refresh-token"}`, http.StatusBadRequest)
+	}))
+	defer broker.Close()
+
+	h := &Handler{client: broker.Client()}
+	err := h.revokeTokenWithBroker(context.Background(), config.CredentialConfig{ID: "google-workspace", Type: "google-oauth-refresh-token"}, broker.URL, "refresh_token", "refresh-token")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); strings.Contains(got, "refresh-token") || !strings.Contains(got, "[redacted]") {
+		t.Fatalf("unexpected error: %s", got)
+	}
+}
+
 func newTestProxy(t *testing.T, cfg string) *httptest.Server {
 	server, _ := newTestProxyWithPath(t, cfg)
 	return server
