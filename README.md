@@ -283,6 +283,10 @@ The SQLite store is local persistence, not encryption. Keep the database path on
 
 ## Frontend integration metadata
 
+The proposed API for integrations whose destination is selected at setup time,
+such as a GitHub Enterprise PAT, is documented in
+[Dynamic-host integrations API design](docs/dynamic-host-integrations-design.md).
+
 - `GET /api/integrations` returns configured OAuth integrations as JSON for a frontend.
 - The response is generated from the current config on every request, so config reloads are reflected without frontend changes.
 - Secrets, upstream OAuth endpoints, and raw OAuth scope values are not returned. The response includes provider IDs, display metadata, broker callback/start/revoke endpoints, and scope display metadata.
