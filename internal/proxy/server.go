@@ -996,6 +996,13 @@ func (h *Handler) serveAdminPutToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credentialId, key, and token are required", http.StatusBadRequest)
 		return
 	}
+	cfg := h.store.Get()
+	resolvedKey, err := h.resolveAdminPutTokenKey(r.Context(), cfg, req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Key = resolvedKey
 	var serviceToStore *config.ServiceConfig
 	if req.Service != nil {
 		service := *req.Service
@@ -1022,6 +1029,49 @@ func (h *Handler) serveAdminPutToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// resolveAdminPutTokenKey maps a public input ID to its internal secret key and
+// also accepts that secret key directly for backward compatibility.
+func (h *Handler) resolveAdminPutTokenKey(ctx context.Context, cfg *config.Config, req adminTokenRequest) (string, error) {
+	if req.Service != nil {
+		service := *req.Service
+		if service.ParameterService() {
+			return resolveServiceInputKey(service, req.CredentialID, req.Key)
+		}
+	}
+	service, ok := h.parameterServiceForCredential(ctx, cfg, req.CredentialID)
+	if ok {
+		return resolveServiceInputKey(service, req.CredentialID, req.Key)
+	}
+	return req.Key, nil
+}
+
+func resolveServiceInputKey(service config.ServiceConfig, serviceID, key string) (string, error) {
+	for _, input := range service.Inputs {
+		if key == input.ID || key == input.SecretKey {
+			return input.SecretKey, nil
+		}
+	}
+	return "", fmt.Errorf("key %q is not a configured input for service %q", key, serviceID)
+}
+
+// parameterServiceForCredential resolves a generic parameter-based service
+// (no OAuth, with inputs) for the given credential ID. It checks the configured
+// services first, then stored service metadata. It returns false when the
+// credential is not associated with a parameter-based service.
+func (h *Handler) parameterServiceForCredential(ctx context.Context, cfg *config.Config, credentialID string) (config.ServiceConfig, bool) {
+	if service, ok := config.ServiceByID(cfg, credentialID); ok && service.ParameterService() {
+		return service, true
+	}
+	stored, ok, err := serviceinfo.Get(ctx, h.secrets, credentialID)
+	if err != nil || !ok {
+		return config.ServiceConfig{}, false
+	}
+	if stored.ParameterService() {
+		return stored, true
+	}
+	return config.ServiceConfig{}, false
 }
 
 func (h *Handler) serveAdminRevokeToken(w http.ResponseWriter, r *http.Request) {

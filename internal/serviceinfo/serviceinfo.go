@@ -340,6 +340,9 @@ func Normalize(serviceID string, service config.ServiceConfig) (config.ServiceCo
 			return config.ServiceConfig{}, fmt.Errorf("service %q injection.query[%d] requires name and value", serviceID, i)
 		}
 	}
+	if err := config.ValidateServiceInputs(serviceID, service); err != nil {
+		return config.ServiceConfig{}, err
+	}
 	return service, nil
 }
 

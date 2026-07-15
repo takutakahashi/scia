@@ -327,6 +327,130 @@ func TestGenericServiceStaticSecretHeader(t *testing.T) {
 	}
 }
 
+func TestParameterServiceInjectsBearerToken(t *testing.T) {
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "example-api", "access_token", "example-token"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Services: config.ServicesConfig{
+				"example-api": {
+					Inputs: []config.ServiceInputConfig{
+						{ID: "token", Type: "secret", Required: true, SecretKey: "access_token"},
+					},
+					Hosts: []config.ServiceHostRule{{Host: "api.example.com", AuthMethod: "bearer"}},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.example.com/v1/data", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := NewInjector(secretStore).ApplyServices(context.Background(), req, cfg, []string{"example-api"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer example-token" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+}
+
+func TestParameterServiceWithExplicitInjectionDoesNotRequireUnrelatedSecret(t *testing.T) {
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "example-api", "api_key", "example-key"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Server: config.ServerConfig{Services: config.ServicesConfig{
+		"example-api": {
+			Inputs: []config.ServiceInputConfig{
+				{ID: "optional", Type: "secret", SecretKey: "unused"},
+				{ID: "key", Type: "secret", Required: true, SecretKey: "api_key"},
+			},
+			Hosts: []config.ServiceHostRule{{Host: "api.example.com", AuthMethod: "none"}},
+			Injection: config.ServiceInjectionConfig{Headers: []config.InjectionTemplate{
+				{Name: "X-API-Key", Value: `{{ secret "api_key" }}`},
+			}},
+		},
+	}}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.example.com/v1/data", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := NewInjector(secretStore).ApplyServices(context.Background(), req, cfg, []string{"example-api"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("X-API-Key"); got != "example-key" {
+		t.Fatalf("unexpected api key header: %q", got)
+	}
+}
+
+func TestParameterServiceRejectsMissingSecret(t *testing.T) {
+	secretStore := newMemorySecretStore()
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Services: config.ServicesConfig{
+				"example-api": {
+					Inputs: []config.ServiceInputConfig{
+						{ID: "token", Type: "secret", Required: true, SecretKey: "access_token"},
+					},
+					Hosts: []config.ServiceHostRule{{Host: "api.example.com", AuthMethod: "bearer"}},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.example.com/v1/data", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = NewInjector(secretStore).ApplyServices(context.Background(), req, cfg, []string{"example-api"})
+	if err == nil {
+		t.Fatalf("expected error when access_token is missing")
+	}
+}
+
+func TestParameterServiceDoesNotInjectForNonMatchingHost(t *testing.T) {
+	secretStore := newMemorySecretStore()
+	if err := secretStore.Put(context.Background(), "example-api", "access_token", "example-token"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Services: config.ServicesConfig{
+				"example-api": {
+					Inputs: []config.ServiceInputConfig{
+						{ID: "token", Type: "secret", Required: true, SecretKey: "access_token"},
+					},
+					Hosts: []config.ServiceHostRule{{Host: "api.example.com", AuthMethod: "bearer"}},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://other.example.com/v1/data", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = NewInjector(secretStore).ApplyServices(context.Background(), req, cfg, []string{"example-api"})
+	if err == nil {
+		t.Fatalf("expected error for non-matching host")
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("unexpected authorization header injected into non-matching host: %q", got)
+	}
+}
+
 func TestNotionRefreshTokenInjectsAccessTokenAndStoresRotatedRefreshToken(t *testing.T) {
 	var tokenRequests int
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

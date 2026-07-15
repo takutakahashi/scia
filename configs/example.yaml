@@ -101,6 +101,21 @@ server:
     #   webhook:
     #     url: "env:SCIA_EXTERNAL_SECRETS_WEBHOOK_URL"
     #     secretKey: "env:SCIA_EXTERNAL_SECRETS_WEBHOOK_SECRET_KEY"
+  services:
+    example-api:
+      name: "Example API"
+      description: "Connect with a personal access token."
+      released: true
+      inputs:
+        - id: token
+          name: "Personal access token"
+          description: "Token issued by Example API."
+          type: secret
+          required: true
+          secretKey: access_token
+      hosts:
+        - host: api.example.com
+          authMethod: bearer
 
 credentials:
   - id: github-token

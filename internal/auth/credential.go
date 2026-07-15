@@ -70,6 +70,16 @@ func (i *Injector) ApplyServices(ctx context.Context, r *http.Request, cfg *conf
 			if err := applyAuthMethod(r, rule.AuthMethod, fields["access_token"]); err != nil {
 				return fmt.Errorf("service %q: %w", id, err)
 			}
+		} else if service.ParameterService() {
+			if rule.AuthMethod != "none" {
+				token, err := i.parameterServiceToken(ctx, cfg, id)
+				if err != nil {
+					return fmt.Errorf("service %q: %w", id, err)
+				}
+				if err := applyAuthMethod(r, rule.AuthMethod, token); err != nil {
+					return fmt.Errorf("service %q: %w", id, err)
+				}
+			}
 		}
 		if err := i.applyServiceInjection(ctx, r, cfg, id, service, fields); err != nil {
 			return fmt.Errorf("service %q: %w", id, err)
@@ -318,6 +328,22 @@ func (i *Injector) genericOAuthFields(ctx context.Context, cfg *config.Config, s
 	}
 	i.cache.Store("service:"+credentialID, cachedFields{fields: fields, expiresAt: expiresAt})
 	return fields, nil
+}
+
+// parameterServiceToken returns the secret value used for authMethod-based
+// injection (bearer/basic) on a generic parameter-based service. It reads the
+// primary secret input value from the secret store under the service credential
+// ID. The credential ID for parameter services is the service ID itself.
+func (i *Injector) parameterServiceToken(ctx context.Context, cfg *config.Config, serviceID string) (string, error) {
+	cred := config.CredentialConfig{ID: serviceID, Type: "generic-oauth", Params: map[string]string{}}
+	value, err := i.secretValue(ctx, cfg, cred, "access_token")
+	if err != nil {
+		return "", err
+	}
+	if value == "" {
+		return "", fmt.Errorf("service %q requires %q", serviceID, "access_token")
+	}
+	return value, nil
 }
 
 func (i *Injector) clientCredentialsToken(ctx context.Context, cred config.CredentialConfig) (string, error) {

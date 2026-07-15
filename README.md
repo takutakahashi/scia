@@ -77,6 +77,11 @@ curl -X POST http://localhost:8080/_scia/tokens \
   -d '{"credentialId":"github","key":"access_token","token":"TOKEN_VALUE"}'
 ```
 
+For generic parameter-based services, `key` may be the public `inputs[].id` or
+its configured `inputs[].secretKey`; undefined keys are rejected with `400 Bad Request`.
+OAuth credentials and services without parameter inputs keep their existing
+accepted keys for backward compatibility.
+
 The same request can include provider-derived service metadata. `scia` stores it
 beside the token in the secret store and indexes the service ID. After that, the
 proxy can match requests against the stored service hosts without defining
@@ -283,9 +288,10 @@ The SQLite store is local persistence, not encryption. Keep the database path on
 
 ## Frontend integration metadata
 
-- `GET /api/integrations` returns configured OAuth integrations as JSON for a frontend.
+- `GET /api/integrations` returns configured OAuth integrations and generic parameter-based services as JSON for a frontend.
 - The response is generated from the current config on every request, so config reloads are reflected without frontend changes.
 - Secrets, upstream OAuth endpoints, and raw OAuth scope values are not returned. The response includes provider IDs, display metadata, broker callback/start/revoke endpoints, and scope display metadata.
+- For parameter-based services, `auth_type` is `"parameters"`, `inputs` lists the credential inputs (without `secretKey`), and `connection` exposes the server-defined hosts plus masked header metadata. `secretKey`, secret values, and raw secret templates are never returned; clients cannot register arbitrary hosts or headers.
 - `server.oauth.integrations.<provider-or-credential-id>.released: false` can be used to configure an integration before exposing it in the frontend.
 - `scopes[].enabled` means the scope is selected by default. Frontends can pass a `scope` query parameter containing `scopes[].id` values to OAuth `start` or `authorization-url` endpoints to authorize a different subset.
 - When integration metadata scopes are configured, requested scopes must match `scopes[].id`; unknown scopes are rejected with `400 Bad Request`. Raw `value` strings are accepted for backward compatibility but do not need to be exposed to frontends.
@@ -315,6 +321,80 @@ server:
             desc: "Read events without writing changes."
             enabled: false
 ```
+
+## Parameter-based integrations
+
+Besides OAuth, `scia` supports parameter-based integrations where the user
+supplies a personal access token (or similar secret) directly. The proxy stores
+the secret under the service credential ID and the configured `secretKey`, then
+injects it as `Authorization: Bearer <secret>` for matching hosts.
+
+Define a generic service with `inputs` (no `oauth`):
+
+```yaml
+server:
+  services:
+    example-api:
+      name: Example API
+      description: Connect with a personal access token.
+      released: true
+      inputs:
+        - id: token
+          name: Personal access token
+          description: Token issued by Example API.
+          type: secret
+          required: true
+          secretKey: access_token
+      hosts:
+        - host: api.example.com
+          authMethod: bearer
+```
+
+`type: secret` is the only supported input type. Input IDs and `secretKey`
+values must be unique within a service. Services with `inputs` cannot also
+define `oauth`.
+
+`GET /api/integrations` includes parameter-based services with
+`auth_type: "parameters"`, the public `inputs` (without `secretKey`), and a
+`connection` object containing the server-defined hosts plus masked header
+metadata. `secretKey`, secret values, and raw secret templates are never
+returned:
+
+```json
+{
+  "id": "example-api",
+  "provider": "example-api",
+  "credential_id": "example-api",
+  "name": "Example API",
+  "released": true,
+  "source": "service",
+  "auth_type": "parameters",
+  "inputs": [
+    {"id": "token", "name": "Personal access token", "type": "secret", "required": true}
+  ],
+  "connection": {
+    "hosts": [{"host": "api.example.com"}],
+    "headers": [{"name": "Authorization", "value": "Bearer {{secret}}"}]
+  }
+}
+```
+
+Store the secret with the existing admin token endpoint. Clients can use the
+public input `id` as `key`; the proxy resolves it to the configured `secretKey`.
+The internal `secretKey` remains accepted for backward compatibility, while
+undefined keys are rejected:
+
+```sh
+curl -X POST http://localhost:8080/_scia/tokens \
+  -H "Authorization: Bearer $SCIA_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"credentialId":"example-api","key":"token","token":"TOKEN_VALUE"}'
+```
+
+The proxy injects `Authorization: Bearer TOKEN_VALUE` only for requests to
+matching hosts (`api.example.com`). Requests to other hosts are not injected.
+Host and header definitions come only from the server config or trusted
+metadata; clients cannot register arbitrary hosts or headers.
 
 ## Configuration
 

@@ -954,6 +954,221 @@ server:
 	}
 }
 
+func TestAdminPutTokenRejectsUndefinedKeyForParameterService(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  services:
+    example-api:
+      name: Example API
+      inputs:
+        - id: token
+          type: secret
+          required: true
+          secretKey: access_token
+      hosts:
+        - host: api.example.com
+          authMethod: bearer
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")), secretStore)
+	defer proxyServer.Close()
+
+	body := strings.NewReader(`{"credentialId":"example-api","key":"refresh_token","token":"TOKEN_VALUE"}`)
+	resp, err := adminPost(proxyServer.URL+"/_scia/tokens", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	if got := secretStore.value("example-api", "refresh_token"); got != "" {
+		t.Fatalf("undefined key was stored: %q", got)
+	}
+}
+
+func TestAdminPutTokenAcceptsConfiguredKeyForParameterService(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  services:
+    example-api:
+      name: Example API
+      inputs:
+        - id: token
+          type: secret
+          required: true
+          secretKey: access_token
+      hosts:
+        - host: api.example.com
+          authMethod: bearer
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")), secretStore)
+	defer proxyServer.Close()
+
+	body := strings.NewReader(`{"credentialId":"example-api","key":"access_token","token":"example-token"}`)
+	resp, err := adminPost(proxyServer.URL+"/_scia/tokens", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	if got := secretStore.value("example-api", "access_token"); got != "example-token" {
+		t.Fatalf("unexpected stored token: %q", got)
+	}
+}
+
+func TestAdminPutTokenMapsPublicInputIDToSecretKey(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  services:
+    example-api:
+      inputs:
+        - id: token
+          type: secret
+          required: true
+          secretKey: access_token
+      hosts:
+        - host: api.example.com
+          authMethod: bearer
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")), secretStore)
+	defer proxyServer.Close()
+
+	resp, err := adminPost(proxyServer.URL+"/_scia/tokens", "application/json", strings.NewReader(`{"credentialId":"example-api","key":"token","token":"example-token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	if got := secretStore.value("example-api", "access_token"); got != "example-token" {
+		t.Fatalf("unexpected stored token: %q", got)
+	}
+	if got := secretStore.value("example-api", "token"); got != "" {
+		t.Fatalf("public input ID was stored directly: %q", got)
+	}
+}
+
+func TestForwardProxyInjectsParameterServiceBearerToken(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer example-token" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamHost := mustParseURL(t, upstream.URL).Hostname()
+	dir := t.TempDir()
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "example-api", "access_token", "example-token"); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  services:
+    example-api:
+      inputs:
+        - id: token
+          type: secret
+          required: true
+          secretKey: access_token
+      hosts:
+        - host: "%s"
+          authMethod: bearer
+rules:
+  - name: inject-example
+    hosts: ["%s"]
+    action: allow
+    services: ["example-api"]
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem"), upstreamHost, mustParseURL(t, upstream.URL).Host), secretStore)
+	defer proxyServer.Close()
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get(upstream.URL + "/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(body))
+	}
+}
+
+func TestForwardProxyDoesNotInjectParameterServiceIntoNonMatchingHost(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("unexpected authorization header injected into non-matching host: %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	secretStore := newRecordingSecretStore()
+	if err := secretStore.Put(context.Background(), "example-api", "access_token", "example-token"); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  services:
+    example-api:
+      inputs:
+        - id: token
+          type: secret
+          required: true
+          secretKey: access_token
+      hosts:
+        - host: "api.example.com"
+          authMethod: bearer
+rules:
+  - name: allow-other
+    hosts: ["%s"]
+    action: allow
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem"), mustParseURL(t, upstream.URL).Host), secretStore)
+	defer proxyServer.Close()
+
+	client := proxiedClient(t, proxyServer.URL)
+	resp, err := client.Get(upstream.URL + "/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(body))
+	}
+}
+
 func TestForwardProxyUsesSecretStoredServiceMetadata(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer dex-access-token" {
