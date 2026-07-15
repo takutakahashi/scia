@@ -3,66 +3,71 @@
 ## Summary
 
 `GET /api/integrations` currently describes OAuth integrations whose target
-hosts are known by the operator. That model cannot safely describe credentials
-such as a GitHub Enterprise personal access token (PAT): the product is known,
-but each user chooses a different enterprise host when connecting it.
+hosts are known by the operator. That model cannot describe credentials such as
+a GitHub Enterprise personal access token (PAT): the product is known, but each
+user chooses a different enterprise host when connecting it.
 
-Add a second integration mode, `manual`, whose public definition contains a
-small, server-defined setup form. Submitting that form creates an immutable
-credential binding between one secret and a normalized set of destination
-hosts. The frontend never submits arbitrary `ServiceConfig` or injection
-templates.
+Extend the integrations API with a `manual` setup definition. The OAuth helper
+publishes only the form schema and a proxy-relative submission path. The
+browser submits the destination and PAT directly to the proxy that will use
+them. Only that proxy stores, validates, lists, rotates, or deletes the installed
+binding.
 
-The central security invariant is:
+The ownership invariant is:
 
-> A secret is only injected into destinations derived by the server from the
-> validated setup values stored with that same credential instance.
+> Integration definitions may be distributed, but installed destinations,
+> secrets, verification state, and runtime metadata exist only on the proxy.
 
-This keeps integrations discoverable through the same API while preventing a
-frontend or compromised agent from turning a stored PAT into an unrestricted
-forward-proxy credential.
+The security invariant is:
+
+> A secret is injected only into destinations derived by the proxy from the
+> validated setup values stored with that same local binding.
 
 ## Goals
 
-- Expose integrations whose destination host is selected at setup time.
-- Support GitHub Enterprise PATs first, without making the API GitHub-specific.
-- Keep secret values out of integration, connection, and error responses.
-- Make the credential-to-host binding explicit, auditable, and revocable.
-- Reuse the existing service metadata matcher and injector after setup.
-- Permit multiple connections of one integration, for example two GitHub
-  Enterprise installations.
+- Publish setup metadata for services whose destination is selected at setup.
+- Support GitHub Enterprise PATs first without making the catalog API
+  GitHub-specific.
+- Keep all installed-connection information local to the proxy.
+- Keep secret values out of catalog, status, error, and log responses.
+- Bind each credential to an exact, normalized destination.
+- Permit multiple local bindings of one integration.
 
 ## Non-goals
 
-- Accept arbitrary host rules or injection templates from an untrusted client.
-- Discover every host by following redirects or inspecting the PAT.
-- Verify that a token has particular upstream permissions.
+- Store or proxy connection records in the OAuth helper or catalog service.
+- Let the helper query whether a proxy has installed an integration.
+- Accept arbitrary host rules or injection templates from a frontend.
+- Discover destinations by following redirects or inspecting a PAT.
 - Replace the existing OAuth flow in the first version.
 - Allow wildcard or suffix destinations from user input.
 
-## Model
+## Trust and ownership boundaries
 
-Separate the current overloaded notion of an integration into two resources:
+There are three participants:
 
-1. **Integration definition**: operator-controlled metadata and setup schema.
-   Its ID is stable, for example `github-enterprise-pat`.
-2. **Connection**: a user-scoped installed instance containing the normalized
-   destination, generated credential ID, non-secret display metadata, and
-   secret-store references. Its ID is opaque, for example `con_01J...`.
+1. **Integration catalog / OAuth helper** publishes operator-controlled
+   definitions such as names, icons, field schemas, and adapter IDs. It has no
+   per-user installation state.
+2. **Frontend** renders a definition and sends entered values directly to the
+   selected proxy. It does not send them through the helper.
+3. **Proxy** owns the installed binding. It validates the destination, verifies
+   the PAT, stores the secret and runtime service metadata, and injects the
+   credential into matching requests.
 
-An OAuth integration is still represented by a definition, but uses
-`setup.kind: oauth`. A PAT-style integration uses `setup.kind: manual`.
-Connections give both kinds a common lifecycle API over time, although OAuth
-connection migration is not required for v1.
+The helper cannot list local bindings, receive PATs, receive enterprise
+hostnames during setup, or call a proxy callback after registration. This is
+true even when the helper and proxy happen to run in the same process: their API
+and storage responsibilities remain separate.
 
-The connection ID, not the definition ID, is used as the runtime credential ID.
-This prevents two installations of the same product from overwriting each
-other. Runtime service metadata is materialized under the connection ID.
+`integration_id` is catalog data and may be shared. `binding_id` is generated
+by a proxy and meaningful only on that proxy. Runtime credential IDs are derived
+from local binding IDs so two installations cannot overwrite each other.
 
-## Configuration
+## Catalog configuration
 
-Extend the metadata currently held in `server.oauth.integrations` into a
-top-level definition registry. Keep the old location as a compatibility input.
+Extend integration metadata with an operator-controlled setup schema. The
+definition deliberately contains no installed destination.
 
 ```yaml
 server:
@@ -73,6 +78,8 @@ server:
       released: true
       setup:
         kind: manual
+        submitTo: proxy
+        proxyPath: /_scia/integrations/github-enterprise-pat/bindings
         fields:
           - id: base_url
             type: url
@@ -83,46 +90,22 @@ server:
             type: secret
             label: Personal access token
             required: true
-        verification:
-          method: GET
-          path: /api/v3/user
-          expectedStatus: [200]
-      binding:
-        adapter: github-enterprise-pat
-        destinationField: base_url
-        secretField: token
-        allowPrivateNetworks: true
-        allowedPorts: [443]
+      adapter: github-enterprise-pat
 ```
 
-`adapter` selects audited server-side code. The public configuration does not
-contain header templates, secret keys, host suffixes, or arbitrary verification
-URLs. Initially adapters are compiled in. A future generic adapter may be
-allowed only from operator-owned config, never from the create-connection body.
+`adapter` selects reviewed behavior implemented by the proxy. It is safe to
+publish the adapter identifier, but not internal header templates or secret
+keys. Initially adapters are compiled in. A future generic adapter may be
+loaded from operator-owned proxy configuration, never from a binding request.
 
-For GitHub Enterprise, the adapter produces the following runtime metadata:
+A proxy must have the named adapter enabled locally. Receiving a catalog
+definition does not install code or grant new egress access. Unknown or disabled
+adapters are rejected by the proxy.
 
-```yaml
-hosts:
-  - host: github.example.com
-    pathPrefix: /api/v3/
-    authMethod: bearer
-injection:
-  headers:
-    - name: Authorization
-      value: "Bearer {{ .access_token }}"
-```
+## Catalog API
 
-The adapter may optionally add a second, explicitly reviewed rule for Git LFS
-or other endpoints. It must not infer `*.example.com` from
-`github.example.com`.
-
-## Public API
-
-### List definitions
-
-Keep `GET /api/integrations`, add a version marker, `setup`, and `capabilities`.
-Existing OAuth fields remain during migration.
+Keep `GET /api/integrations`, add a version marker and `setup`. Existing OAuth
+fields remain during migration.
 
 ```json
 {
@@ -134,6 +117,8 @@ Existing OAuth fields remain during migration.
       "released": true,
       "setup": {
         "kind": "manual",
+        "submit_to": "proxy",
+        "proxy_path": "/_scia/integrations/github-enterprise-pat/bindings",
         "fields": [
           {
             "id": "base_url",
@@ -150,7 +135,7 @@ Existing OAuth fields remain during migration.
         ]
       },
       "capabilities": {
-        "multiple_connections": true,
+        "multiple_bindings": true,
         "verify_on_create": true
       }
     }
@@ -158,14 +143,24 @@ Existing OAuth fields remain during migration.
 }
 ```
 
-The response must not expose binding configuration, verification headers,
-secret-store keys, injection templates, or upstream credentials.
+`proxy_path` is relative. The catalog must not choose or return a proxy origin.
+The frontend already knows which proxy it is configuring and resolves the path
+against that trusted origin. This prevents a catalog response from redirecting
+the PAT to another server.
 
-### Create a connection
+The catalog response contains no binding IDs, destinations, verification
+results, secret references, injection templates, or binding counts.
+
+## Proxy-local API
+
+These endpoints are served only by the proxy and use the proxy's existing
+user/admin authorization boundary. They are not mounted on the OAuth helper.
+
+### Create a binding
 
 ```http
-POST /api/integrations/github-enterprise-pat/connections
-Authorization: Bearer <user token>
+POST /_scia/integrations/github-enterprise-pat/bindings
+Authorization: Bearer <proxy user token>
 Idempotency-Key: <uuid>
 Content-Type: application/json
 
@@ -179,11 +174,13 @@ Content-Type: application/json
 }
 ```
 
-Successful response:
+The proxy looks up the locally enabled adapter, validates only its declared
+fields, creates an opaque local `binding_id`, and materializes runtime metadata.
+Successful response never echoes the PAT:
 
 ```json
 {
-  "id": "con_01JABC...",
+  "id": "bind_01JABC...",
   "integration_id": "github-enterprise-pat",
   "display_name": "Corp GitHub",
   "destination": {
@@ -196,163 +193,173 @@ Successful response:
 }
 ```
 
-Use `201 Created` for a new connection and return the same result for a replayed
-idempotency key. Never echo the secret. Return validation errors using stable
-field codes, for example `invalid_url`, `port_not_allowed`,
-`destination_not_allowed`, or `verification_failed`; upstream response bodies
-must not be relayed.
+Use `201 Created`; a replayed idempotency key returns the same local result.
+Return stable errors such as `invalid_url`, `port_not_allowed`,
+`destination_not_allowed`, and `verification_failed`. Do not relay upstream
+response bodies.
 
-`verify: false` is accepted only when the definition permits it. Otherwise the
-server verifies before committing. Verification sends the secret directly to
-the normalized destination using the adapter's fixed method and path.
-
-### Manage connections
+### Manage local bindings
 
 ```text
-GET    /api/integration-connections
-GET    /api/integration-connections/{connection_id}
-PATCH  /api/integration-connections/{connection_id}
-DELETE /api/integration-connections/{connection_id}
-POST   /api/integration-connections/{connection_id}/verify
-PUT    /api/integration-connections/{connection_id}/secret
+GET    /_scia/integration-bindings
+GET    /_scia/integration-bindings/{binding_id}
+PATCH  /_scia/integration-bindings/{binding_id}
+DELETE /_scia/integration-bindings/{binding_id}
+POST   /_scia/integration-bindings/{binding_id}/verify
+PUT    /_scia/integration-bindings/{binding_id}/secret
 ```
 
-- `GET` responses contain destination and status metadata, never secrets.
-- `PATCH` may change only `display_name` in v1. Changing a destination creates a
-  new connection so a credential is never silently rebound to another host.
-- `PUT .../secret` rotates the secret for the existing immutable destination,
-  verifies it, and atomically replaces the stored value.
-- `DELETE` removes the token, runtime metadata, and index entry atomically (or
-  marks the connection deleting until all three operations finish).
+- All responses and operations remain on the proxy.
+- `GET` contains local destination and status metadata, never secrets.
+- `PATCH` changes only `display_name` in v1. Changing a destination creates a
+  new binding so a credential is never silently rebound.
+- `PUT .../secret` rotates and verifies a secret for the immutable destination,
+  then atomically replaces the stored value.
+- `DELETE` removes the local secret, metadata, and runtime index.
 
-All endpoints are user-scoped by default. Team-scoped connections require a
-separate permission and explicit `scope`/`team_id`; they must not be inferred
-from the integration definition.
+The existing `POST /_scia/tokens` remains an administrator API. The frontend
+must not use it for manual setup because it accepts caller-provided
+`ServiceConfig`, including injection behavior. The binding endpoint accepts
+only adapter fields and constructs service metadata inside the proxy.
 
-## Destination normalization and validation
+## GitHub Enterprise PAT adapter
 
-For a `url` destination field:
+For `base_url: https://github.example.com`, the proxy adapter produces local
+runtime metadata equivalent to:
 
-1. Parse with a strict URL parser. Require `https` by default.
-2. Reject user info, fragments, query strings, encoded host characters, and an
-   empty host. Reject a non-root path unless the adapter explicitly supports a
-   base path.
-3. Lowercase the DNS name, remove one trailing dot, convert IDNs to ASCII, and
-   reject invalid DNS labels. Store the canonical origin and host separately.
-4. Permit only adapter-configured ports. Store an explicit non-default port as
-   part of the origin and runtime match key.
-5. Reject IP literals unless the operator explicitly permits them.
-6. Resolve all DNS answers during verification. Apply the deployment's
-   private/link-local/loopback/metadata-address policy to every answer.
-7. Pin the verification connection to a validated address while retaining the
-   original Host/SNI. Do not follow redirects. This prevents DNS rebinding and
-   redirect-based secret exfiltration.
-8. Re-apply egress policy and DNS checks at request time. Creation-time
-   validation alone is not sufficient because DNS can change.
+```yaml
+hosts:
+  - host: github.example.com
+    pathPrefix: /api/v3/
+    authMethod: bearer
+injection:
+  headers:
+    - name: Authorization
+      value: "Bearer {{ .access_token }}"
+```
 
-Enterprise installations commonly use private networks, so private addresses
-may be enabled per definition by an operator. Even then, loopback, link-local,
-cloud metadata ranges, the proxy/admin listener, cluster control endpoints, and
-operator deny lists remain blocked. The UI cannot override these controls.
+It verifies with `GET /api/v3/user`, expects `200`, and never follows redirects.
+The adapter may later add Git LFS or upload hosts only as reviewed explicit
+rules. It must not derive `*.example.com` from `github.example.com`.
 
-## Storage and runtime projection
+## Destination validation
 
-Store one connection record and its secret transactionally where supported:
+For a URL destination, the proxy:
+
+1. Requires HTTPS by default.
+2. Rejects user info, fragments, query strings, encoded host characters, an
+   empty host, and non-root paths unless an adapter supports a base path.
+3. Lowercases DNS names, removes one trailing dot, converts IDNs to ASCII, and
+   rejects invalid labels.
+4. Allows only locally configured ports and rejects IP literals unless locally
+   enabled.
+5. Resolves every DNS answer during verification and applies local egress
+   policy to all of them.
+6. Pins verification to a validated address while retaining the original
+   Host/SNI and does not follow redirects.
+7. Re-applies egress and DNS checks at request time because DNS may change.
+
+Enterprise servers often use private networks, so a proxy operator may allow
+private ranges. Loopback, link-local, cloud metadata ranges, proxy/admin
+listeners, cluster control endpoints, and local deny lists remain blocked. The
+catalog and frontend cannot weaken these controls.
+
+## Proxy-local storage and runtime projection
+
+The proxy stores all binding state in its configured secret backend namespace:
 
 ```text
-connection/{owner}/{connection_id}/metadata
-connection/{owner}/{connection_id}/secret/access_token
-connection-index/{owner}/{integration_id}/{connection_id}
-service/{owner}/{connection_id}/metadata
+binding/{owner}/{binding_id}/metadata
+binding/{owner}/{binding_id}/secret/access_token
+binding-index/{owner}/{integration_id}/{binding_id}
+service/{owner}/{binding_id}/metadata
 ```
 
-The service projection is produced only by the selected adapter and normalized
-with `serviceinfo.Normalize`. Extend runtime matching to include owner and
-connection ID so one user's connection cannot authenticate another user's
-request. If the current deployment uses per-user secret stores, preserve that
-namespace instead of creating global credential IDs.
+Nothing is written back to the OAuth helper, catalog service, or a shared
+connection database. The service projection is produced only by the local
+adapter and normalized with `serviceinfo.Normalize`.
 
-The existing `POST /_scia/tokens` endpoint can remain an administrator API. It
-must not be exposed to the frontend as the implementation of manual setup,
-because it accepts caller-provided `ServiceConfig`, including injection
-behavior. The new endpoint accepts only fields declared in the definition and
-uses a server-side adapter to construct service metadata.
+Runtime matching includes the local owner and binding ID so one user's binding
+cannot authenticate another user's request. A deployment that isolates each
+proxy per user may keep this ownership implicit in the proxy instance, but must
+not create globally shared credential IDs.
 
-Configuration reload behavior:
+If the local secret backend lacks transactions, the proxy writes under a
+pending binding ID, publishes its index last, and garbage-collects stale pending
+records. Runtime lookup sees only indexed bindings. Rotation writes a new secret
+version, verifies it, then swaps the active local reference.
 
-- Existing connections retain the adapter version used to materialize them.
-- A definition removed or set to `released: false` cannot create new
-  connections; existing connections continue unless explicitly disabled.
-- An adapter change requiring broader destinations or injection behavior needs
-  an explicit migration. It must not silently broaden existing bindings.
+## Definition delivery and versioning
 
-## Authorization, audit, and observability
+The proxy must not depend on the helper at request time. There are two valid
+deployment models:
 
-- Creating, rotating, verifying, listing, and deleting connections requires an
-  authenticated user and owner check.
-- Rate-limit create and verify operations per user and destination.
-- Audit definition ID, connection ID, owner, normalized destination, operation,
-  result, and adapter version. Never log submitted values wholesale.
-- Redact configured secret fields from structured errors, request dumps,
-  tracing attributes, and upstream error bodies.
-- Emit metrics by integration ID and result code, not raw destination by
-  default; enterprise hostnames may be sensitive.
-- Return generic verification failures to clients and keep sanitized diagnostic
-  detail in privileged logs.
+- The proxy has the same operator-owned definitions in configuration.
+- The proxy caches signed/versioned public definitions from the helper, while
+  retaining a local allowlist of enabled adapters and egress policy.
 
-## Failure atomicity
+In either model, the proxy stores `definition_version` and `adapter_version` in
+local binding metadata. Removing a catalog entry prevents new setup in the UI
+but does not remotely delete or disable existing local bindings. Such lifecycle
+changes require a local proxy operation. Adapter changes that broaden a
+destination or injection rule require an explicit local migration.
 
-Connection creation follows this order:
+## Audit and observability
 
-1. Validate definition, declared fields, destination, authorization, and quota.
-2. Build the adapter-owned runtime projection in memory.
-3. Verify against the pinned destination when required.
-4. Commit connection metadata, secret, projection, and indexes.
-5. Return only non-secret metadata.
+- The proxy audits binding ID, local owner, normalized destination, operation,
+  result, and adapter version. The helper has no binding audit events because it
+  is not involved.
+- Create and verify are rate-limited locally per owner and destination.
+- The proxy redacts secret fields from errors, request dumps, traces, and
+  upstream response bodies.
+- Metrics use integration ID and result code; raw enterprise hostnames are
+  omitted by default because they may be sensitive.
 
-If the secret backend cannot provide a transaction, write under a pending
-connection ID, publish the index last, and garbage-collect stale pending data.
-Runtime lookups only see indexed connections. Secret rotation similarly writes
-a new version, verifies it, then swaps the active reference.
+## Request flow
 
-## Compatibility and rollout
+1. Frontend fetches the public definition from `GET /api/integrations`.
+2. Frontend renders `base_url` and `token` fields.
+3. Frontend submits them directly to the trusted proxy origin plus the relative
+   `proxy_path`.
+4. Proxy validates its locally enabled adapter and destination policy.
+5. Proxy verifies the PAT against a pinned destination.
+6. Proxy atomically stores the local binding, secret, projection, and index.
+7. Subsequent agent traffic is matched and injected entirely by the proxy; the
+   helper is not consulted.
 
-1. Add the v2 response fields while keeping the existing OAuth response shape.
-   Clients that ignore unknown fields continue to work.
-2. Implement connection storage and the GitHub Enterprise PAT adapter behind a
-   feature flag.
-3. Add user-scoped runtime projection and deletion/rotation APIs.
-4. Enable the manual definition for internal users and audit failed destination
-   validations.
+## Rollout
+
+1. Add v2 catalog fields while preserving the existing OAuth response shape.
+2. Implement proxy-local binding storage and the GitHub Enterprise PAT adapter
+   behind a feature flag.
+3. Add proxy-local list, deletion, verification, and rotation endpoints.
+4. Enable the adapter and definition for internal users.
 5. Publish the definition after frontend support is deployed.
-6. Later, represent OAuth authorizations as connections and deprecate the
-   provider-specific top-level fields.
 
 ## Test plan
 
-- Definition JSON contains setup fields but no binding or injection internals.
-- Two connections for one definition receive distinct credential IDs and hosts.
-- A PAT bound to `github.corp.example` is never injected into another host,
+- Catalog JSON contains setup fields but no binding or injection internals.
+- Creating a binding generates no request or write to the OAuth helper.
+- The PAT request body is sent only to the configured proxy origin.
+- Two bindings for one definition receive distinct local credential IDs.
+- A PAT bound to one enterprise host is never injected into another host,
   subdomain, redirect target, alternate port, or changed DNS destination.
 - URL parsing rejects user info, paths, queries, fragments, Unicode confusion,
   IP literals, and disallowed ports as configured.
 - DNS rebinding, multiple A/AAAA answers, private ranges, link-local and metadata
-  endpoints exercise the same egress policy at verification and request time.
-- Verification does not follow 3xx responses and does not leak upstream bodies.
-- Create idempotency cannot duplicate connections or overwrite another user's
-  secret.
+  endpoints exercise local policy at verification and request time.
+- Verification does not follow redirects or leak upstream bodies.
 - Rotation is atomic; failed verification leaves the old secret active.
-- Deletion removes the secret, metadata, service index, and runtime match.
+- Deletion removes all local secret, metadata, service, and index records.
+- Catalog removal does not remotely mutate an existing proxy binding.
 - Logs, traces, API errors, and audit events never contain submitted secrets.
-- Legacy OAuth integrations and administrator `/_scia/tokens` behavior remain
-  unchanged.
+- Legacy OAuth integrations and administrator `/_scia/tokens` remain unchanged.
 
 ## Decisions
 
-- Dynamic destinations are connection data, not mutable integration metadata.
-- Destination changes create a new connection; they do not mutate a binding.
-- User input supports exact origins only. Wildcards and suffix rules remain
-  operator-controlled.
-- Manual setup uses compiled, audited adapters in v1.
-- The integration catalog and connection lifecycle are public frontend APIs;
-  raw service metadata remains an internal/admin API.
+- The helper owns definitions only; the proxy exclusively owns bindings.
+- The frontend submits secrets directly to a known proxy using a relative path.
+- Destinations are immutable local binding data, never catalog metadata.
+- User input supports exact origins only; wildcards remain operator-controlled.
+- Manual setup uses locally enabled, reviewed adapters in v1.
+- No central connection lifecycle API is introduced.
