@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -376,5 +377,133 @@ func TestValidateAllowsRuleServices(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateAcceptsParameterServiceInputs(t *testing.T) {
+	released := true
+	cfg := &Config{
+		Server: ServerConfig{
+			Services: ServicesConfig{
+				"example-api": {
+					Name:        "Example API",
+					Description: "Connect with a personal access token.",
+					Released:    &released,
+					Inputs: []ServiceInputConfig{
+						{ID: "token", Name: "Personal access token", Description: "Token issued by Example API.", Type: "secret", Required: true, SecretKey: "access_token"},
+					},
+					Hosts: []ServiceHostRule{{Host: "api.example.com", AuthMethod: "bearer"}},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	service := cfg.Server.Services["example-api"]
+	if !service.ParameterService() {
+		t.Fatalf("expected parameter service")
+	}
+	if keys := service.InputSecretKeys(); len(keys) != 1 || keys[0] != "access_token" {
+		t.Fatalf("unexpected input secret keys: %#v", keys)
+	}
+}
+
+func TestValidateRejectsParameterServiceWithOAuth(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Services: ServicesConfig{
+				"example-api": {
+					Inputs: []ServiceInputConfig{{ID: "token", Type: "secret", SecretKey: "access_token"}},
+					Hosts:  []ServiceHostRule{{Host: "api.example.com"}},
+					OAuth:  &ServiceOAuthConfig{AuthURL: "http://example.com/auth", TokenURL: "http://example.com/token", ClientID: "id", ClientSecret: "secret"},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected error combining inputs with oauth")
+	}
+}
+
+func TestValidateRejectsBearerParameterServiceWithoutAccessTokenInput(t *testing.T) {
+	cfg := &Config{Server: ServerConfig{Services: ServicesConfig{
+		"example-api": {
+			Inputs: []ServiceInputConfig{{ID: "token", Type: "secret", SecretKey: "api_key"}},
+			Hosts:  []ServiceHostRule{{Host: "api.example.com", AuthMethod: "bearer"}},
+		},
+	}}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "access_token") {
+		t.Fatalf("expected access_token validation error, got %v", err)
+	}
+}
+
+func TestValidateRejectsDuplicateInputIDs(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Services: ServicesConfig{
+				"example-api": {
+					Inputs: []ServiceInputConfig{
+						{ID: "token", Type: "secret", SecretKey: "access_token"},
+						{ID: "token", Type: "secret", SecretKey: "api_key"},
+					},
+					Hosts: []ServiceHostRule{{Host: "api.example.com"}},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected duplicate input id error")
+	}
+}
+
+func TestValidateRejectsDuplicateInputSecretKeys(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Services: ServicesConfig{
+				"example-api": {
+					Inputs: []ServiceInputConfig{
+						{ID: "token", Type: "secret", SecretKey: "access_token"},
+						{ID: "token2", Type: "secret", SecretKey: "access_token"},
+					},
+					Hosts: []ServiceHostRule{{Host: "api.example.com"}},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected duplicate secret key error")
+	}
+}
+
+func TestValidateRejectsUnsupportedInputType(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Services: ServicesConfig{
+				"example-api": {
+					Inputs: []ServiceInputConfig{{ID: "token", Type: "opaque", SecretKey: "access_token"}},
+					Hosts:  []ServiceHostRule{{Host: "api.example.com"}},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected unsupported type error")
+	}
+}
+
+func TestValidateRejectsSecretInputWithoutSecretKey(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Services: ServicesConfig{
+				"example-api": {
+					Inputs: []ServiceInputConfig{{ID: "token", Type: "secret"}},
+					Hosts:  []ServiceHostRule{{Host: "api.example.com"}},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected missing secretKey error")
 	}
 }

@@ -207,6 +207,145 @@ func TestFrontendIntegrationsRequiresGet(t *testing.T) {
 	}
 }
 
+func TestFrontendIntegrationsReturnsParameterService(t *testing.T) {
+	released := true
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Services: config.ServicesConfig{
+				"example-api": {
+					Name:        "Example API",
+					Description: "Connect with a personal access token.",
+					Released:    &released,
+					Inputs: []config.ServiceInputConfig{
+						{ID: "token", Name: "Personal access token", Description: "Token issued by Example API.", Type: "secret", Required: true, SecretKey: "access_token"},
+					},
+					Hosts: []config.ServiceHostRule{{Host: "api.example.com", AuthMethod: "bearer"}},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body integrationsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Integrations) != 1 {
+		t.Fatalf("unexpected integrations: %#v", body.Integrations)
+	}
+	got := body.Integrations[0]
+	if got.ID != "example-api" || got.Provider != "example-api" || got.CredentialID != "example-api" {
+		t.Fatalf("unexpected integration identity: %#v", got)
+	}
+	if got.Source != "service" || got.AuthType != "parameters" {
+		t.Fatalf("unexpected source/auth_type: %#v", got)
+	}
+	if got.Name != "Example API" || got.Description != "Connect with a personal access token." || !got.Released {
+		t.Fatalf("metadata was not applied: %#v", got)
+	}
+	if len(got.Inputs) != 1 {
+		t.Fatalf("unexpected inputs: %#v", got.Inputs)
+	}
+	input := got.Inputs[0]
+	if input.ID != "token" || input.Name != "Personal access token" || input.Type != "secret" || !input.Required {
+		t.Fatalf("unexpected input: %#v", input)
+	}
+	if got.Connection == nil {
+		t.Fatalf("connection metadata missing")
+	}
+	if len(got.Connection.Hosts) != 1 || got.Connection.Hosts[0].Host != "api.example.com" {
+		t.Fatalf("unexpected connection hosts: %#v", got.Connection.Hosts)
+	}
+	if len(got.Connection.Headers) != 1 {
+		t.Fatalf("unexpected connection headers: %#v", got.Connection.Headers)
+	}
+	if got.Connection.Headers[0].Name != "Authorization" || got.Connection.Headers[0].Value != "Bearer {{secret}}" {
+		t.Fatalf("unexpected masked authorization header: %#v", got.Connection.Headers[0])
+	}
+	// secretKey must not leak anywhere in the response.
+	if strings.Contains(rec.Body.String(), "access_token") {
+		t.Fatalf("secretKey leaked in response: %s", rec.Body.String())
+	}
+}
+
+func TestFrontendIntegrationsMasksExplicitSecretTemplate(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{
+		Server: config.ServerConfig{
+			Services: config.ServicesConfig{
+				"example-api": {
+					Inputs: []config.ServiceInputConfig{
+						{ID: "token", Type: "secret", SecretKey: "api_key", Required: true},
+					},
+					Hosts: []config.ServiceHostRule{{Host: "api.example.com", AuthMethod: "none"}},
+					Injection: config.ServiceInjectionConfig{Headers: []config.InjectionTemplate{
+						{Name: "X-Api-Key", Value: "{{secret \"api_key\"}}"},
+					}},
+				},
+			},
+		},
+	})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body integrationsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Integrations) != 1 || body.Integrations[0].Connection == nil {
+		t.Fatalf("unexpected integrations: %#v", body.Integrations)
+	}
+	headers := body.Integrations[0].Connection.Headers
+	var xAPIKey string
+	for _, h := range headers {
+		if h.Name == "X-Api-Key" {
+			xAPIKey = h.Value
+		}
+	}
+	if xAPIKey != "{{secret}}" {
+		t.Fatalf("unexpected masked header value: %q", xAPIKey)
+	}
+	if strings.Contains(rec.Body.String(), "api_key") {
+		t.Fatalf("secretKey leaked in response: %s", rec.Body.String())
+	}
+	for _, h := range headers {
+		if h.Name == "Authorization" {
+			t.Fatalf("Authorization header should not be auto-added for authMethod none: %#v", h)
+		}
+	}
+}
+
+func TestFrontendIntegrationsMasksLiteralInjectionHeader(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{Server: config.ServerConfig{Services: config.ServicesConfig{
+		"example-api": {
+			Inputs:    []config.ServiceInputConfig{{ID: "token", Type: "secret", SecretKey: "api_key"}},
+			Hosts:     []config.ServiceHostRule{{Host: "api.example.com", AuthMethod: "none"}},
+			Injection: config.ServiceInjectionConfig{Headers: []config.InjectionTemplate{{Name: "X-API-Key", Value: "must-not-leak"}}},
+		},
+	}}})
+	srv := NewServer(store, secrets.NoopStore{}, slog.Default())
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/integrations", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "must-not-leak") || !strings.Contains(rec.Body.String(), "{{configured}}") {
+		t.Fatalf("literal injection value was not masked: %s", rec.Body.String())
+	}
+}
+
 func TestServiceMetadataReturnsConfiguredService(t *testing.T) {
 	store := newOAuthTestStore(t, &config.Config{
 		Server: config.ServerConfig{

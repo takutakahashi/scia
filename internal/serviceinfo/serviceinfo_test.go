@@ -9,6 +9,45 @@ import (
 	"github.com/takutakahashi/scia/internal/config"
 )
 
+func TestNormalizeValidatesParameterServiceInputs(t *testing.T) {
+	if _, err := Normalize("example-api", config.ServiceConfig{
+		Hosts: []config.ServiceHostRule{{Host: "api.example.com"}},
+		Inputs: []config.ServiceInputConfig{
+			{ID: "token", Type: "secret", SecretKey: "access_token"},
+			{ID: "token", Type: "secret", SecretKey: "api_key"},
+		},
+	}); err == nil {
+		t.Fatalf("expected duplicate input id error")
+	}
+	if _, err := Normalize("example-api", config.ServiceConfig{
+		Hosts:  []config.ServiceHostRule{{Host: "api.example.com"}},
+		Inputs: []config.ServiceInputConfig{{ID: "token", Type: "opaque"}},
+	}); err == nil {
+		t.Fatalf("expected unsupported input type error")
+	}
+}
+
+func TestPutPreservesParameterServiceInputs(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	err := Put(ctx, store, "example-api", config.ServiceConfig{
+		Hosts: []config.ServiceHostRule{{Host: "api.example.com", AuthMethod: "bearer"}},
+		Inputs: []config.ServiceInputConfig{
+			{ID: "token", Type: "secret", Required: true, SecretKey: "access_token"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, ok, err := Get(ctx, store, "example-api")
+	if err != nil || !ok {
+		t.Fatalf("service metadata was not stored: ok=%v err=%v", ok, err)
+	}
+	if !service.ParameterService() || len(service.Inputs) != 1 || service.Inputs[0].SecretKey != "access_token" {
+		t.Fatalf("unexpected stored service: %#v", service)
+	}
+}
+
 func TestPutDoesNotStoreOAuthClientValues(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryStore()

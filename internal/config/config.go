@@ -120,8 +120,22 @@ type ServiceConfig struct {
 	Description string                 `yaml:"description" json:"description,omitempty"`
 	Released    *bool                  `yaml:"released" json:"released,omitempty"`
 	Hosts       []ServiceHostRule      `yaml:"hosts" json:"hosts,omitempty"`
+	Inputs      []ServiceInputConfig   `yaml:"inputs" json:"inputs,omitempty"`
 	OAuth       *ServiceOAuthConfig    `yaml:"oauth" json:"oauth,omitempty"`
 	Injection   ServiceInjectionConfig `yaml:"injection" json:"injection,omitempty"`
+}
+
+// ServiceInputConfig describes a single parameter-based credential input for a
+// generic service. The initial implementation supports type "secret", whose
+// value is stored in the secret store under the service credential ID and
+// SecretKey.
+type ServiceInputConfig struct {
+	ID          string `yaml:"id" json:"id,omitempty"`
+	Name        string `yaml:"name" json:"name,omitempty"`
+	Description string `yaml:"description" json:"description,omitempty"`
+	Type        string `yaml:"type" json:"type,omitempty"`
+	Required    bool   `yaml:"required" json:"required,omitempty"`
+	SecretKey   string `yaml:"secretKey" json:"secretKey,omitempty"`
 }
 
 type ServiceHostRule struct {
@@ -130,6 +144,30 @@ type ServiceHostRule struct {
 	PathPrefix          string `yaml:"pathPrefix" json:"pathPrefix,omitempty"`
 	AuthMethod          string `yaml:"authMethod" json:"authMethod,omitempty"`
 	CredentialHostField string `yaml:"credentialHostField" json:"credentialHostField,omitempty"`
+}
+
+// ParameterService reports whether a service is a generic parameter-based
+// integration (no OAuth, with at least one configured input).
+func (s ServiceConfig) ParameterService() bool {
+	return s.OAuth == nil && len(s.Inputs) > 0
+}
+
+// InputSecretKeys returns the set of secret keys declared by parameter inputs
+// of type "secret". The returned map is keyed by secret key.
+func (s ServiceConfig) InputSecretKeys() []string {
+	keys := make([]string, 0, len(s.Inputs))
+	seen := map[string]struct{}{}
+	for _, input := range s.Inputs {
+		if input.Type != "secret" || input.SecretKey == "" {
+			continue
+		}
+		if _, ok := seen[input.SecretKey]; ok {
+			continue
+		}
+		seen[input.SecretKey] = struct{}{}
+		keys = append(keys, input.SecretKey)
+	}
+	return keys
 }
 
 type ServiceOAuthConfig struct {
@@ -520,7 +558,9 @@ func (c *Config) Validate() error {
 			default:
 				return fmt.Errorf("server.services[%q].oauth.tokenRequest.clientAuth must be body or basic", serviceID)
 			}
-			service.OAuth = service.OAuth
+		}
+		if err := ValidateServiceInputs(serviceID, service); err != nil {
+			return err
 		}
 		for i, h := range service.Injection.Headers {
 			if h.Name == "" || h.Value == "" {
@@ -935,6 +975,59 @@ func validServiceID(id string) bool {
 		}
 	}
 	return true
+}
+
+// ValidateServiceInputs validates parameter input definitions for a generic
+// service. It enforces unique non-empty input IDs, unique non-empty secret keys
+// for secret inputs, and rejects unsupported input types.
+func ValidateServiceInputs(serviceID string, service ServiceConfig) error {
+	if len(service.Inputs) == 0 {
+		return nil
+	}
+	if service.OAuth != nil {
+		return fmt.Errorf("server.services[%q].inputs cannot be combined with oauth", serviceID)
+	}
+	seenIDs := map[string]struct{}{}
+	seenSecretKeys := map[string]struct{}{}
+	for i, input := range service.Inputs {
+		prefix := fmt.Sprintf("server.services[%q].inputs[%d]", serviceID, i)
+		if input.ID == "" {
+			return fmt.Errorf("%s.id is required", prefix)
+		}
+		if _, ok := seenIDs[input.ID]; ok {
+			return fmt.Errorf("%s.id %q is duplicated", prefix, input.ID)
+		}
+		seenIDs[input.ID] = struct{}{}
+		switch input.Type {
+		case "secret":
+			if input.SecretKey == "" {
+				return fmt.Errorf("%s.secretKey is required for type %q", prefix, input.Type)
+			}
+			if _, ok := seenSecretKeys[input.SecretKey]; ok {
+				return fmt.Errorf("%s.secretKey %q is duplicated", prefix, input.SecretKey)
+			}
+			seenSecretKeys[input.SecretKey] = struct{}{}
+		default:
+			return fmt.Errorf("%s.type %q is not supported", prefix, input.Type)
+		}
+	}
+	for i, host := range service.Hosts {
+		if host.AuthMethod != "none" && !AllowedServiceSecretKey(service, "access_token") {
+			return fmt.Errorf("server.services[%q].hosts[%d].authMethod %q requires an input with secretKey %q", serviceID, i, host.AuthMethod, "access_token")
+		}
+	}
+	return nil
+}
+
+// AllowedServiceSecretKey reports whether key is a configured secret key for a
+// parameter-based service.
+func AllowedServiceSecretKey(service ServiceConfig, key string) bool {
+	for _, k := range service.InputSecretKeys() {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 func validSecretNamePrefix(prefix string) bool {

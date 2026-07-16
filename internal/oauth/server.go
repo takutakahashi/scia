@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,12 @@ import (
 	"github.com/takutakahashi/scia/internal/secrets"
 	"github.com/takutakahashi/scia/internal/serviceinfo"
 )
+
+// secretTemplateRe matches Go template invocations of the secret function such
+// as {{secret "access_token"}}, {{secret "key" 2}}, or {{ secret "key" }}.
+// The full match is replaced with {{secret}} so the referenced secret key is
+// not exposed in client-facing responses.
+var secretTemplateRe = regexp.MustCompile(`{{\s*secret\b[^}]*}}`)
 
 const googleAuthURL = "https://accounts.google.com/o/oauth2/v2/auth"
 const googleTokenURL = "https://oauth2.googleapis.com/token"
@@ -111,18 +118,45 @@ type integrationsResponse struct {
 }
 
 type frontendIntegration struct {
-	ID           string                     `json:"id"`
-	Provider     string                     `json:"provider"`
-	CredentialID string                     `json:"credential_id"`
-	Name         string                     `json:"name"`
-	IconURL      string                     `json:"icon_url,omitempty"`
-	Description  string                     `json:"description,omitempty"`
-	Released     bool                       `json:"released"`
-	Source       string                     `json:"source"`
-	StartURL     string                     `json:"start_url"`
-	RevokeURL    string                     `json:"revoke_url"`
-	Setup        map[string]string          `json:"setup"`
-	Scopes       []frontendIntegrationScope `json:"scopes"`
+	ID           string                         `json:"id"`
+	Provider     string                         `json:"provider"`
+	CredentialID string                         `json:"credential_id"`
+	Name         string                         `json:"name"`
+	IconURL      string                         `json:"icon_url,omitempty"`
+	Description  string                         `json:"description,omitempty"`
+	Released     bool                           `json:"released"`
+	Source       string                         `json:"source"`
+	AuthType     string                         `json:"auth_type,omitempty"`
+	Inputs       []frontendIntegrationInput     `json:"inputs,omitempty"`
+	Connection   *frontendIntegrationConnection `json:"connection,omitempty"`
+	StartURL     string                         `json:"start_url"`
+	RevokeURL    string                         `json:"revoke_url"`
+	Setup        map[string]string              `json:"setup"`
+	Scopes       []frontendIntegrationScope     `json:"scopes"`
+}
+
+type frontendIntegrationInput struct {
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Type        string `json:"type"`
+	Required    bool   `json:"required"`
+}
+
+type frontendIntegrationConnection struct {
+	Hosts   []frontendIntegrationConnectionHost   `json:"hosts"`
+	Headers []frontendIntegrationConnectionHeader `json:"headers,omitempty"`
+}
+
+type frontendIntegrationConnectionHost struct {
+	Host       string `json:"host,omitempty"`
+	HostSuffix string `json:"hostSuffix,omitempty"`
+	PathPrefix string `json:"pathPrefix,omitempty"`
+}
+
+type frontendIntegrationConnectionHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type frontendIntegrationScope struct {
@@ -1983,13 +2017,19 @@ func (s *Server) frontendIntegrationList(r *http.Request, cfg *config.Config) []
 		seen[integration.ID] = struct{}{}
 	}
 	for serviceID, service := range cfg.Server.Services {
-		if service.OAuth == nil {
+		if service.OAuth != nil {
+			if _, ok := seen[service.OAuth.CredentialID]; ok {
+				continue
+			}
+			integrations = append(integrations, s.genericFrontendIntegration(r, cfg, serviceID, service))
 			continue
 		}
-		if _, ok := seen[service.OAuth.CredentialID]; ok {
-			continue
+		if service.ParameterService() {
+			if _, ok := seen[serviceID]; ok {
+				continue
+			}
+			integrations = append(integrations, s.parameterFrontendIntegration(r, cfg, serviceID, service))
 		}
-		integrations = append(integrations, s.genericFrontendIntegration(r, cfg, serviceID, service))
 	}
 	sort.SliceStable(integrations, func(i, j int) bool {
 		return integrations[i].ID < integrations[j].ID
@@ -2016,6 +2056,118 @@ func (s *Server) genericFrontendIntegration(r *http.Request, cfg *config.Config,
 		callbackURL = s.providerRedirectURL(r, serviceID)
 	}
 	return s.frontendIntegration(metadata, serviceID, service.OAuth.CredentialID, "service", "", callbackURL)
+}
+
+func (s *Server) parameterFrontendIntegration(_ *http.Request, _ *config.Config, serviceID string, service config.ServiceConfig) frontendIntegration {
+	integration := frontendIntegration{
+		ID:           serviceID,
+		Provider:     serviceID,
+		CredentialID: serviceID,
+		Name:         firstNonEmpty(service.Name, serviceID),
+		IconURL:      service.IconURL,
+		Description:  service.Description,
+		Released:     integrationReleased(config.OAuthIntegrationMetadataConfig{Released: service.Released}),
+		Source:       "service",
+		AuthType:     "parameters",
+		Inputs:       parameterFrontendInputs(service),
+		Connection:   parameterFrontendConnection(service),
+		Setup:        map[string]string{},
+	}
+	return integration
+}
+
+func parameterFrontendInputs(service config.ServiceConfig) []frontendIntegrationInput {
+	inputs := make([]frontendIntegrationInput, 0, len(service.Inputs))
+	for _, input := range service.Inputs {
+		inputs = append(inputs, frontendIntegrationInput{
+			ID:          input.ID,
+			Name:        input.Name,
+			Description: input.Description,
+			Type:        input.Type,
+			Required:    input.Required,
+		})
+	}
+	return inputs
+}
+
+func parameterFrontendConnection(service config.ServiceConfig) *frontendIntegrationConnection {
+	connection := &frontendIntegrationConnection{}
+	for _, rule := range service.Hosts {
+		connection.Hosts = append(connection.Hosts, frontendIntegrationConnectionHost{
+			Host:       rule.Host,
+			HostSuffix: rule.HostSuffix,
+			PathPrefix: rule.PathPrefix,
+		})
+	}
+	connection.Headers = parameterConnectionHeaders(service)
+	return connection
+}
+
+// parameterConnectionHeaders returns masked header metadata for a parameter
+// based service. Explicit injection headers are masked so the referenced
+// secret keys are not exposed. When no explicit Authorization header is
+// configured, an auto-derived Authorization header is added based on the host
+// auth method so frontends can show how the proxy injects the stored secret.
+func parameterConnectionHeaders(service config.ServiceConfig) []frontendIntegrationConnectionHeader {
+	headers := make([]frontendIntegrationConnectionHeader, 0, len(service.Injection.Headers)+1)
+	hasAuthorization := false
+	for _, h := range service.Injection.Headers {
+		if strings.EqualFold(h.Name, "Authorization") {
+			hasAuthorization = true
+		}
+		headers = append(headers, frontendIntegrationConnectionHeader{
+			Name:  h.Name,
+			Value: maskInjectionHeaderValue(h.Value),
+		})
+	}
+	if !hasAuthorization {
+		if masked := maskedAuthHeader(service); masked != "" {
+			headers = append(headers, frontendIntegrationConnectionHeader{
+				Name:  "Authorization",
+				Value: masked,
+			})
+		}
+	}
+	return headers
+}
+
+// maskedAuthHeader returns a masked Authorization header value derived from the
+// service host auth method when the method injects an Authorization header. It
+// does not reveal the configured secret key.
+func maskedAuthHeader(service config.ServiceConfig) string {
+	if !config.AllowedServiceSecretKey(service, "access_token") {
+		return ""
+	}
+	for _, rule := range service.Hosts {
+		switch rule.AuthMethod {
+		case "bearer":
+			return "Bearer {{secret}}"
+		case "basic":
+			return "Basic {{secret}}"
+		case "basic-x-access-token":
+			return "Basic {{secret}}"
+		}
+	}
+	return ""
+}
+
+func maskInjectionHeaderValue(raw string) string {
+	masked := maskSecretTemplate(raw)
+	if masked == raw && raw != "" {
+		return "{{configured}}"
+	}
+	return masked
+}
+
+// maskSecretTemplate replaces secret template references such as
+// {{secret "access_token"}} with a generic {{secret}} placeholder so the
+// referenced secret key is not exposed in the integrations response.
+func maskSecretTemplate(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	masked := secretTemplateRe.ReplaceAllString(raw, "{{secret}}")
+	return masked
 }
 
 func (s *Server) googleFrontendIntegration(r *http.Request, cfg *config.Config, option googleOption) frontendIntegration {
