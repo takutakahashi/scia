@@ -207,13 +207,27 @@ long-lived `access_token` instead.
 See [docs/todoist-oauth.md](docs/todoist-oauth.md) for the full Todoist setup
 guide, including local helper setup and proxy injection.
 
-OAuth callback refresh tokens are stored in the SQLite secret store by default:
+OAuth callback refresh tokens are stored in an envelope-encrypted SQLite secret
+store by default. Generate a base64-encoded 32-byte key encryption key (KEK):
+
+```sh
+export SCIA_SECRETS_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+```
 
 ```yaml
 server:
   secrets:
+    mode: sqlite
     sqlitePath: "data/scia-secrets.db"
+    envelopeEncryption:
+      key: "env:SCIA_SECRETS_ENCRYPTION_KEY"
 ```
+
+Each write generates a new random 256-bit data encryption key (DEK);
+AES-256-GCM encrypts the value with the DEK and wraps the DEK with the KEK.
+Plaintext values from earlier versions are intentionally not readable. Keep the
+KEK outside the database and back it up securely: changing or losing it makes
+encrypted values unreadable.
 
 To send secrets to an external system instead, use the `external` secret store:
 

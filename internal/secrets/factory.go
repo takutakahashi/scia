@@ -14,7 +14,17 @@ func NewFromConfig(ctx context.Context, cfg *config.Config) (Store, error) {
 	}
 	switch mode {
 	case "sqlite":
-		return NewSQLiteStore(ctx, cfg.Server.Secrets.SQLitePath)
+		store, err := NewSQLiteStore(ctx, cfg.Server.Secrets.SQLitePath)
+		if err != nil {
+			return nil, err
+		}
+		encryptionKey := cfg.Server.Secrets.EnvelopeEncryption.Key
+		encryptedStore, err := NewEnvelopeStore(store, encryptionKey)
+		if err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("sqlite envelope encryption: %w", err)
+		}
+		return encryptedStore, nil
 	case "kubernetes":
 		restConfig, err := KubernetesRESTConfig()
 		if err != nil {

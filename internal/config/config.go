@@ -311,10 +311,15 @@ type GitHubOAuthConfig struct {
 }
 
 type SecretsConfig struct {
-	Mode       string                  `yaml:"mode"`
-	SQLitePath string                  `yaml:"sqlitePath"`
-	Kubernetes KubernetesSecretsConfig `yaml:"kubernetes"`
-	External   ExternalSecretsConfig   `yaml:"external"`
+	Mode               string                   `yaml:"mode"`
+	SQLitePath         string                   `yaml:"sqlitePath"`
+	EnvelopeEncryption EnvelopeEncryptionConfig `yaml:"envelopeEncryption"`
+	Kubernetes         KubernetesSecretsConfig  `yaml:"kubernetes"`
+	External           ExternalSecretsConfig    `yaml:"external"`
+}
+
+type EnvelopeEncryptionConfig struct {
+	Key string `yaml:"key"`
 }
 
 type KubernetesSecretsConfig struct {
@@ -398,6 +403,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.Secrets.SQLitePath == "" {
 		c.Server.Secrets.SQLitePath = "data/scia-secrets.db"
+	}
+	if c.Server.Secrets.EnvelopeEncryption.Key != "" && c.Server.Secrets.Mode != "sqlite" {
+		return fmt.Errorf("server.secrets.envelopeEncryption is supported only when server.secrets.mode is sqlite")
 	}
 	if c.Server.Secrets.Mode == "kubernetes" {
 		if c.Server.Secrets.Kubernetes.Namespace == "" {

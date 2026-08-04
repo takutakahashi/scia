@@ -96,6 +96,8 @@ server:
       redirectUrl: "http://localhost:8081/oauth/github/callback"
   secrets:
     sqlitePath: "data/scia-secrets.db"
+    envelopeEncryption:
+      key: "env:SCIA_SECRETS_ENCRYPTION_KEY" # base64-encoded 32-byte KEK
     # mode: "external"
     # external:
     #   webhook:
