@@ -207,12 +207,9 @@ long-lived `access_token` instead.
 See [docs/todoist-oauth.md](docs/todoist-oauth.md) for the full Todoist setup
 guide, including local helper setup and proxy injection.
 
-OAuth callback refresh tokens are stored in an envelope-encrypted SQLite secret
-store by default. Generate a base64-encoded 32-byte key encryption key (KEK):
-
-```sh
-export SCIA_SECRETS_ENCRYPTION_KEY="$(openssl rand -base64 32)"
-```
+OAuth callback refresh tokens are stored in an AWS KMS envelope-encrypted
+SQLite secret store by default. Create or select one symmetric KMS key for each
+environment, then configure its key ARN or ID:
 
 ```yaml
 server:
@@ -220,14 +217,44 @@ server:
     mode: sqlite
     sqlitePath: "data/scia-secrets.db"
     envelopeEncryption:
-      key: "env:SCIA_SECRETS_ENCRYPTION_KEY"
+      provider: aws-kms
+      cacheTTL: 5m
+      cacheMaxEntries: 1000
+      encryptionContext:
+        environment: production
+      awsKms:
+        keyId: "env:SCIA_AWS_KMS_KEY_ID"
+        region: us-east-1
 ```
 
-Each write generates a new random 256-bit data encryption key (DEK);
-AES-256-GCM encrypts the value with the DEK and wraps the DEK with the KEK.
-Plaintext values from earlier versions are intentionally not readable. Keep the
-KEK outside the database and back it up securely: changing or losing it makes
-encrypted values unreadable.
+Each write calls AWS KMS `GenerateDataKey` for a unique 256-bit data encryption
+key (DEK). AES-256-GCM encrypts the value locally; only the ciphertext and the
+KMS-encrypted DEK are stored in SQLite. Reads call KMS `Decrypt` when the DEK is
+not in the bounded TTL cache. Set `cacheTTL: 0s` or `cacheMaxEntries: 0` to
+disable caching. `scia_credential_id` and `scia_secret_key` are always included
+in the KMS Encryption Context and cannot be overridden. Configured context is
+also sent to KMS and may appear in CloudTrail, so it must not contain secrets.
+
+AWS credentials use the standard AWS SDK credential chain. In production,
+prefer EKS Pod Identity, IRSA, an ECS task role, or an EC2 instance role. The
+runtime identity needs only `kms:GenerateDataKey` and `kms:Decrypt` on the
+configured key. Plaintext values and envelopes from the earlier static-KEK
+format are intentionally not readable.
+
+Example IAM statement:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+  "Resource": "arn:aws:kms:us-east-1:123456789012:key/KEY_ID",
+  "Condition": {
+    "StringEquals": {
+      "kms:EncryptionContext:environment": "production"
+    }
+  }
+}
+```
 
 To send secrets to an external system instead, use the `external` secret store:
 

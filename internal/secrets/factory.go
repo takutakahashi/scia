@@ -3,7 +3,10 @@ package secrets
 import (
 	"context"
 	"fmt"
+	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/takutakahashi/scia/internal/config"
 )
 
@@ -18,8 +21,34 @@ func NewFromConfig(ctx context.Context, cfg *config.Config) (Store, error) {
 		if err != nil {
 			return nil, err
 		}
-		encryptionKey := cfg.Server.Secrets.EnvelopeEncryption.Key
-		encryptedStore, err := NewEnvelopeStore(store, encryptionKey)
+		envelope := cfg.Server.Secrets.EnvelopeEncryption
+		if envelope.AWSKMS.KeyID == "" {
+			_ = store.Close()
+			return nil, fmt.Errorf("sqlite envelope encryption: aws KMS key ID is required")
+		}
+		cacheTTL := 5 * time.Minute
+		if envelope.CacheTTL != nil {
+			cacheTTL = envelope.CacheTTL.Duration
+		}
+		cacheMaxEntries := 1000
+		if envelope.CacheMaxEntries != nil {
+			cacheMaxEntries = *envelope.CacheMaxEntries
+		}
+		loadOptions := []func(*awsconfig.LoadOptions) error{}
+		if envelope.AWSKMS.Region != "" {
+			loadOptions = append(loadOptions, awsconfig.WithRegion(envelope.AWSKMS.Region))
+		}
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOptions...)
+		if err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("sqlite envelope encryption: load AWS config: %w", err)
+		}
+		encryptedStore, err := NewAWSKMSEnvelopeStore(store, kms.NewFromConfig(awsCfg), AWSKMSEnvelopeOptions{
+			KeyID:             envelope.AWSKMS.KeyID,
+			EncryptionContext: envelope.EncryptionContext,
+			CacheTTL:          cacheTTL,
+			CacheMaxEntries:   cacheMaxEntries,
+		})
 		if err != nil {
 			_ = store.Close()
 			return nil, fmt.Errorf("sqlite envelope encryption: %w", err)

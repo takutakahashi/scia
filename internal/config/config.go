@@ -319,7 +319,16 @@ type SecretsConfig struct {
 }
 
 type EnvelopeEncryptionConfig struct {
-	Key string `yaml:"key"`
+	Provider          string            `yaml:"provider"`
+	CacheTTL          *Duration         `yaml:"cacheTTL"`
+	CacheMaxEntries   *int              `yaml:"cacheMaxEntries"`
+	EncryptionContext map[string]string `yaml:"encryptionContext"`
+	AWSKMS            AWSKMSConfig      `yaml:"awsKms"`
+}
+
+type AWSKMSConfig struct {
+	KeyID  string `yaml:"keyId"`
+	Region string `yaml:"region"`
 }
 
 type KubernetesSecretsConfig struct {
@@ -404,8 +413,38 @@ func (c *Config) Validate() error {
 	if c.Server.Secrets.SQLitePath == "" {
 		c.Server.Secrets.SQLitePath = "data/scia-secrets.db"
 	}
-	if c.Server.Secrets.EnvelopeEncryption.Key != "" && c.Server.Secrets.Mode != "sqlite" {
+	envelope := &c.Server.Secrets.EnvelopeEncryption
+	if envelope.Provider != "" && c.Server.Secrets.Mode != "sqlite" {
 		return fmt.Errorf("server.secrets.envelopeEncryption is supported only when server.secrets.mode is sqlite")
+	}
+	if c.Server.Secrets.Mode == "sqlite" && (envelope.Provider != "" || envelope.AWSKMS.KeyID != "" || envelope.AWSKMS.Region != "" || envelope.CacheTTL != nil || envelope.CacheMaxEntries != nil || len(envelope.EncryptionContext) != 0) {
+		if envelope.Provider == "" {
+			envelope.Provider = "aws-kms"
+		}
+		if envelope.Provider != "aws-kms" {
+			return fmt.Errorf("server.secrets.envelopeEncryption.provider must be aws-kms")
+		}
+		if envelope.AWSKMS.KeyID == "" {
+			return fmt.Errorf("server.secrets.envelopeEncryption.awsKms.keyId is required")
+		}
+		if envelope.CacheTTL == nil {
+			envelope.CacheTTL = &Duration{Duration: 5 * time.Minute}
+		}
+		if envelope.CacheTTL.Duration < 0 {
+			return fmt.Errorf("server.secrets.envelopeEncryption.cacheTTL cannot be negative")
+		}
+		if envelope.CacheMaxEntries == nil {
+			defaultMaxEntries := 1000
+			envelope.CacheMaxEntries = &defaultMaxEntries
+		}
+		if *envelope.CacheMaxEntries < 0 {
+			return fmt.Errorf("server.secrets.envelopeEncryption.cacheMaxEntries cannot be negative")
+		}
+		for _, reserved := range []string{"scia_credential_id", "scia_secret_key"} {
+			if _, exists := envelope.EncryptionContext[reserved]; exists {
+				return fmt.Errorf("server.secrets.envelopeEncryption.encryptionContext[%q] is reserved", reserved)
+			}
+		}
 	}
 	if c.Server.Secrets.Mode == "kubernetes" {
 		if c.Server.Secrets.Kubernetes.Namespace == "" {
