@@ -207,12 +207,83 @@ long-lived `access_token` instead.
 See [docs/todoist-oauth.md](docs/todoist-oauth.md) for the full Todoist setup
 guide, including local helper setup and proxy injection.
 
-OAuth callback refresh tokens are stored in the SQLite secret store by default:
+SQLite secrets support AWS KMS envelope encryption through the OAuth/integ
+server as a KMS broker. Only the integ server needs AWS credentials and KMS
+permissions. Configure the integ server with the symmetric KMS key and a strong,
+dedicated broker token:
 
 ```yaml
 server:
+  mode: oauth
   secrets:
-    sqlitePath: "data/scia-secrets.db"
+    mode: sqlite
+    sqlitePath: "data/scia-integ-secrets.db"
+    envelopeEncryption:
+      provider: aws-kms
+      cacheTTL: 5m
+      cacheMaxEntries: 1000
+      encryptionContext:
+        environment: production
+      awsKms:
+        keyId: "env:SCIA_AWS_KMS_KEY_ID"
+        region: us-east-1
+      kmsBroker:
+        token: "env:SCIA_KMS_BROKER_TOKEN"
+```
+
+Configure the proxy to keep its encrypted SQLite data locally while delegating
+only DEK generation and unwrap operations to the integ server:
+
+```yaml
+server:
+  mode: proxy
+  secrets:
+    mode: sqlite
+    sqlitePath: "data/scia-proxy-secrets.db"
+    envelopeEncryption:
+      provider: kms-broker
+      cacheTTL: 5m
+      cacheMaxEntries: 1000
+      kmsBroker:
+        url: "https://integ.example.com"
+        token: "env:SCIA_KMS_BROKER_TOKEN"
+```
+
+Each proxy write asks the broker to call AWS KMS `GenerateDataKey` for a unique
+256-bit data encryption key (DEK). The proxy encrypts the value locally with
+AES-256-GCM; only the ciphertext and KMS-encrypted DEK are stored in its SQLite
+database. On a cache miss, the proxy sends the encrypted DEK to the broker,
+which calls KMS `Decrypt` and returns only the plaintext DEK. Set `cacheTTL: 0s`
+or `cacheMaxEntries: 0` to disable the proxy's bounded in-memory DEK cache.
+
+The broker endpoints require `Authorization: Bearer` with the dedicated broker
+token. Use HTTPS between proxy and integ server because broker
+responses contain plaintext DEKs. The broker constructs
+`scia_credential_id` and `scia_secret_key` KMS Encryption Context entries and
+adds its configured context; callers cannot select a KMS key or override that
+server-owned context. Context values may appear in CloudTrail and must not
+contain secrets.
+
+AWS credentials use the standard AWS SDK credential chain. In production,
+prefer EKS Pod Identity, IRSA, an ECS task role, or an EC2 instance role. The
+integ server identity needs only `kms:GenerateDataKey` and `kms:Decrypt` on the
+configured key. The proxy needs no AWS credentials or KMS permissions.
+Plaintext values and envelopes from the earlier static-KEK format are
+intentionally not readable.
+
+Example IAM statement:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+  "Resource": "arn:aws:kms:us-east-1:123456789012:key/KEY_ID",
+  "Condition": {
+    "StringEquals": {
+      "kms:EncryptionContext:environment": "production"
+    }
+  }
+}
 ```
 
 To send secrets to an external system instead, use the `external` secret store:

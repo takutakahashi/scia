@@ -311,10 +311,30 @@ type GitHubOAuthConfig struct {
 }
 
 type SecretsConfig struct {
-	Mode       string                  `yaml:"mode"`
-	SQLitePath string                  `yaml:"sqlitePath"`
-	Kubernetes KubernetesSecretsConfig `yaml:"kubernetes"`
-	External   ExternalSecretsConfig   `yaml:"external"`
+	Mode               string                   `yaml:"mode"`
+	SQLitePath         string                   `yaml:"sqlitePath"`
+	EnvelopeEncryption EnvelopeEncryptionConfig `yaml:"envelopeEncryption"`
+	Kubernetes         KubernetesSecretsConfig  `yaml:"kubernetes"`
+	External           ExternalSecretsConfig    `yaml:"external"`
+}
+
+type EnvelopeEncryptionConfig struct {
+	Provider          string            `yaml:"provider"`
+	CacheTTL          *Duration         `yaml:"cacheTTL"`
+	CacheMaxEntries   *int              `yaml:"cacheMaxEntries"`
+	EncryptionContext map[string]string `yaml:"encryptionContext"`
+	AWSKMS            AWSKMSConfig      `yaml:"awsKms"`
+	KMSBroker         KMSBrokerConfig   `yaml:"kmsBroker"`
+}
+
+type AWSKMSConfig struct {
+	KeyID  string `yaml:"keyId"`
+	Region string `yaml:"region"`
+}
+
+type KMSBrokerConfig struct {
+	URL   string `yaml:"url"`
+	Token string `yaml:"token"`
 }
 
 type KubernetesSecretsConfig struct {
@@ -398,6 +418,56 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.Secrets.SQLitePath == "" {
 		c.Server.Secrets.SQLitePath = "data/scia-secrets.db"
+	}
+	envelope := &c.Server.Secrets.EnvelopeEncryption
+	if envelope.Provider != "" && c.Server.Secrets.Mode != "sqlite" {
+		return fmt.Errorf("server.secrets.envelopeEncryption is supported only when server.secrets.mode is sqlite")
+	}
+	if c.Server.Secrets.Mode == "sqlite" && envelope.Provider != "" {
+		switch envelope.Provider {
+		case "aws-kms":
+			if c.Server.Mode != "oauth" {
+				return fmt.Errorf("server.secrets.envelopeEncryption.provider aws-kms is supported only in oauth mode")
+			}
+			if envelope.AWSKMS.KeyID == "" {
+				return fmt.Errorf("server.secrets.envelopeEncryption.awsKms.keyId is required")
+			}
+			if HeaderValueFromEnv(envelope.KMSBroker.Token) == "" {
+				return fmt.Errorf("server.secrets.envelopeEncryption.kmsBroker.token is required")
+			}
+		case "kms-broker":
+			if c.Server.Mode != "proxy" {
+				return fmt.Errorf("server.secrets.envelopeEncryption.provider kms-broker is supported only in proxy mode")
+			}
+			brokerURL := HeaderValueFromEnv(envelope.KMSBroker.URL)
+			parsed, err := url.Parse(brokerURL)
+			if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+				return fmt.Errorf("server.secrets.envelopeEncryption.kmsBroker.url must be a valid http or https URL")
+			}
+			if HeaderValueFromEnv(envelope.KMSBroker.Token) == "" {
+				return fmt.Errorf("server.secrets.envelopeEncryption.kmsBroker.token is required")
+			}
+		default:
+			return fmt.Errorf("server.secrets.envelopeEncryption.provider must be aws-kms or kms-broker")
+		}
+		if envelope.CacheTTL == nil {
+			envelope.CacheTTL = &Duration{Duration: 5 * time.Minute}
+		}
+		if envelope.CacheTTL.Duration < 0 {
+			return fmt.Errorf("server.secrets.envelopeEncryption.cacheTTL cannot be negative")
+		}
+		if envelope.CacheMaxEntries == nil {
+			defaultMaxEntries := 1000
+			envelope.CacheMaxEntries = &defaultMaxEntries
+		}
+		if *envelope.CacheMaxEntries < 0 {
+			return fmt.Errorf("server.secrets.envelopeEncryption.cacheMaxEntries cannot be negative")
+		}
+		for _, reserved := range []string{"scia_credential_id", "scia_secret_key"} {
+			if _, exists := envelope.EncryptionContext[reserved]; exists {
+				return fmt.Errorf("server.secrets.envelopeEncryption.encryptionContext[%q] is reserved", reserved)
+			}
+		}
 	}
 	if c.Server.Secrets.Mode == "kubernetes" {
 		if c.Server.Secrets.Kubernetes.Namespace == "" {

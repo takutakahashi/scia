@@ -96,6 +96,13 @@ server:
       redirectUrl: "http://localhost:8081/oauth/github/callback"
   secrets:
     sqlitePath: "data/scia-secrets.db"
+    envelopeEncryption:
+      provider: kms-broker
+      cacheTTL: 5m
+      cacheMaxEntries: 1000
+      kmsBroker:
+        url: "env:SCIA_KMS_BROKER_URL"
+        token: "env:SCIA_KMS_BROKER_TOKEN"
     # mode: "external"
     # external:
     #   webhook:

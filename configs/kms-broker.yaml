@@ -1,0 +1,21 @@
+server:
+  mode: oauth
+  oauth:
+    listen: "0.0.0.0:8081"
+  secrets:
+    mode: sqlite
+    sqlitePath: "data/scia-integ-secrets.db"
+    envelopeEncryption:
+      provider: aws-kms
+      cacheTTL: 5m
+      cacheMaxEntries: 1000
+      encryptionContext:
+        environment: production
+      awsKms:
+        keyId: "env:SCIA_AWS_KMS_KEY_ID"
+        # region: ap-northeast-1 # or set AWS_REGION
+      kmsBroker:
+        token: "env:SCIA_KMS_BROKER_TOKEN"
+
+credentials: []
+rules: []
