@@ -22,9 +22,9 @@ func NewFromConfig(ctx context.Context, cfg *config.Config) (Store, error) {
 			return nil, err
 		}
 		envelope := cfg.Server.Secrets.EnvelopeEncryption
-		if envelope.AWSKMS.KeyID == "" {
+		if envelope.Provider == "" {
 			_ = store.Close()
-			return nil, fmt.Errorf("sqlite envelope encryption: aws KMS key ID is required")
+			return nil, fmt.Errorf("sqlite envelope encryption provider is required")
 		}
 		cacheTTL := 5 * time.Minute
 		if envelope.CacheTTL != nil {
@@ -34,17 +34,41 @@ func NewFromConfig(ctx context.Context, cfg *config.Config) (Store, error) {
 		if envelope.CacheMaxEntries != nil {
 			cacheMaxEntries = *envelope.CacheMaxEntries
 		}
-		loadOptions := []func(*awsconfig.LoadOptions) error{}
-		if envelope.AWSKMS.Region != "" {
-			loadOptions = append(loadOptions, awsconfig.WithRegion(envelope.AWSKMS.Region))
-		}
-		awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOptions...)
-		if err != nil {
+		var kmsClient awsKMSClient
+		keyID := envelope.AWSKMS.KeyID
+		switch envelope.Provider {
+		case "aws-kms":
+			if keyID == "" {
+				_ = store.Close()
+				return nil, fmt.Errorf("sqlite envelope encryption: aws KMS key ID is required")
+			}
+			loadOptions := []func(*awsconfig.LoadOptions) error{}
+			if envelope.AWSKMS.Region != "" {
+				loadOptions = append(loadOptions, awsconfig.WithRegion(envelope.AWSKMS.Region))
+			}
+			awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOptions...)
+			if err != nil {
+				_ = store.Close()
+				return nil, fmt.Errorf("sqlite envelope encryption: load AWS config: %w", err)
+			}
+			kmsClient = kms.NewFromConfig(awsCfg)
+		case "kms-broker":
+			keyID = kmsBrokerKeyID
+			kmsClient, err = NewKMSBrokerClient(
+				config.HeaderValueFromEnv(envelope.KMSBroker.URL),
+				config.HeaderValueFromEnv(envelope.KMSBroker.Token),
+				nil,
+			)
+			if err != nil {
+				_ = store.Close()
+				return nil, fmt.Errorf("sqlite envelope encryption: %w", err)
+			}
+		default:
 			_ = store.Close()
-			return nil, fmt.Errorf("sqlite envelope encryption: load AWS config: %w", err)
+			return nil, fmt.Errorf("sqlite envelope encryption: unsupported provider %q", envelope.Provider)
 		}
-		encryptedStore, err := NewAWSKMSEnvelopeStore(store, kms.NewFromConfig(awsCfg), AWSKMSEnvelopeOptions{
-			KeyID:             envelope.AWSKMS.KeyID,
+		encryptedStore, err := NewAWSKMSEnvelopeStore(store, kmsClient, AWSKMSEnvelopeOptions{
+			KeyID:             keyID,
 			EncryptionContext: envelope.EncryptionContext,
 			CacheTTL:          cacheTTL,
 			CacheMaxEntries:   cacheMaxEntries,

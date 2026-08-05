@@ -191,12 +191,17 @@ func TestValidateDefaultsServerModeToProxy(t *testing.T) {
 }
 
 func TestValidateDefaultsAWSKMSEnvelopeCache(t *testing.T) {
-	cfg := Config{Server: ServerConfig{Secrets: SecretsConfig{
-		Mode: "sqlite",
-		EnvelopeEncryption: EnvelopeEncryptionConfig{
-			AWSKMS: AWSKMSConfig{KeyID: "arn:aws:kms:us-east-1:123456789012:key/test"},
+	cfg := Config{Server: ServerConfig{
+		Mode: "oauth",
+		Secrets: SecretsConfig{
+			Mode: "sqlite",
+			EnvelopeEncryption: EnvelopeEncryptionConfig{
+				Provider:  "aws-kms",
+				AWSKMS:    AWSKMSConfig{KeyID: "arn:aws:kms:us-east-1:123456789012:key/test"},
+				KMSBroker: KMSBrokerConfig{Token: "broker-token"},
+			},
 		},
-	}}}
+	}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -213,19 +218,60 @@ func TestValidateDefaultsAWSKMSEnvelopeCache(t *testing.T) {
 
 func TestValidateAllowsDisablingAWSKMSEnvelopeCache(t *testing.T) {
 	zeroEntries := 0
-	cfg := Config{Server: ServerConfig{Secrets: SecretsConfig{
-		Mode: "sqlite",
-		EnvelopeEncryption: EnvelopeEncryptionConfig{
-			CacheTTL:        &Duration{},
-			CacheMaxEntries: &zeroEntries,
-			AWSKMS:          AWSKMSConfig{KeyID: "test-key"},
+	cfg := Config{Server: ServerConfig{
+		Mode: "oauth",
+		Secrets: SecretsConfig{
+			Mode: "sqlite",
+			EnvelopeEncryption: EnvelopeEncryptionConfig{
+				Provider:        "aws-kms",
+				CacheTTL:        &Duration{},
+				CacheMaxEntries: &zeroEntries,
+				AWSKMS:          AWSKMSConfig{KeyID: "test-key"},
+				KMSBroker:       KMSBrokerConfig{Token: "broker-token"},
+			},
 		},
-	}}}
+	}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Server.Secrets.EnvelopeEncryption.CacheTTL.Duration != 0 || *cfg.Server.Secrets.EnvelopeEncryption.CacheMaxEntries != 0 {
 		t.Fatal("explicit zero cache settings were replaced by defaults")
+	}
+}
+
+func TestValidateAcceptsProxyKMSBroker(t *testing.T) {
+	cfg := Config{Server: ServerConfig{
+		Mode: "proxy",
+		Secrets: SecretsConfig{
+			Mode: "sqlite",
+			EnvelopeEncryption: EnvelopeEncryptionConfig{
+				Provider: "kms-broker",
+				KMSBroker: KMSBrokerConfig{
+					URL:   "https://integ.example.com",
+					Token: "broker-token",
+				},
+			},
+		},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateRejectsDirectAWSKMSInProxyMode(t *testing.T) {
+	cfg := Config{Server: ServerConfig{
+		Mode: "proxy",
+		Secrets: SecretsConfig{
+			Mode: "sqlite",
+			EnvelopeEncryption: EnvelopeEncryptionConfig{
+				Provider:  "aws-kms",
+				AWSKMS:    AWSKMSConfig{KeyID: "test-key"},
+				KMSBroker: KMSBrokerConfig{Token: "broker-token"},
+			},
+		},
+	}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected direct AWS KMS in proxy mode to fail")
 	}
 }
 

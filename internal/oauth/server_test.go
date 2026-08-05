@@ -2,7 +2,9 @@ package oauth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +41,93 @@ func TestHealthz(t *testing.T) {
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
+func TestKMSBrokerEndpoints(t *testing.T) {
+	store := newOAuthTestStore(t, &config.Config{Server: config.ServerConfig{
+		Mode: "oauth",
+		Secrets: config.SecretsConfig{EnvelopeEncryption: config.EnvelopeEncryptionConfig{
+			KMSBroker: config.KMSBrokerConfig{Token: "broker-token"},
+		}},
+	}})
+	secretStore := &testKMSBrokerStore{memorySecretStore: newMemorySecretStore()}
+	srv := NewServer(store, secretStore, slog.Default())
+
+	requestBody := `{"credentialId":"alice","key":"access_token"}`
+	unauthorized := httptest.NewRequest(http.MethodPost, "/api/kms/data-key/generate", strings.NewReader(requestBody))
+	unauthorized.Header.Set("Content-Type", "application/json")
+	unauthorizedRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(unauthorizedRec, unauthorized)
+	if unauthorizedRec.Code != http.StatusUnauthorized {
+		t.Fatalf("unexpected unauthorized status: %d", unauthorizedRec.Code)
+	}
+
+	generate := httptest.NewRequest(http.MethodPost, "/api/kms/data-key/generate", strings.NewReader(requestBody))
+	generate.Header.Set("Authorization", "Bearer broker-token")
+	generate.Header.Set("Content-Type", "application/json")
+	generateRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(generateRec, generate)
+	if generateRec.Code != http.StatusOK {
+		t.Fatalf("unexpected generate status: %d body=%s", generateRec.Code, generateRec.Body.String())
+	}
+	var generated secrets.KMSBrokerResponse
+	if err := json.NewDecoder(generateRec.Body).Decode(&generated); err != nil {
+		t.Fatal(err)
+	}
+	if generated.EncryptedDEK != base64.RawStdEncoding.EncodeToString([]byte("kms-ciphertext")) {
+		t.Fatalf("unexpected encrypted DEK: %q", generated.EncryptedDEK)
+	}
+
+	decryptBody := `{"credentialId":"alice","key":"access_token","encryptedDek":"` + generated.EncryptedDEK + `"}`
+	decrypt := httptest.NewRequest(http.MethodPost, "/api/kms/data-key/decrypt", strings.NewReader(decryptBody))
+	decrypt.Header.Set("Authorization", "Bearer broker-token")
+	decrypt.Header.Set("Content-Type", "application/json")
+	decryptRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(decryptRec, decrypt)
+	if decryptRec.Code != http.StatusOK {
+		t.Fatalf("unexpected decrypt status: %d body=%s", decryptRec.Code, decryptRec.Body.String())
+	}
+	if secretStore.credentialID != "alice" || secretStore.key != "access_token" {
+		t.Fatalf("unexpected broker record: %q/%q", secretStore.credentialID, secretStore.key)
+	}
+}
+
+func TestKMSBrokerProxyEnvelopeRoundTrip(t *testing.T) {
+	configStore := newOAuthTestStore(t, &config.Config{Server: config.ServerConfig{
+		Mode: "oauth",
+		Secrets: config.SecretsConfig{EnvelopeEncryption: config.EnvelopeEncryptionConfig{
+			KMSBroker: config.KMSBrokerConfig{Token: "broker-token"},
+		}},
+	}})
+	brokerStore := &testKMSBrokerStore{memorySecretStore: newMemorySecretStore()}
+	integServer := httptest.NewServer(NewServer(configStore, brokerStore, slog.Default()).Handler())
+	defer integServer.Close()
+
+	brokerClient, err := secrets.NewKMSBrokerClient(integServer.URL, "broker-token", integServer.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyValues := newMemorySecretStore()
+	proxyStore, err := secrets.NewAWSKMSEnvelopeStore(proxyValues, brokerClient, secrets.AWSKMSEnvelopeOptions{
+		KeyID:             "broker",
+		CacheTTL:          0,
+		CacheMaxEntries:   0,
+		EncryptionContext: map[string]string{"environment": "ignored-by-broker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proxyStore.Put(context.Background(), "alice", "access_token", "secret-token"); err != nil {
+		t.Fatal(err)
+	}
+	stored := proxyValues.values["alice:access_token"]
+	if stored == "secret-token" || strings.Contains(stored, "secret-token") {
+		t.Fatal("proxy SQLite-equivalent store contains plaintext")
+	}
+	got, ok, err := proxyStore.Get(context.Background(), "alice", "access_token")
+	if err != nil || !ok || got != "secret-token" {
+		t.Fatalf("unexpected broker envelope result: got=%q ok=%v err=%v", got, ok, err)
 	}
 }
 
@@ -1684,6 +1773,25 @@ func newOAuthTestStore(t *testing.T, cfg *config.Config) *config.Store {
 
 type memorySecretStore struct {
 	values map[string]string
+}
+
+type testKMSBrokerStore struct {
+	*memorySecretStore
+	credentialID string
+	key          string
+}
+
+func (s *testKMSBrokerStore) BrokerGenerateDataKey(_ context.Context, credentialID, key string) ([]byte, []byte, error) {
+	s.credentialID, s.key = credentialID, key
+	return make([]byte, 32), []byte("kms-ciphertext"), nil
+}
+
+func (s *testKMSBrokerStore) BrokerDecryptDataKey(_ context.Context, credentialID, key string, encrypted []byte) ([]byte, error) {
+	s.credentialID, s.key = credentialID, key
+	if string(encrypted) != "kms-ciphertext" {
+		return nil, fmt.Errorf("unexpected encrypted DEK")
+	}
+	return make([]byte, 32), nil
 }
 
 func newMemorySecretStore() *memorySecretStore {

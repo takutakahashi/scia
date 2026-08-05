@@ -47,6 +47,33 @@ type EnvelopeStore struct {
 	cache             *dekCache
 }
 
+// BrokerGenerateDataKey uses the integ server's configured KMS key and
+// encryption context. Callers can identify a record but cannot choose a KMS
+// key or override the server-owned context.
+func (s *EnvelopeStore) BrokerGenerateDataKey(ctx context.Context, credentialID, key string) ([]byte, []byte, error) {
+	generated, err := s.kms.GenerateDataKey(ctx, &kms.GenerateDataKeyInput{
+		KeyId:             aws.String(s.keyID),
+		KeySpec:           types.DataKeySpecAes256,
+		EncryptionContext: s.kmsEncryptionContext(credentialID, key),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return generated.Plaintext, generated.CiphertextBlob, nil
+}
+
+func (s *EnvelopeStore) BrokerDecryptDataKey(ctx context.Context, credentialID, key string, encryptedDEK []byte) ([]byte, error) {
+	decrypted, err := s.kms.Decrypt(ctx, &kms.DecryptInput{
+		CiphertextBlob:    encryptedDEK,
+		EncryptionContext: s.kmsEncryptionContext(credentialID, key),
+		KeyId:             aws.String(s.keyID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return decrypted.Plaintext, nil
+}
+
 func NewAWSKMSEnvelopeStore(store Store, client awsKMSClient, options AWSKMSEnvelopeOptions) (*EnvelopeStore, error) {
 	if store == nil {
 		return nil, fmt.Errorf("store is required")

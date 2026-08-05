@@ -188,6 +188,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/integrations", s.frontendIntegrations)
 	mux.HandleFunc("/api/services", s.serviceMetadataList)
 	mux.HandleFunc("/api/services/", s.serviceMetadata)
+	mux.HandleFunc("/api/kms/data-key/generate", s.kmsBroker)
+	mux.HandleFunc("/api/kms/data-key/decrypt", s.kmsBroker)
 	mux.HandleFunc("/oauth/google/start", s.startGoogle)
 	mux.HandleFunc("/oauth/google/callback", s.googleCallback)
 	mux.HandleFunc("/oauth/google/token", s.googleToken)
@@ -207,6 +209,74 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/oauth/github/revoke", s.githubRevoke)
 	mux.HandleFunc("/oauth/", s.genericOAuth)
 	return mux
+}
+
+type kmsDataKeyBroker interface {
+	BrokerGenerateDataKey(context.Context, string, string) ([]byte, []byte, error)
+	BrokerDecryptDataKey(context.Context, string, string, []byte) ([]byte, error)
+}
+
+func (s *Server) kmsBroker(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	brokerToken := config.HeaderValueFromEnv(s.store.Get().Server.Secrets.EnvelopeEncryption.KMSBroker.Token)
+	if brokerToken == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if !config.IsAuthorizedBearerToken(r, brokerToken) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	broker, ok := s.secrets.(kmsDataKeyBroker)
+	if !ok {
+		http.Error(w, "KMS broker is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var request secrets.KMSBrokerRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err := decoder.Decode(&request); err != nil || request.CredentialID == "" || request.Key == "" {
+		http.Error(w, "invalid KMS broker request", http.StatusBadRequest)
+		return
+	}
+	response := secrets.KMSBrokerResponse{}
+	var plaintext []byte
+	var err error
+	switch r.URL.Path {
+	case "/api/kms/data-key/generate":
+		var encrypted []byte
+		plaintext, encrypted, err = broker.BrokerGenerateDataKey(r.Context(), request.CredentialID, request.Key)
+		response.EncryptedDEK = base64.RawStdEncoding.EncodeToString(encrypted)
+	case "/api/kms/data-key/decrypt":
+		var encrypted []byte
+		encrypted, err = base64.RawStdEncoding.DecodeString(request.EncryptedDEK)
+		if err == nil && len(encrypted) > 0 {
+			plaintext, err = broker.BrokerDecryptDataKey(r.Context(), request.CredentialID, request.Key, encrypted)
+		} else {
+			err = fmt.Errorf("invalid encrypted data key")
+		}
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil || len(plaintext) != 32 {
+		zeroSecretBytes(plaintext)
+		s.logger.Error("KMS broker operation failed", "error", err)
+		http.Error(w, "KMS broker operation failed", http.StatusBadGateway)
+		return
+	}
+	response.PlaintextDEK = base64.RawStdEncoding.EncodeToString(plaintext)
+	zeroSecretBytes(plaintext)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, response)
+}
+
+func zeroSecretBytes(value []byte) {
+	for i := range value {
+		value[i] = 0
+	}
 }
 
 func (s *Server) ListenAddr() string {

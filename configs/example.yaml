@@ -97,14 +97,12 @@ server:
   secrets:
     sqlitePath: "data/scia-secrets.db"
     envelopeEncryption:
-      provider: aws-kms
+      provider: kms-broker
       cacheTTL: 5m
       cacheMaxEntries: 1000
-      encryptionContext:
-        environment: development
-      awsKms:
-        keyId: "env:SCIA_AWS_KMS_KEY_ID"
-        # region: us-east-1 # or set AWS_REGION
+      kmsBroker:
+        url: "env:SCIA_KMS_BROKER_URL"
+        token: "env:SCIA_KMS_BROKER_TOKEN"
     # mode: "external"
     # external:
     #   webhook:
