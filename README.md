@@ -46,6 +46,11 @@ SCIA_ADMIN_TOKEN="$(openssl rand -hex 32)" go run ./cmd/scia -config configs/exa
 
 Configure an HTTP client to use `http://127.0.0.1:8080` as its proxy.
 
+Open `http://127.0.0.1:8080/` for the built-in demo console. Enter the same
+admin token to inspect credential status, register tokens, download the local
+CA certificate, and approve or deny pending requests. The token is retained in
+the browser tab only (`sessionStorage`) and is never embedded in the page.
+
 Admin endpoints:
 
 - `GET /_scia/healthz`

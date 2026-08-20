@@ -82,6 +82,10 @@ func NewHandler(store *config.Store, secretStore secrets.Store, approvals *appro
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !r.URL.IsAbs() && r.Method == http.MethodGet && r.URL.Path == "/" {
+		http.Redirect(w, r, "/_scia/", http.StatusTemporaryRedirect)
+		return
+	}
 	if !r.URL.IsAbs() && strings.HasPrefix(r.URL.Path, "/_scia/") {
 		h.serveAdmin(w, r)
 		return
@@ -836,6 +840,10 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 	adminToken, ok := config.AdminToken(cfg.Server.AdminToken)
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	if r.Method == http.MethodGet && (r.URL.Path == "/_scia/" || r.URL.Path == "/_scia/ui") {
+		serveAdminUI(w)
 		return
 	}
 	if !config.IsAuthorizedBearerToken(r, adminToken) {

@@ -1464,6 +1464,57 @@ server:
 	}
 }
 
+func TestAdminUIServedWithoutAuthorizationHeader(t *testing.T) {
+	dir := t.TempDir()
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")))
+	defer proxyServer.Close()
+
+	resp, err := http.Get(proxyServer.URL + "/_scia/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("unexpected content type: %q", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "scia console") {
+		t.Fatalf("admin UI marker not found in body")
+	}
+}
+
+func TestRootRedirectsToAdminUI(t *testing.T) {
+	proxyServer := newTestProxy(t, "")
+	defer proxyServer.Close()
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(proxyServer.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("unexpected status: %s", resp.Status)
+	}
+	if location := resp.Header.Get("Location"); location != "/_scia/" {
+		t.Fatalf("unexpected redirect location: %q", location)
+	}
+}
+
 func TestAdminPutTokenValidatesRequest(t *testing.T) {
 	secretStore := newRecordingSecretStore()
 	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
