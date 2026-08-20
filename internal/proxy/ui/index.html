@@ -54,13 +54,13 @@
       <div class="panel section"><div class="section-head"><div><h3>Credential status</h3><div class="hint">scia が管理している接続先</div></div><span class="count" id="credentialCount">0</span></div><div class="list" id="credentials"><div class="empty">Admin token を入力して接続してください</div></div>
         <form id="tokenForm"><label><span>Credential ID</span><input name="credentialId" required placeholder="example-api"></label><label><span>保存キー / Input ID</span><input name="key" required list="tokenKeys" value="access_token" placeholder="token"><datalist id="tokenKeys"><option value="access_token"><option value="refresh_token"></datalist></label><label class="full"><span>Token / secret</span><input name="token" type="password" required autocomplete="off" placeholder="値は画面に再表示されません"></label><button class="btn full" type="submit">認証情報を保存</button></form>
       </div>
-      <div class="panel section"><div class="section-head"><div><h3>Approval queue</h3><div class="hint">5 秒ごとに自動更新</div></div><span class="count" id="approvalCount">0</span></div><div class="list" id="approvals"><div class="empty">接続すると承認待ちを表示します</div></div></div>
+      <div class="panel section"><div class="section-head"><div><h3>Approval queue</h3><div class="hint">必要なタイミングで手動更新</div></div><div class="actions"><span class="count" id="approvalCount">0</span><button class="btn secondary" id="refresh" type="button">更新</button></div></div><div class="list" id="approvals"><div class="empty">接続すると承認待ちを表示します</div></div></div>
     </section>
   </main>
   <div class="toast" id="toast"></div>
   <script>
     const $ = (s) => document.querySelector(s);
-    const state = { token: sessionStorage.getItem('scia.adminToken') || '', timer: null };
+    const state = { token: sessionStorage.getItem('scia.adminToken') || '' };
     $('#proxyUrl').textContent = location.origin;
     $('#token').value = state.token;
     function toast(message, error=false) { const el=$('#toast'); el.textContent=message; el.className='toast show'+(error?' error':''); clearTimeout(el._t); el._t=setTimeout(()=>el.className='toast',3000); }
@@ -75,12 +75,12 @@
     function renderCredentials(items) { $('#credentialCount').textContent=items.length; $('#credentials').innerHTML=items.length?items.map(item=>`<div class="item"><div><div class="item-title">${esc(item.credential_id)}</div><div class="meta">credential</div></div><span class="badge ${item.authenticated?'ok':''}">${item.authenticated?'CONNECTED':'NOT SET'}</span></div>`).join(''):'<div class="empty">設定済み Credential はありません</div>'; }
     function renderApprovals(items) { $('#approvalCount').textContent=items.length; $('#approvals').innerHTML=items.length?items.map(item=>`<div class="item"><div><div class="item-title">${esc(item.method)} · ${esc(item.url)}</div><div class="meta">${esc(item.rule)}${item.note?' — '+esc(item.note):''}</div></div><div class="actions"><button class="btn approve" data-id="${esc(item.id)}">承認</button><button class="btn danger deny" data-id="${esc(item.id)}">拒否</button></div></div>`).join(''):'<div class="empty">承認待ちのリクエストはありません</div>'; }
     $('#connect').addEventListener('click',()=>{ state.token=$('#token').value.trim(); if(state.token) sessionStorage.setItem('scia.adminToken',state.token); else sessionStorage.removeItem('scia.adminToken'); refresh(true); });
+    $('#refresh').addEventListener('click',()=>refresh(true));
     $('#token').addEventListener('keydown',(event)=>{ if(event.key==='Enter') $('#connect').click(); });
     $('#caLink').addEventListener('click',(event)=>{ event.preventDefault(); fetch('/_scia/ca.pem',{headers:{Authorization:'Bearer '+state.token}}).then(r=>{if(!r.ok)throw new Error('download failed');return r.blob()}).then(blob=>{const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='scia-ca.pem';a.click();URL.revokeObjectURL(a.href)}).catch(error=>toast(error.message,true)); });
     $('#tokenForm').addEventListener('submit',async(event)=>{ event.preventDefault(); const data=Object.fromEntries(new FormData(event.currentTarget)); try { await api('/_scia/tokens',{method:'POST',body:JSON.stringify(data)}); event.currentTarget.querySelector('[name="token"]').value=''; toast('認証情報を保存しました'); refresh(); } catch(error) { toast('保存できません: '+error.message,true); } });
     $('#approvals').addEventListener('click',async(event)=>{ const button=event.target.closest('[data-id]'); if(!button)return; const action=button.classList.contains('approve')?'approve':'deny'; try { await api(`/_scia/approvals/${encodeURIComponent(button.dataset.id)}/${action}`,{method:'POST'}); toast(action==='approve'?'リクエストを承認しました':'リクエストを拒否しました'); refresh(); } catch(error) { toast(error.message,true); } });
     if(state.token) refresh();
-    state.timer=setInterval(()=>refresh(),5000);
   </script>
 </body>
 </html>

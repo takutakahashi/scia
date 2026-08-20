@@ -60,7 +60,8 @@ server:
 
 Configured services and service metadata added dynamically through the token
 API or the OAuth metadata cache are included in the credential list. This
-supports both OAuth and parameter-based integrations.
+supports both OAuth and parameter-based integrations. Use the console's refresh
+button to fetch changes; it does not poll automatically.
 
 Admin endpoints:
 
