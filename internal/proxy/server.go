@@ -1001,7 +1001,8 @@ func (h *Handler) adminCredentialStoredToken(ctx context.Context, cfg *config.Co
 			keys = service.InputSecretKeys()
 		}
 		for _, key := range keys {
-			if _, found, err := h.secrets.Get(ctx, storageID, key); err != nil || !found {
+			storageKey := adminTokenStorageKey(cfg, storageID, cred.ID, key)
+			if _, found, err := h.secrets.Get(ctx, storageID, storageKey); err != nil || !found {
 				return false, err
 			}
 		}
@@ -1060,7 +1061,20 @@ func (h *Handler) serveAdminPutToken(w http.ResponseWriter, r *http.Request) {
 		}
 		serviceToStore = &normalized
 	}
-	if err := h.secrets.Put(r.Context(), req.CredentialID, req.Key, value); err != nil {
+	storageID := strings.TrimSpace(req.User)
+	if storageID == "" {
+		if cred, found, lookupErr := h.adminCredentialByID(r.Context(), cfg, req.CredentialID); lookupErr != nil {
+			http.Error(w, "failed to resolve credential", http.StatusBadGateway)
+			return
+		} else if found {
+			storageID = config.CredentialUserID(cfg, cred)
+		}
+	}
+	if storageID == "" {
+		storageID = req.CredentialID
+	}
+	storageKey := adminTokenStorageKey(cfg, storageID, req.CredentialID, req.Key)
+	if err := h.secrets.Put(r.Context(), storageID, storageKey, value); err != nil {
 		h.logger.Error("failed to store token", "error", err, "credential_id", req.CredentialID, "key", req.Key)
 		http.Error(w, "failed to store token", http.StatusBadGateway)
 		return

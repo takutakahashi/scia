@@ -1558,6 +1558,60 @@ func TestAdminPutTokenValidatesRequest(t *testing.T) {
 	}
 }
 
+func TestAdminPutParameterTokenUsesKubernetesStorageKey(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	dir := t.TempDir()
+	proxyServer := newTestProxyWithSecretStore(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+  secrets:
+    mode: kubernetes
+    kubernetes:
+      namespace: scia
+      dynamicUsers: true
+  services:
+    demo-api:
+      hosts:
+        - host: demo.local
+          authMethod: bearer
+      inputs:
+        - id: token
+          type: secret
+          required: true
+          secretKey: access_token
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")), secretStore)
+	defer proxyServer.Close()
+
+	resp, err := adminPost(proxyServer.URL+"/_scia/tokens", "application/json", strings.NewReader(`{"credentialId":"demo-api","key":"token","token":"demo-token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	if got := secretStore.value("demo-api", "demo-api.access_token"); got != "demo-token" {
+		t.Fatalf("unexpected stored token: %q", got)
+	}
+
+	statusResp, err := adminGet(proxyServer.URL + "/_scia/credentials/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statusResp.Body.Close()
+	var body adminCredentialStatusResponse
+	if err := json.NewDecoder(statusResp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if got := credentialStatusByID(body.Credentials)["demo-api"]; !got.Authenticated {
+		t.Fatalf("unexpected parameter credential status: %#v", got)
+	}
+}
+
 func TestAdminCredentialStatusReportsStoredTokens(t *testing.T) {
 	secretStore := newRecordingSecretStore()
 	if err := secretStore.Put(context.Background(), "google-calendar", "refresh_token", "google-refresh-token"); err != nil {
