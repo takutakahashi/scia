@@ -77,6 +77,7 @@ type ServerConfig struct {
 	Mode            string                `yaml:"mode"`
 	Listen          string                `yaml:"listen"`
 	AdminToken      string                `yaml:"adminToken"`
+	AdminUI         AdminUIConfig         `yaml:"adminUI"`
 	ApprovalTimeout Duration              `yaml:"approvalTimeout"`
 	MITM            MITMConfig            `yaml:"mitm"`
 	BackendProxy    BackendProxyConfig    `yaml:"backendProxy"`
@@ -85,6 +86,10 @@ type ServerConfig struct {
 	OAuth           OAuthConfig           `yaml:"oauth"`
 	Secrets         SecretsConfig         `yaml:"secrets"`
 	Users           map[string]UserConfig `yaml:"users"`
+}
+
+type AdminUIConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type UserConfig struct {

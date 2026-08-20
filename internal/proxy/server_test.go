@@ -1469,6 +1469,8 @@ func TestAdminUIServedWithoutAuthorizationHeader(t *testing.T) {
 	proxyServer := newTestProxy(t, fmt.Sprintf(`
 server:
   adminToken: test-admin-token
+  adminUI:
+    enabled: true
   mitm:
     caCertPath: "%s"
     caKeyPath: "%s"
@@ -1496,7 +1498,16 @@ server:
 }
 
 func TestRootRedirectsToAdminUI(t *testing.T) {
-	proxyServer := newTestProxy(t, "")
+	dir := t.TempDir()
+	proxyServer := newTestProxy(t, fmt.Sprintf(`
+server:
+  adminToken: test-admin-token
+  adminUI:
+    enabled: true
+  mitm:
+    caCertPath: "%s"
+    caKeyPath: "%s"
+`, filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")))
 	defer proxyServer.Close()
 
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -1512,6 +1523,20 @@ func TestRootRedirectsToAdminUI(t *testing.T) {
 	}
 	if location := resp.Header.Get("Location"); location != "/_scia/" {
 		t.Fatalf("unexpected redirect location: %q", location)
+	}
+}
+
+func TestAdminUIDisabledByDefault(t *testing.T) {
+	proxyServer := newTestProxy(t, "")
+	defer proxyServer.Close()
+
+	resp, err := http.Get(proxyServer.URL + "/_scia/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unexpected status: %s", resp.Status)
 	}
 }
 
@@ -1651,6 +1676,45 @@ func TestAdminCredentialStatusReportsSecretStoredServiceMetadata(t *testing.T) {
 	got := credentialStatusByID(body.Credentials)
 	if !got["mock-dex-api"].Authenticated {
 		t.Fatalf("unexpected stored service status: %#v", got["mock-dex-api"])
+	}
+}
+
+func TestAdminCredentialStatusReportsDynamicParameterService(t *testing.T) {
+	secretStore := newRecordingSecretStore()
+	service := config.ServiceConfig{
+		Hosts: []config.ServiceHostRule{{Host: "api.dynamic.example"}},
+		Inputs: []config.ServiceInputConfig{{
+			ID:        "token",
+			Type:      "secret",
+			Required:  true,
+			SecretKey: "access_token",
+		}},
+	}
+	if err := serviceinfo.Put(context.Background(), secretStore, "dynamic-api", service); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Put(context.Background(), "dynamic-api", "access_token", "dynamic-token"); err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := newTestProxyWithSecretStore(t, "", secretStore)
+	defer proxyServer.Close()
+
+	resp, err := adminGet(proxyServer.URL + "/_scia/credentials/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status: %s body=%s", resp.Status, string(responseBody))
+	}
+	var body adminCredentialStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	got := credentialStatusByID(body.Credentials)
+	if !got["dynamic-api"].Authenticated {
+		t.Fatalf("unexpected dynamic parameter status: %#v", got["dynamic-api"])
 	}
 }
 

@@ -82,7 +82,7 @@ func NewHandler(store *config.Store, secretStore secrets.Store, approvals *appro
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !r.URL.IsAbs() && r.Method == http.MethodGet && r.URL.Path == "/" {
+	if !r.URL.IsAbs() && r.Method == http.MethodGet && r.URL.Path == "/" && h.store.Get().Server.AdminUI.Enabled {
 		http.Redirect(w, r, "/_scia/", http.StatusTemporaryRedirect)
 		return
 	}
@@ -842,7 +842,7 @@ func (h *Handler) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if r.Method == http.MethodGet && (r.URL.Path == "/_scia/" || r.URL.Path == "/_scia/ui") {
+	if cfg.Server.AdminUI.Enabled && r.Method == http.MethodGet && (r.URL.Path == "/_scia/" || r.URL.Path == "/_scia/ui") {
 		serveAdminUI(w)
 		return
 	}
@@ -931,19 +931,20 @@ func (h *Handler) adminStatusCredentials(ctx context.Context, cfg *config.Config
 		credentials = append(credentials, cred)
 		seen[cred.ID] = struct{}{}
 	}
-	for _, service := range cfg.Server.Services {
-		if service.OAuth == nil || service.OAuth.CredentialID == "" {
+	for serviceID, service := range cfg.Server.Services {
+		credentialID, credentialType, ok := serviceStatusCredential(serviceID, service)
+		if !ok {
 			continue
 		}
-		if _, ok := seen[service.OAuth.CredentialID]; ok {
+		if _, ok := seen[credentialID]; ok {
 			continue
 		}
 		credentials = append(credentials, config.CredentialConfig{
-			ID:     service.OAuth.CredentialID,
-			Type:   "service-oauth",
+			ID:     credentialID,
+			Type:   credentialType,
 			Params: map[string]string{},
 		})
-		seen[service.OAuth.CredentialID] = struct{}{}
+		seen[credentialID] = struct{}{}
 	}
 	storedIDs, err := serviceinfo.ListIDs(ctx, h.secrets)
 	if err != nil {
@@ -954,23 +955,58 @@ func (h *Handler) adminStatusCredentials(ctx context.Context, cfg *config.Config
 		if err != nil {
 			return nil, err
 		}
-		if !ok || service.OAuth == nil || service.OAuth.CredentialID == "" {
+		if !ok {
 			continue
 		}
-		if _, ok := seen[service.OAuth.CredentialID]; ok {
+		credentialID, credentialType, ok := serviceStatusCredential(serviceID, service)
+		if !ok {
+			continue
+		}
+		if _, ok := seen[credentialID]; ok {
 			continue
 		}
 		credentials = append(credentials, config.CredentialConfig{
-			ID:     service.OAuth.CredentialID,
-			Type:   "generic-oauth",
+			ID:     credentialID,
+			Type:   credentialType,
 			Params: map[string]string{},
 		})
-		seen[service.OAuth.CredentialID] = struct{}{}
+		seen[credentialID] = struct{}{}
 	}
 	return credentials, nil
 }
 
+func serviceStatusCredential(serviceID string, service config.ServiceConfig) (string, string, bool) {
+	if service.OAuth != nil && service.OAuth.CredentialID != "" {
+		return service.OAuth.CredentialID, "service-oauth", true
+	}
+	if service.ParameterService() {
+		return serviceID, "service-parameters", true
+	}
+	return "", "", false
+}
+
 func (h *Handler) adminCredentialStoredToken(ctx context.Context, cfg *config.Config, cred config.CredentialConfig, storageID string) (bool, error) {
+	if cred.Type == "service-parameters" {
+		service, ok := h.parameterServiceForCredential(ctx, cfg, cred.ID)
+		if !ok {
+			return false, nil
+		}
+		keys := make([]string, 0, len(service.Inputs))
+		for _, input := range service.Inputs {
+			if input.Type == "secret" && input.Required {
+				keys = append(keys, input.SecretKey)
+			}
+		}
+		if len(keys) == 0 {
+			keys = service.InputSecretKeys()
+		}
+		for _, key := range keys {
+			if _, found, err := h.secrets.Get(ctx, storageID, key); err != nil || !found {
+				return false, err
+			}
+		}
+		return len(keys) > 0, nil
+	}
 	keys := []string{"refresh_token", "access_token"}
 	for _, key := range keys {
 		storageKey := adminTokenStorageKey(cfg, storageID, cred.ID, key)

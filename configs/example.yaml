@@ -2,6 +2,8 @@ server:
   mode: "proxy"
   listen: "127.0.0.1:8080"
   adminToken: "env:SCIA_ADMIN_TOKEN"
+  adminUI:
+    enabled: true
   approvalTimeout: "5m"
   mitm:
     caCertPath: "data/scia-ca.pem"
