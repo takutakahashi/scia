@@ -1,0 +1,195 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scia-demo
+  namespace: scia
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scia-demo-secrets
+  namespace: scia
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scia-demo-secrets
+  namespace: scia
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scia-demo-secrets
+subjects:
+  - kind: ServiceAccount
+    name: scia-demo
+    namespace: scia
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scia-demo-config
+  namespace: scia
+data:
+  config.yaml: |
+    server:
+      mode: proxy
+      listen: "0.0.0.0:8080"
+      adminToken: "env:SCIA_ADMIN_TOKEN"
+      adminUI:
+        enabled: true
+      approvalTimeout: "5m"
+      mitm:
+        caCertPath: "/tmp/scia-ca.pem"
+        caKeyPath: "/tmp/scia-ca-key.pem"
+      secrets:
+        mode: kubernetes
+        kubernetes:
+          namespace: scia
+          dynamicUsers: true
+          dynamicUserSecretNamePrefix: "scia-demo-"
+      services:
+        demo-api:
+          name: "Demo API"
+          description: "Local echo endpoint for validating scia."
+          released: true
+          inputs:
+            - id: token
+              name: "Demo token"
+              description: "Injected into requests sent to the demo upstream."
+              type: secret
+              required: true
+              secretKey: access_token
+          hosts:
+            - host: scia-demo-upstream
+              authMethod: bearer
+    rules:
+      - name: allow-demo-reads
+        hosts: ["scia-demo-upstream"]
+        methods: ["GET"]
+        paths: ["/*"]
+        action: allow
+        services: ["demo-api"]
+      - name: approve-demo-writes
+        hosts: ["scia-demo-upstream"]
+        methods: ["POST", "PUT", "PATCH", "DELETE"]
+        paths: ["/*"]
+        action: approval
+        services: ["demo-api"]
+        approvalNote: "Demo writes require operator approval."
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scia-demo
+  namespace: scia
+  labels:
+    app.kubernetes.io/name: scia-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scia-demo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scia-demo
+    spec:
+      serviceAccountName: scia-demo
+      containers:
+        - name: scia
+          image: ghcr.io/takutakahashi/scia:dev-c0590a7
+          imagePullPolicy: Always
+          args: ["-config", "/config/config.yaml"]
+          env:
+            - name: SCIA_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: scia-demo-admin
+                  key: token
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: scia-demo-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scia-demo
+  namespace: scia
+spec:
+  selector:
+    app.kubernetes.io/name: scia-demo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scia-demo-upstream
+  namespace: scia
+  labels:
+    app.kubernetes.io/name: scia-demo-upstream
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scia-demo-upstream
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scia-demo-upstream
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.11.0
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scia-demo-upstream
+  namespace: scia
+spec:
+  selector:
+    app.kubernetes.io/name: scia-demo-upstream
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

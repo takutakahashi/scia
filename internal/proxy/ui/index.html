@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>scia console</title>
+  <style>
+    :root { --bg:#090d0c; --panel:#111816; --panel2:#151e1b; --line:#26352f; --text:#edf5f1; --muted:#8da49a; --green:#55e6a5; --green2:#173b2d; --red:#ff7d7d; --amber:#ffc766; --shadow:0 20px 60px rgba(0,0,0,.28); }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at 18% 0%,#183126 0,transparent 31%),var(--bg); color:var(--text); font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif; }
+    button,input,select { font:inherit; }
+    button { cursor:pointer; }
+    .shell { width:min(1180px,calc(100% - 32px)); margin:auto; padding:28px 0 64px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:24px; margin-bottom:34px; }
+    .brand { display:flex; align-items:center; gap:13px; }
+    .mark { width:42px; height:42px; display:grid; place-items:center; border:1px solid #3b6554; border-radius:12px; background:linear-gradient(145deg,#1c3f30,#102018); color:var(--green); font:700 18px ui-monospace,monospace; box-shadow:var(--shadow); }
+    h1 { margin:0; font-size:19px; letter-spacing:.02em; } .tagline { color:var(--muted); font-size:12px; }
+    .connect { display:flex; align-items:center; gap:10px; }
+    .token { width:260px; border:1px solid var(--line); border-radius:9px; padding:10px 12px; color:var(--text); background:#0b110f; outline:none; }
+    .token:focus { border-color:#4f9d7b; box-shadow:0 0 0 3px rgba(85,230,165,.08); }
+    .btn { border:1px solid transparent; border-radius:9px; padding:9px 14px; color:#06110c; background:var(--green); font-weight:700; }
+    .btn:hover { filter:brightness(1.08); } .btn.secondary { color:var(--text); background:#17221e; border-color:var(--line); } .btn.danger { color:#ffb3b3; background:#2c1818; border-color:#573030; }
+    .status { display:inline-flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; } .dot { width:7px; height:7px; border-radius:50%; background:#53635c; } .online .dot { background:var(--green); box-shadow:0 0 0 4px rgba(85,230,165,.1); } .online { color:#b9d7ca; }
+    .hero { display:grid; grid-template-columns:1.3fr .7fr; gap:16px; margin-bottom:16px; }
+    .panel { border:1px solid var(--line); border-radius:16px; background:linear-gradient(150deg,rgba(20,30,27,.96),rgba(13,19,17,.96)); box-shadow:var(--shadow); }
+    .intro { padding:28px; min-height:190px; } .eyebrow { color:var(--green); font:600 11px ui-monospace,monospace; letter-spacing:.12em; text-transform:uppercase; }
+    h2 { max-width:620px; margin:12px 0 8px; font-size:clamp(25px,4vw,40px); line-height:1.12; letter-spacing:-.035em; } .intro p { max-width:650px; color:var(--muted); margin:0; }
+    .quick { padding:24px; display:flex; flex-direction:column; justify-content:space-between; } .quick code { display:block; margin:15px 0; padding:12px; border:1px solid var(--line); border-radius:8px; background:#090e0c; color:#b9d7ca; overflow:auto; font-size:12px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; } .section { padding:22px; min-height:300px; }
+    .section-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:18px; } h3 { margin:0; font-size:16px; } .hint { color:var(--muted); font-size:12px; margin-top:3px; }
+    .count { min-width:26px; padding:3px 8px; border-radius:99px; text-align:center; color:var(--green); background:var(--green2); font:600 12px ui-monospace,monospace; }
+    .list { display:grid; gap:9px; } .empty { padding:34px 12px; text-align:center; color:var(--muted); border:1px dashed var(--line); border-radius:11px; }
+    .item { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:13px 14px; border:1px solid var(--line); border-radius:11px; background:rgba(10,15,13,.55); }
+    .item-title { font-weight:650; overflow-wrap:anywhere; } .meta { color:var(--muted); font-size:12px; } .badge { padding:4px 8px; border-radius:99px; background:#232b28; color:var(--muted); font-size:11px; white-space:nowrap; } .badge.ok { color:var(--green); background:var(--green2); }
+    .actions { display:flex; gap:7px; flex-shrink:0; } .actions .btn { padding:6px 10px; font-size:12px; }
+    form { display:grid; grid-template-columns:1fr 1fr; gap:11px; margin-top:18px; padding-top:18px; border-top:1px solid var(--line); } label { color:var(--muted); font-size:11px; } label span { display:block; margin-bottom:5px; }
+    form input, form select { width:100%; border:1px solid var(--line); border-radius:8px; padding:9px 10px; background:#0a0f0d; color:var(--text); outline:none; } .full { grid-column:1/-1; } form .btn { justify-self:start; }
+    .toast { position:fixed; right:20px; bottom:20px; max-width:360px; padding:12px 15px; border:1px solid #365746; border-radius:10px; background:#13241c; box-shadow:var(--shadow); transform:translateY(90px); opacity:0; transition:.2s; } .toast.show { transform:none; opacity:1; } .toast.error { color:#ffc0c0; border-color:#6a3434; background:#2c1717; }
+    @media(max-width:800px) { header { align-items:flex-start; flex-direction:column; } .connect { width:100%; flex-wrap:wrap; } .token { flex:1; min-width:190px; } .hero,.grid { grid-template-columns:1fr; } .quick { min-height:170px; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand"><div class="mark">S:</div><div><h1>scia console</h1><div class="tagline">Credential-aware proxy control plane</div></div></div>
+      <div class="connect"><span class="status" id="status"><i class="dot"></i><span>未接続</span></span><input class="token" id="token" type="password" autocomplete="off" placeholder="Admin token"><button class="btn" id="connect">接続</button></div>
+    </header>
+    <section class="hero">
+      <div class="panel intro"><div class="eyebrow">local operator console</div><h2>エージェントの外部アクセスを、見える状態に。</h2><p>認証情報はエージェントへ渡さず、scia が注入。承認が必要なリクエストもこの画面で安全に判断できます。</p></div>
+      <div class="panel quick"><div><div class="eyebrow">proxy endpoint</div><code id="proxyUrl">http://127.0.0.1:8080</code></div><a class="btn secondary" href="/_scia/ca.pem" id="caLink">CA 証明書をダウンロード</a></div>
+    </section>
+    <section class="grid">
+      <div class="panel section"><div class="section-head"><div><h3>Credential status</h3><div class="hint">scia が管理している接続先</div></div><span class="count" id="credentialCount">0</span></div><div class="list" id="credentials"><div class="empty">Admin token を入力して接続してください</div></div>
+        <form id="tokenForm"><label><span>Credential ID</span><input name="credentialId" required placeholder="example-api"></label><label><span>保存キー / Input ID</span><input name="key" required list="tokenKeys" value="access_token" placeholder="token"><datalist id="tokenKeys"><option value="access_token"><option value="refresh_token"></datalist></label><label class="full"><span>Token / secret</span><input name="token" type="password" required autocomplete="off" placeholder="値は画面に再表示されません"></label><button class="btn full" type="submit">認証情報を保存</button></form>
+      </div>
+      <div class="panel section"><div class="section-head"><div><h3>Approval queue</h3><div class="hint">必要なタイミングで手動更新</div></div><div class="actions"><span class="count" id="approvalCount">0</span><button class="btn secondary" id="refresh" type="button">更新</button></div></div><div class="list" id="approvals"><div class="empty">接続すると承認待ちを表示します</div></div></div>
+    </section>
+  </main>
+  <div class="toast" id="toast"></div>
+  <script>
+    const $ = (s) => document.querySelector(s);
+    const state = { token: sessionStorage.getItem('scia.adminToken') || '' };
+    $('#proxyUrl').textContent = location.origin;
+    $('#token').value = state.token;
+    function toast(message, error=false) { const el=$('#toast'); el.textContent=message; el.className='toast show'+(error?' error':''); clearTimeout(el._t); el._t=setTimeout(()=>el.className='toast',3000); }
+    async function api(path, options={}) { const headers={...(options.headers||{}), Authorization:'Bearer '+state.token}; if(options.body) headers['Content-Type']='application/json'; const response=await fetch(path,{...options,headers}); if(!response.ok) throw new Error((await response.text()).trim() || response.statusText); return response.status===204?null:response.json(); }
+    function esc(value) { const el=document.createElement('span'); el.textContent=value??''; return el.innerHTML; }
+    function setConnected(ok) { $('#status').className='status'+(ok?' online':''); $('#status span').textContent=ok?'接続済み':'未接続'; }
+    async function refresh(showError=false) {
+      if(!state.token) return;
+      try { const [credentialData, approvals]=await Promise.all([api('/_scia/credentials/status'),api('/_scia/approvals')]); setConnected(true); renderCredentials(credentialData.credentials||[]); renderApprovals(approvals||[]); }
+      catch(error) { setConnected(false); if(showError) toast('接続できません: '+error.message,true); }
+    }
+    function renderCredentials(items) { $('#credentialCount').textContent=items.length; $('#credentials').innerHTML=items.length?items.map(item=>`<div class="item"><div><div class="item-title">${esc(item.credential_id)}</div><div class="meta">credential</div></div><span class="badge ${item.authenticated?'ok':''}">${item.authenticated?'CONNECTED':'NOT SET'}</span></div>`).join(''):'<div class="empty">設定済み Credential はありません</div>'; }
+    function renderApprovals(items) { $('#approvalCount').textContent=items.length; $('#approvals').innerHTML=items.length?items.map(item=>`<div class="item"><div><div class="item-title">${esc(item.method)} · ${esc(item.url)}</div><div class="meta">${esc(item.rule)}${item.note?' — '+esc(item.note):''}</div></div><div class="actions"><button class="btn approve" data-id="${esc(item.id)}">承認</button><button class="btn danger deny" data-id="${esc(item.id)}">拒否</button></div></div>`).join(''):'<div class="empty">承認待ちのリクエストはありません</div>'; }
+    $('#connect').addEventListener('click',()=>{ state.token=$('#token').value.trim(); if(state.token) sessionStorage.setItem('scia.adminToken',state.token); else sessionStorage.removeItem('scia.adminToken'); refresh(true); });
+    $('#refresh').addEventListener('click',()=>refresh(true));
+    $('#token').addEventListener('keydown',(event)=>{ if(event.key==='Enter') $('#connect').click(); });
+    $('#caLink').addEventListener('click',(event)=>{ event.preventDefault(); fetch('/_scia/ca.pem',{headers:{Authorization:'Bearer '+state.token}}).then(r=>{if(!r.ok)throw new Error('download failed');return r.blob()}).then(blob=>{const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='scia-ca.pem';a.click();URL.revokeObjectURL(a.href)}).catch(error=>toast(error.message,true)); });
+    $('#tokenForm').addEventListener('submit',async(event)=>{ event.preventDefault(); const data=Object.fromEntries(new FormData(event.currentTarget)); try { await api('/_scia/tokens',{method:'POST',body:JSON.stringify(data)}); event.currentTarget.querySelector('[name="token"]').value=''; toast('認証情報を保存しました'); refresh(); } catch(error) { toast('保存できません: '+error.message,true); } });
+    $('#approvals').addEventListener('click',async(event)=>{ const button=event.target.closest('[data-id]'); if(!button)return; const action=button.classList.contains('approve')?'approve':'deny'; try { await api(`/_scia/approvals/${encodeURIComponent(button.dataset.id)}/${action}`,{method:'POST'}); toast(action==='approve'?'リクエストを承認しました':'リクエストを拒否しました'); refresh(); } catch(error) { toast(error.message,true); } });
+    if(state.token) refresh();
+  </script>
+</body>
+</html>

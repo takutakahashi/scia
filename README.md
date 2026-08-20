@@ -46,6 +46,23 @@ SCIA_ADMIN_TOKEN="$(openssl rand -hex 32)" go run ./cmd/scia -config configs/exa
 
 Configure an HTTP client to use `http://127.0.0.1:8080` as its proxy.
 
+Open `http://127.0.0.1:8080/` for the built-in demo console. Enter the same
+admin token to inspect credential status, register tokens, download the local
+CA certificate, and approve or deny pending requests. The token is retained in
+the browser tab only (`sessionStorage`) and is never embedded in the page. The
+console is disabled by default; enable it explicitly with:
+
+```yaml
+server:
+  adminUI:
+    enabled: true
+```
+
+Configured services and service metadata added dynamically through the token
+API or the OAuth metadata cache are included in the credential list. This
+supports both OAuth and parameter-based integrations. Use the console's refresh
+button to fetch changes; it does not poll automatically.
+
 Admin endpoints:
 
 - `GET /_scia/healthz`
