@@ -101,7 +101,7 @@ spec:
       serviceAccountName: scia-demo
       containers:
         - name: scia
-          image: ghcr.io/takutakahashi/scia:dev-ac4523d
+          image: ghcr.io/takutakahashi/scia:dev-c0590a7
           imagePullPolicy: Always
           args: ["-config", "/config/config.yaml"]
           env:
